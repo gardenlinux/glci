@@ -790,8 +790,8 @@ class ImageTagConfiguration:
 
 @dataclasses.dataclass
 class OcmCfg:
-    component_repository_cfg_name: str
-    overwrite_compnent_descriptor: typing.Optional[bool]
+    ocm_repository: str
+    overwrite_component_descriptor: typing.Optional[bool]
 
 @dataclasses.dataclass
 class S3_ManifestVersion:
