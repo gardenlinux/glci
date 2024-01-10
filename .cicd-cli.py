@@ -903,7 +903,7 @@ def publish_release_set():
     phase_logger.info('publishing component-descriptor')
     phase_logger.info(f'{repository_context=} {component_name=} {component_version=}')
 
-    if cfg.ocm.overwrite_compnent_descriptor:
+    if cfg.ocm.overwrite_component_descriptor:
         on_exist=cnudie.upload.UploadMode.OVERWRITE
     else:
         on_exist=cnudie.upload.UploadMode.SKIP
