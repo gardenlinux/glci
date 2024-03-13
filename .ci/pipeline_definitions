@@ -41,18 +41,3 @@ glci:
           - '--version-name'
           - 'default'
           image: europe-docker.pkg.dev/gardener-project/releases/cicd/glci-job-image:0.2.0
-    update-job-image:
-      repo:
-        trigger: false
-      traits:
-        publish:
-          dockerimages:
-            job-image:
-              image: europe-docker.pkg.dev/gardener-project/releases/cicd/glci-job-image
-              dockerfile: 'Dockerfile'
-              tag_as_latest: true
-        release:
-          release_on_github: false
-        component_descriptor:
-          component_name: 'github.com/gardenlinux/glci/utils'
-          ocm_repository: europe-docker.pkg.dev/gardener-project/releases
