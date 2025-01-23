@@ -536,6 +536,23 @@ def vm_image_artefact_for_platform(platform: glci.model.Platform) -> str:
     return platform_to_artifact_mapping[platform]
 
 
+def key_artefact_for_key_type(key_type: glci.model.Keytype) -> str:
+    key_type_to_artefact_mapping = {
+        'aws_efivars': '-secureboot.aws-efivars',
+        'pk': '-secureboot.pk.crt',
+        'kek': '-secureboot.kek.crt',
+        'db': '-secureboot.db.crt',
+        'dbx': '-secureboot.dbx.crt',
+    }
+
+    if not key_type in key_type_to_artefact_mapping:
+        raise NotImplementedError(
+            f"No key type suffix found for {key_type}"
+        )
+
+    return key_type_to_artefact_mapping[key_type]
+
+
 def package_aliases(package_alias_file: str = paths.package_alias_path) -> dict:
     with open(package_alias_file) as f:
         parsed = yaml.safe_load(f)

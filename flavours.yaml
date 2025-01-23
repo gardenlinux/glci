@@ -1,6 +1,7 @@
 ---
 flavour_sets:
   - name: 'gardener'
+    secureboot: false
     flavour_combinations:
       - architectures:
         - amd64
@@ -21,3 +22,14 @@ flavour_sets:
         - gcp
         modifiers:
         - [ gardener, _prod ]
+  - name: 'gardener-secureboot'
+    secureboot: true
+    flavour_combinations:
+      - architectures:
+        - amd64
+        platforms:
+        - aws
+        - azure
+        - gcp
+        modifiers:
+        - [ gardener, _trustedboot, _prod ]

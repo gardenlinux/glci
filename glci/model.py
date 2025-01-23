@@ -88,6 +88,8 @@ class FeatureType(enum.Enum):
 Platform = str  # see `features/*/info.yaml` / platforms() for allowed values
 Modifier = str  # see `features/*/info.yaml` / modifiers() for allowed values
 
+Keytype = str
+
 
 @dataclasses.dataclass(frozen=True)
 class Features:
@@ -202,6 +204,7 @@ class GardenlinuxFlavourSet:
     A set of gardenlinux flavours
     '''
     name: str
+    secureboot: bool
     flavour_combinations: typing.Tuple[GardenlinuxFlavourCombination, ...]
 
     def flavours(self):

@@ -688,7 +688,7 @@ def publish_to_azure_community_gallery(
     except ResourceNotFoundError:
         logger.info('Image does not exist will create it')
 
-    result = cclient.images.begin_create_or_update(
+        result = cclient.images.begin_create_or_update(
             resource_group_name=shared_gallery_cfg.resource_group_name,
             image_name=published_name,
             parameters={
@@ -703,7 +703,8 @@ def publish_to_azure_community_gallery(
                     }
                 },
             }
-    )
+        )
+
     logger.info('... waiting for operation to complete')
     result = result.result()
     logger.info(f'Image created: {result.id=}, {result.name=}, {result.type=}')
