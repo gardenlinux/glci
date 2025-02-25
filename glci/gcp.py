@@ -252,6 +252,8 @@ def upload_and_publish_image(
                 gcp_project_name=gcp_project_name,
                 release=release,
             )
+        else:
+            raise
 
     return release_manifest
 
@@ -280,7 +282,7 @@ def cleanup_image(
 
 
 def _get_image_name_from_release_manifest(release: glci.model.OnlineReleaseManifest) -> str:
-    return f'gardenlinux-{release.canonical_release_manifest_key_suffix()}'.replace(
+    return f'gardenlinux-{release.canonical_release_manifest_key_suffix(hash=True)}'.replace(
         '.', '-'
     ).replace(
         '_', '-'
