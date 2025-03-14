@@ -1,3 +1,4 @@
+import base64
 import io
 
 import dataclasses
@@ -275,26 +276,26 @@ def _create_shared_image(
         buf = io.BytesIO()
         s3_client.download_fileobj(
             Bucket=release.s3_bucket,
-            Key=release.path_by_suffix('.secureboot.pk.crt').s3_key,
+            Key=release.path_by_suffix('.secureboot.pk.der').s3_key,
             Fileobj=buf,
         )
-        pk = buf.getvalue().decode()
+        pk = base64.b64encode(buf.getvalue()).decode()
 
         buf = io.BytesIO()
         s3_client.download_fileobj(
             Bucket=release.s3_bucket,
-            Key=release.path_by_suffix('.secureboot.kek.crt').s3_key,
+            Key=release.path_by_suffix('.secureboot.kek.der').s3_key,
             Fileobj=buf,
         )
-        kek = buf.getvalue().decode()
+        kek = base64.b64encode(buf.getvalue()).decode()
 
         buf = io.BytesIO()
         s3_client.download_fileobj(
             Bucket=release.s3_bucket,
-            Key=release.path_by_suffix('.secureboot.db.crt').s3_key,
+            Key=release.path_by_suffix('.secureboot.db.der').s3_key,
             Fileobj=buf,
         )
-        db = buf.getvalue().decode()
+        db = base64.b64encode(buf.getvalue()).decode()
 
         security_profile = ImageVersionSecurityProfile(
             uefi_settings=GalleryImageVersionUefiSettings(
