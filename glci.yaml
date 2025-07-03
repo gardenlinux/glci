@@ -1,0 +1,76 @@
+flavors:
+  flavors:
+  - platform: Aliyun
+    cname: ali-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod-arm64
+  - platform: Azure
+    cname: azure-gardener_prod-amd64
+  - platform: Azure
+    cname: azure-gardener_prod-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod-arm64
+  - platform: OpenStack
+    cname: openstack-gardener_prod-amd64
+  - platform: OpenStack
+    cname: openstackbaremetal-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_usi-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_usi-arm64
+  - platform: Azure
+    cname: azure-gardener_prod_usi-amd64
+  - platform: Azure
+    cname: azure-gardener_prod_usi-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod_usi-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod_usi-arm64
+  - platform: AWS
+    cname: aws-gardener_prod_tpm2_trustedboot-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_tpm2_trustedboot-arm64
+  - platform: Azure
+    cname: azure-gardener_prod_tpm2_trustedboot-amd64
+  - platform: Azure
+    cname: azure-gardener_prod_tpm2_trustedboot-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod_tpm2_trustedboot-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod_tpm2_trustedboot-arm64
+publishing:
+  manifest_source: S3
+  sources:
+  - id: S3
+    type: AWS
+    bucket: gardenlinux-github-releases
+    config: gardenlinux
+  - id: S3-China
+    type: AWS
+    bucket: gardenlinux-github-releases
+    config: gardenlinux-cn
+  targets:
+  - type: AWS
+    targets:
+    - source: S3
+      config: gardenlinux
+    - source: S3-China
+      config: gardenlinux-cn
+    image_tags:
+      static_tags:
+        sec-by-def-public-image-exception: enabled
+  ocm:
+    type: OCI
+    config: gcr-readwrite
+    repository: europe-docker.pkg.dev/gardener-project/releases
+aliases:
+  auditd: [ audit ]
+  libc-bin: [ glibc ]
+  python3-blinker: [ blinker ]
+  python3-jinja2: [ Jinja2 ]
+  python3-jwt: [ PyJWT ]
+  python3-markupsafe: [ MarkupSafe ]

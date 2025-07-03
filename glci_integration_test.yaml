@@ -1,0 +1,78 @@
+flavors:
+  flavors:
+  - platform: Aliyun
+    cname: ali-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod-arm64
+  - platform: Azure
+    cname: azure-gardener_prod-amd64
+  - platform: Azure
+    cname: azure-gardener_prod-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod-arm64
+  - platform: OpenStack
+    cname: openstack-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_usi-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_usi-arm64
+  - platform: Azure
+    cname: azure-gardener_prod_usi-amd64
+  - platform: Azure
+    cname: azure-gardener_prod_usi-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod_usi-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod_usi-arm64
+  - platform: AWS
+    cname: aws-gardener_prod_tpm2_trustedboot-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_tpm2_trustedboot-arm64
+  - platform: Azure
+    cname: azure-gardener_prod_tpm2_trustedboot-amd64
+  - platform: Azure
+    cname: azure-gardener_prod_tpm2_trustedboot-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod_tpm2_trustedboot-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod_tpm2_trustedboot-arm64
+publishing:
+  manifest_source: S3
+  manifest_target: S3test
+  sources:
+  - id: S3
+    type: AWS
+    bucket: gardenlinux-github-releases
+    config: gardenlinux
+  - id: S3test
+    type: AWS
+    bucket: gardenlinux-test-import
+    config: gardenlinux-integration-test
+  targets:
+  - type: AWS
+    targets:
+    - source: S3
+      config: gardenlinux-integration-test
+      regions: [ eu-central-1, eu-west-1 ]
+    image_tags:
+      include_gardenlinux_version: true
+      include_gardenlinux_committish: true
+      static_tags:
+        sec-by-def-public-image-exception: enabled
+        purpose: test
+        test-type: gardener-integration
+  ocm:
+    type: OCI
+    config: ar-gardenlinux-test
+    repository: europe-docker.pkg.dev/sap-se-gcp-gardenlinux/tests
+aliases:
+  auditd: [ audit ]
+  libc-bin: [ glibc ]
+  python3-blinker: [ blinker ]
+  python3-jinja2: [ Jinja2 ]
+  python3-jwt: [ PyJWT ]
+  python3-markupsafe: [ MarkupSafe ]
