@@ -1,0 +1,24 @@
+name: Validate
+
+on:
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - name: Run linter
+      uses: golangci/golangci-lint-action@v6
+    - name: Run tests
+      run: go run github.com/onsi/ginkgo/v2/ginkgo -r --race --randomize-suites --randomize-all --keep-going --github-output
