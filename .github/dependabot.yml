@@ -3,24 +3,18 @@ updates:
 - package-ecosystem: gomod
   directory: /
   schedule:
-    interval: daily
+    interval: weekly
   commit-message:
     prefix: ""
-  reviewers:
-  - gardenlinux/glci-maintainers
 - package-ecosystem: docker
   directory: /
   schedule:
-    interval: daily
+    interval: weekly
   commit-message:
     prefix: ""
-  reviewers:
-  - gardenlinux/glci-maintainers
 - package-ecosystem: github-actions
   directory: /
   schedule:
-    interval: daily
+    interval: weekly
   commit-message:
     prefix: ""
-  reviewers:
-  - gardenlinux/glci-maintainers
