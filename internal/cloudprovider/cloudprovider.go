@@ -83,6 +83,15 @@ type Publication struct {
 // PublishingOutput is an opaque representation of the result of a publishing operation.
 type PublishingOutput any
 
+// KeyNotFoundError wraps a source-specific error inficating that a given key is not present.
+type KeyNotFoundError struct {
+	err error
+}
+
+func (e KeyNotFoundError) Error() string {
+	return e.err.Error()
+}
+
 //nolint:gochecknoglobals // Required for automatic registration.
 var (
 	sources = make(map[string]newArtifactSourceFunc)

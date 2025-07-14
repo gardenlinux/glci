@@ -2,6 +2,7 @@ package glci
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
@@ -48,6 +49,26 @@ func Publish(
 				return fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
 			}
 			commit = manifest.BuildCommittish
+
+			log.Debug(lctx, "Retrieving target manifest")
+			var targetManifest *gl.Manifest
+			targetManifest, err = manifestTarget.GetManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit))
+			if err != nil && !errors.As(err, &cloudprovider.KeyNotFoundError{}) {
+				return fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, err)
+			}
+			if targetManifest != nil {
+				if targetManifest.Version != version {
+					return fmt.Errorf("target manifest for %s has incorrect version %s", flavor.Cname, targetManifest.Version)
+				}
+				if targetManifest.BuildCommittish != commit {
+					return fmt.Errorf("target manifest for %s has incorrect commit %s", flavor.Cname, targetManifest.BuildCommittish)
+				}
+
+				if targetManifest.PublishedImageMetadata != nil {
+					log.Info(lctx, "Already published, skipping")
+					continue
+				}
+			}
 
 			publications = append(publications, cloudprovider.Publication{
 				Cname:    flavor.Cname,
@@ -134,8 +155,12 @@ func Remove(
 
 			log.Info(lctx, "Retrieving manifest")
 			var manifest *gl.Manifest
-			manifest, err = manifestSource.GetManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit))
+			manifest, err = manifestTarget.GetManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit))
 			if err != nil {
+				if errors.As(err, &cloudprovider.KeyNotFoundError{}) && manifestTarget != manifestSource {
+					log.Debug(lctx, "Manifest not found, skipping")
+					continue
+				}
 				return fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, err)
 			}
 			if manifest.Version != version {
@@ -146,6 +171,11 @@ func Remove(
 			}
 			commit = manifest.BuildCommittish
 
+			if manifest.PublishedImageMetadata == nil {
+				log.Debug(lctx, "Already removed, skipping")
+				continue
+			}
+
 			publications = append(publications, cloudprovider.Publication{
 				Cname:    flavor.Cname,
 				Manifest: manifest,
@@ -154,7 +184,12 @@ func Remove(
 		}
 	}
 
-	log.Info(ctx, "Removing images", "count", len(publications))
+	if len(publications) > 0 {
+		log.Info(ctx, "Removing images", "count", len(publications))
+	} else {
+		log.Info(ctx, "Nothing to remove")
+	}
+
 	for i, publication := range publications {
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
