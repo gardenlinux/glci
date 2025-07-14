@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/gl"
@@ -114,6 +115,13 @@ func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) 
 		Key:    &key,
 	})
 	if err != nil {
+		var noSuchKey *s3types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			err = KeyNotFoundError{
+				err: err,
+			}
+		}
+
 		return nil, fmt.Errorf("cannot get object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
 	}
 
@@ -679,7 +687,7 @@ func (*aws) getImageIDsByRegion(ctx context.Context, ec2Client *ec2.Client, imag
 					},
 				},
 			},
-			MaxResults: util.Ptr(int32(2)),
+			MaxResults: util.Ptr(int32(5)),
 		}, overrideRegion(region))
 		if err != nil {
 			return nil, fmt.Errorf("cannot get status of image in region %s: %w", region, err)
@@ -707,7 +715,7 @@ func (*aws) deregisterImage(ctx context.Context, ec2Client *ec2.Client, imageID,
 	r, err := ec2Client.DeregisterImage(llctx, &ec2.DeregisterImageInput{
 		ImageId:                   &imageID,
 		DeleteAssociatedSnapshots: util.Ptr(true),
-	})
+	}, overrideRegion(region))
 	if err != nil {
 		return fmt.Errorf("cannot deregister image %s in region %s: %w", imageID, region, err)
 	}

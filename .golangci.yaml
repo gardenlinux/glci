@@ -64,6 +64,8 @@ linters:
         disabled: true
       - name: line-length-limit
         disabled: true
+      - name: max-public-structs
+        disabled: true
       - name: nested-structs
         disabled: true
       - name: package-comments
