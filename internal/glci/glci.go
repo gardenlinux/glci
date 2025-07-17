@@ -23,10 +23,13 @@ func Publish(
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
 	log.Debug(ctx, "Loading credentials and configuration")
-	manifestSource, manifestTarget, sources, targets, ocmTarget, err := loadCredentialsAndConfig(creds, publishingConfig)
+	manifestSource, manifestTarget, sources, targets, ocmTarget, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
 	if err != nil {
 		return fmt.Errorf("invalid credentials or configuration: %w", err)
 	}
+	defer func() {
+		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
+	}()
 
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
@@ -125,6 +128,12 @@ func Publish(
 		return fmt.Errorf("cannot publish component descriptor: %w", err)
 	}
 
+	log.Debug(ctx, "Closing sources and targets")
+	err = closeSourcesAndTargets(sources, targets, ocmTarget)
+	if err != nil {
+		return fmt.Errorf("cannot close sources and targets: %w", err)
+	}
+
 	log.Info(ctx, "Publishing completed successfully")
 	return nil
 }
@@ -140,10 +149,13 @@ func Remove(
 	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
 
 	log.Debug(ctx, "Loading credentials and configuration")
-	manifestSource, manifestTarget, sources, targets, _, err := loadCredentialsAndConfig(creds, publishingConfig)
+	manifestSource, manifestTarget, sources, targets, ocmTarget, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
 	if err != nil {
 		return fmt.Errorf("invalid credentials or configuration: %w", err)
 	}
+	defer func() {
+		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
+	}()
 
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
@@ -211,11 +223,18 @@ func Remove(
 		}
 	}
 
+	log.Debug(ctx, "Closing sources and targets")
+	err = closeSourcesAndTargets(sources, targets, ocmTarget)
+	if err != nil {
+		return fmt.Errorf("cannot close sources and targets: %w", err)
+	}
+
 	log.Info(ctx, "Removing completed successfully")
 	return nil
 }
 
 func loadCredentialsAndConfig(
+	ctx context.Context,
 	creds Credentials,
 	publishingConfig PublishingConfig,
 ) (cloudprovider.ArtifactSource, cloudprovider.ArtifactSource, map[string]cloudprovider.ArtifactSource, []cloudprovider.PublishingTarget, cloudprovider.OCMTarget, error) {
@@ -229,7 +248,7 @@ func loadCredentialsAndConfig(
 		if err != nil {
 			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", s.ID, err)
 		}
-		err = source.SetSourceConfig(s.Config)
+		err = source.SetSourceConfig(ctx, s.Config)
 		if err != nil {
 			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set source configuration for %s: %w", s.ID, err)
 		}
@@ -252,7 +271,7 @@ func loadCredentialsAndConfig(
 		if err != nil {
 			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", t.Type, err)
 		}
-		err = target.SetTargetConfig(t.Config)
+		err = target.SetTargetConfig(ctx, t.Config, sources)
 		if err != nil {
 			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set source configuration for %s: %w", t.Type, err)
 		}
@@ -267,10 +286,35 @@ func loadCredentialsAndConfig(
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", publishingConfig.OCM.Type, err)
 	}
-	err = ocmTarget.SetOCMConfig(publishingConfig.OCM.Config)
+	err = ocmTarget.SetOCMConfig(ctx, publishingConfig.OCM.Config)
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("cannot set target configuration for %s: %w", publishingConfig.OCM.Type, err)
 	}
 
 	return manifestSource, manifestTarget, sources, targets, ocmTarget, nil
+}
+
+func closeSourcesAndTargets(sources map[string]cloudprovider.ArtifactSource, targets []cloudprovider.PublishingTarget, ocmTarget cloudprovider.OCMTarget) error {
+	errs := make([]error, 0, len(sources)+len(targets)+1)
+
+	for _, source := range sources {
+		err := source.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("cannot close source %s: %w", source.Type(), err))
+		}
+	}
+
+	for _, target := range targets {
+		err := target.Close()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("cannot close target %s: %w", target.Type(), err))
+		}
+	}
+
+	err := ocmTarget.Close()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("cannot close OCM target %s: %w", ocmTarget.Type(), err))
+	}
+
+	return errors.Join(errs...)
 }
