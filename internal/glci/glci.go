@@ -12,13 +12,8 @@ import (
 )
 
 // Publish publishes a release to all cloud providers specified in the flavors and publishing configurations.
-func Publish(
-	ctx context.Context,
-	flavorsConfig FlavorsConfig,
-	publishingConfig PublishingConfig,
-	aliasesConfig AliasesConfig,
-	creds Credentials,
-	version, commit string,
+func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, aliasesConfig AliasesConfig,
+	creds Credentials, version, commit string,
 ) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
@@ -100,11 +95,8 @@ func Publish(
 		publications[i].Manifest.PublishedImageMetadata = output
 
 		log.Info(lctx, "Updating manifest")
-		err = manifestTarget.PutManifest(
-			lctx,
-			fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit),
-			publication.Manifest,
-		)
+		err = manifestTarget.PutManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit),
+			publication.Manifest)
 		if err != nil {
 			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
 		}
@@ -139,12 +131,8 @@ func Publish(
 }
 
 // Remove removes a release from all cloud providers specified in the flavors and publishing configurations.
-func Remove(
-	ctx context.Context,
-	flavorsConfig FlavorsConfig,
-	publishingConfig PublishingConfig,
-	creds Credentials,
-	version, commit string,
+func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, creds Credentials, version,
+	commit string,
 ) error {
 	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
 
@@ -213,11 +201,8 @@ func Remove(
 		publications[i].Manifest.PublishedImageMetadata = nil
 
 		log.Info(lctx, "Updating manifest")
-		err = manifestTarget.PutManifest(
-			lctx,
-			fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit),
-			publication.Manifest,
-		)
+		err = manifestTarget.PutManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit),
+			publication.Manifest)
 		if err != nil {
 			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
 		}
@@ -233,11 +218,10 @@ func Remove(
 	return nil
 }
 
-func loadCredentialsAndConfig(
-	ctx context.Context,
-	creds Credentials,
-	publishingConfig PublishingConfig,
-) (cloudprovider.ArtifactSource, cloudprovider.ArtifactSource, map[string]cloudprovider.ArtifactSource, []cloudprovider.PublishingTarget, cloudprovider.OCMTarget, error) {
+func loadCredentialsAndConfig(ctx context.Context, creds Credentials, publishingConfig PublishingConfig) (cloudprovider.ArtifactSource,
+	cloudprovider.ArtifactSource, map[string]cloudprovider.ArtifactSource, []cloudprovider.PublishingTarget, cloudprovider.OCMTarget,
+	error,
+) {
 	sources := make(map[string]cloudprovider.ArtifactSource, len(publishingConfig.Sources))
 	for _, s := range publishingConfig.Sources {
 		source, err := cloudprovider.NewArtifactSource(s.Type)
@@ -294,7 +278,9 @@ func loadCredentialsAndConfig(
 	return manifestSource, manifestTarget, sources, targets, ocmTarget, nil
 }
 
-func closeSourcesAndTargets(sources map[string]cloudprovider.ArtifactSource, targets []cloudprovider.PublishingTarget, ocmTarget cloudprovider.OCMTarget) error {
+func closeSourcesAndTargets(sources map[string]cloudprovider.ArtifactSource, targets []cloudprovider.PublishingTarget,
+	ocmTarget cloudprovider.OCMTarget,
+) error {
 	errs := make([]error, 0, len(sources)+len(targets)+1)
 
 	for _, source := range sources {

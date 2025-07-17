@@ -58,11 +58,8 @@ func (p *aws) SetSourceConfig(ctx context.Context, cfg map[string]any) error {
 	}
 
 	var awsCfg aws2.Config
-	awsCfg, err = config.LoadDefaultConfig(
-		ctx,
-		config.WithRegion(creds.Region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")),
-	)
+	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(creds.Region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
 	if err != nil {
 		return fmt.Errorf("cannot load default aws config: %w", err)
 	}
@@ -95,11 +92,8 @@ func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 		}
 
 		var awsCfg aws2.Config
-		awsCfg, err = config.LoadDefaultConfig(
-			ctx,
-			config.WithRegion(creds.Region),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")),
-		)
+		awsCfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(creds.Region),
+			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
 		if err != nil {
 			return fmt.Errorf("cannot load default AWS config: %w", err)
 		}
@@ -213,12 +207,9 @@ func (*aws) ImageSuffix() string {
 	return ".raw"
 }
 
-func (p *aws) Publish(
-	ctx context.Context,
-	cname string,
-	manifest *gl.Manifest,
-	sources map[string]ArtifactSource,
-) (PublishingOutput, error) {
+func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
+	error,
+) {
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
@@ -553,13 +544,8 @@ func (*aws) attachTags(ctx context.Context, ec2Client *ec2.Client, obj string, t
 	return nil
 }
 
-func (*aws) registerImage(
-	ctx context.Context,
-	ec2Client *ec2.Client,
-	snapshot, image string,
-	architecture ec2types.ArchitectureValues,
-	requireUEFI bool,
-	uefiData *string,
+func (*aws) registerImage(ctx context.Context, ec2Client *ec2.Client, snapshot, image string, architecture ec2types.ArchitectureValues,
+	requireUEFI bool, uefiData *string,
 ) (string, error) {
 	params := ec2.RegisterImageInput{
 		Name:         &image,
@@ -599,10 +585,7 @@ func (*aws) registerImage(
 	return *r.ImageId, nil
 }
 
-func (*aws) copyImage(
-	ctx context.Context,
-	ec2Client *ec2.Client,
-	imageName, imageID, fromRegion string,
+func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, imageName, imageID, fromRegion string,
 	toRegions []string,
 ) (map[string]string, error) {
 	images := make(map[string]string, len(toRegions))

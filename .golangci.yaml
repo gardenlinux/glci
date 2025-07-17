@@ -98,6 +98,8 @@ formatters:
       - standard
       - default
       - localmodule
+    gofumpt:
+      extra-rules: true
     golines:
       max-len: 140
       shorten-comments: true

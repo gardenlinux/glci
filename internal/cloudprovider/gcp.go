@@ -112,12 +112,9 @@ func (*gcp) ImageSuffix() string {
 	return ".gcpimage.tar.gz"
 }
 
-func (p *gcp) Publish(
-	ctx context.Context,
-	cname string,
-	manifest *gl.Manifest,
-	sources map[string]ArtifactSource,
-) (PublishingOutput, error) {
+func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
+	error,
+) {
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
@@ -130,7 +127,8 @@ func (p *gcp) Publish(
 	}
 	source := sources[p.pubCfg.Source]
 	project := p.creds[p.pubCfg.Config].Project
-	ctx = log.WithValues(ctx, "target", p.Type(), "image", image, "architecture", architecture, "sourceType", source.Type(), "sourceRepo", source.Repository(), "project", project)
+	ctx = log.WithValues(ctx, "target", p.Type(), "image", image, "architecture", architecture, "sourceType", source.Type(),
+		"sourceRepo", source.Repository(), "project", project)
 
 	var secureBoot bool
 	var pk, kek, db string

@@ -36,8 +36,8 @@ func main() {
 		return
 	}
 
-	ctx, stop := signal.NotifyContext(log.Setup(mainCmd.Context(), cfg.GetBool("dev"), false, os.Stderr),
-		syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
+	ctx, stop := signal.NotifyContext(log.Setup(mainCmd.Context(), cfg.GetBool("dev"), false, os.Stderr), syscall.SIGTERM,
+		syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 	defer stop()
 
 	err = mainCmd.ExecuteContext(ctx)
