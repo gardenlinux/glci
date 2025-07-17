@@ -31,15 +31,19 @@ func (*fake) SetCredentials(_ map[string]any) error {
 	return nil
 }
 
-func (*fake) SetSourceConfig(_ map[string]any) error {
+func (*fake) SetSourceConfig(_ context.Context, _ map[string]any) error {
 	return nil
 }
 
-func (*fake) SetTargetConfig(_ map[string]any) error {
+func (*fake) SetTargetConfig(_ context.Context, _ map[string]any, _ map[string]ArtifactSource) error {
 	return nil
 }
 
-func (*fake) SetOCMConfig(_ map[string]any) error {
+func (*fake) SetOCMConfig(_ context.Context, _ map[string]any) error {
+	return nil
+}
+
+func (*fake) Close() error {
 	return nil
 }
 
@@ -51,8 +55,8 @@ func (p *fake) GetObject(_ context.Context, _ string) (io.ReadCloser, error) {
 	return p, nil
 }
 
-func (*fake) GetString(_ context.Context, _ string) (string, error) {
-	return "", nil
+func (*fake) GetObjectBytes(_ context.Context, _ string) ([]byte, error) {
+	return nil, nil
 }
 
 func (*fake) GetManifest(_ context.Context, _ string) (*gl.Manifest, error) {
@@ -85,8 +89,4 @@ func (*fake) PublishComponentDescriptor(_ context.Context, _ string, _ []byte) e
 
 func (*fake) Read(_ []byte) (int, error) {
 	return 0, io.EOF
-}
-
-func (*fake) Close() error {
-	return nil
 }

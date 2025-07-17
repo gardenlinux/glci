@@ -23,7 +23,8 @@ import (
 )
 
 func init() {
-	util.CleanEnv(context.Background(), "AWS_")
+	util.CleanEnv("AWS_")
+	util.CleanEnv("_X_AMZN_")
 
 	registerArtifactSource(func() ArtifactSource {
 		return &aws{}
@@ -42,7 +43,7 @@ func (p *aws) SetCredentials(creds map[string]any) error {
 	return setCredentials(creds, "aws", &p.creds)
 }
 
-func (p *aws) SetSourceConfig(cfg map[string]any) error {
+func (p *aws) SetSourceConfig(ctx context.Context, cfg map[string]any) error {
 	err := setConfig(cfg, &p.srcCfg)
 	if err != nil {
 		return err
@@ -58,7 +59,7 @@ func (p *aws) SetSourceConfig(cfg map[string]any) error {
 
 	var awsCfg aws2.Config
 	awsCfg, err = config.LoadDefaultConfig(
-		context.Background(),
+		ctx,
 		config.WithRegion(creds.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")),
 	)
@@ -70,7 +71,7 @@ func (p *aws) SetSourceConfig(cfg map[string]any) error {
 	return nil
 }
 
-func (p *aws) SetTargetConfig(cfg map[string]any) error {
+func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources map[string]ArtifactSource) error {
 	err := setConfig(cfg, &p.pubCfg)
 	if err != nil {
 		return err
@@ -82,14 +83,20 @@ func (p *aws) SetTargetConfig(cfg map[string]any) error {
 
 	p.tgtEC2Clients = make(map[string]*ec2.Client, len(p.pubCfg.Targets))
 	for _, target := range p.pubCfg.Targets {
-		creds, ok := p.creds[target.Config]
+		_, ok := sources[target.Source]
+		if !ok {
+			return fmt.Errorf("unknown source %s", target.Source)
+		}
+
+		var creds awsCredentials
+		creds, ok = p.creds[target.Config]
 		if !ok {
 			return fmt.Errorf("missing credentials config %s", target.Config)
 		}
 
 		var awsCfg aws2.Config
 		awsCfg, err = config.LoadDefaultConfig(
-			context.Background(),
+			ctx,
 			config.WithRegion(creds.Region),
 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")),
 		)
@@ -99,6 +106,10 @@ func (p *aws) SetTargetConfig(cfg map[string]any) error {
 		p.tgtEC2Clients[target.Config] = ec2.NewFromConfig(awsCfg)
 	}
 
+	return nil
+}
+
+func (*aws) Close() error {
 	return nil
 }
 
@@ -128,10 +139,10 @@ func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) 
 	return r.Body, nil
 }
 
-func (p *aws) GetString(ctx context.Context, key string) (string, error) {
+func (p *aws) GetObjectBytes(ctx context.Context, key string) ([]byte, error) {
 	body, err := p.GetObject(ctx, key)
 	if err != nil {
-		return "", fmt.Errorf("cannot get string: %w", err)
+		return nil, err
 	}
 	defer func() {
 		_ = body.Close()
@@ -140,15 +151,15 @@ func (p *aws) GetString(ctx context.Context, key string) (string, error) {
 	var buf bytes.Buffer
 	_, err = buf.ReadFrom(body)
 	if err != nil {
-		return "", fmt.Errorf("cannot read string: %w", err)
+		return nil, fmt.Errorf("cannot read object: %w", err)
 	}
 
 	err = body.Close()
 	if err != nil {
-		return "", fmt.Errorf("cannot close string: %w", err)
+		return nil, fmt.Errorf("cannot close object: %w", err)
 	}
 
-	return buf.String(), nil
+	return buf.Bytes(), nil
 }
 
 func (p *aws) GetManifest(ctx context.Context, key string) (*gl.Manifest, error) {
@@ -208,15 +219,8 @@ func (p *aws) Publish(
 	manifest *gl.Manifest,
 	sources map[string]ArtifactSource,
 ) (PublishingOutput, error) {
-	for _, target := range p.pubCfg.Targets {
-		_, ok := sources[target.Source]
-		if !ok {
-			return nil, fmt.Errorf("unknown source %s", target.Source)
-		}
-	}
-
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(".raw")
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}

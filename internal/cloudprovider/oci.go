@@ -36,7 +36,7 @@ func (p *oci) SetCredentials(creds map[string]any) error {
 	return setCredentials(creds, "container_registry", &p.creds)
 }
 
-func (p *oci) SetOCMConfig(cfg map[string]any) error {
+func (p *oci) SetOCMConfig(_ context.Context, cfg map[string]any) error {
 	err := setConfig(cfg, &p.ociCfg)
 	if err != nil {
 		return err
@@ -67,6 +67,10 @@ func (p *oci) SetOCMConfig(cfg map[string]any) error {
 		}),
 	}
 
+	return nil
+}
+
+func (*oci) Close() error {
 	return nil
 }
 

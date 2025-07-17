@@ -15,10 +15,11 @@ import (
 type ArtifactSource interface {
 	Type() string
 	SetCredentials(credentials map[string]any) error
-	SetSourceConfig(config map[string]any) error
+	SetSourceConfig(ctx context.Context, config map[string]any) error
+	Close() error
 	Repository() string
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
-	GetString(ctx context.Context, key string) (string, error)
+	GetObjectBytes(ctx context.Context, key string) ([]byte, error)
 	GetManifest(ctx context.Context, key string) (*gl.Manifest, error)
 	PutManifest(ctx context.Context, key string, manifest *gl.Manifest) error
 }
@@ -27,7 +28,8 @@ type ArtifactSource interface {
 type PublishingTarget interface {
 	Type() string
 	SetCredentials(credentials map[string]any) error
-	SetTargetConfig(credentials map[string]any) error
+	SetTargetConfig(ctx context.Context, credentials map[string]any, sources map[string]ArtifactSource) error
+	Close() error
 	ImageSuffix() string
 	Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
 	Remove(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) error
@@ -37,7 +39,8 @@ type PublishingTarget interface {
 type OCMTarget interface {
 	Type() string
 	SetCredentials(credentials map[string]any) error
-	SetOCMConfig(config map[string]any) error
+	SetOCMConfig(ctx context.Context, config map[string]any) error
+	Close() error
 	OCMRepository() string
 	PublishComponentDescriptor(ctx context.Context, version string, descriptor []byte) error
 }
