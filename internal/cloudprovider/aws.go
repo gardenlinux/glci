@@ -101,7 +101,7 @@ func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")),
 		)
 		if err != nil {
-			return fmt.Errorf("cannot load default aws config: %w", err)
+			return fmt.Errorf("cannot load default AWS config: %w", err)
 		}
 		p.tgtEC2Clients[target.Config] = ec2.NewFromConfig(awsCfg)
 	}
@@ -165,7 +165,7 @@ func (p *aws) GetObjectBytes(ctx context.Context, key string) ([]byte, error) {
 func (p *aws) GetManifest(ctx context.Context, key string) (*gl.Manifest, error) {
 	body, err := p.GetObject(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("cannot get manifest: %w", err)
+		return nil, err
 	}
 	defer func() {
 		_ = body.Close()
@@ -291,7 +291,7 @@ func (p *aws) Publish(
 
 		err = p.makePublic(lctx, ec2Client, images)
 		if err != nil {
-			return nil, fmt.Errorf("cannot finalize images: %w", err)
+			return nil, fmt.Errorf("cannot make images public: %w", err)
 		}
 
 		for region, imageID = range images {
@@ -469,13 +469,13 @@ func (*aws) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, e
 	log.Debug(ctx, "Listing available regions")
 	r, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
 	if err != nil {
-		return nil, fmt.Errorf("cannot desctibe regions: %w", err)
+		return nil, fmt.Errorf("cannot describe regions: %w", err)
 	}
 
 	regions := make([]string, 0, len(r.Regions))
 	for _, region := range r.Regions {
 		if region.RegionName == nil {
-			return nil, errors.New("cannot desctibe regions: missing region name")
+			return nil, errors.New("cannot describe regions: missing region name")
 		}
 		regions = append(regions, *region.RegionName)
 	}
@@ -590,10 +590,10 @@ func (*aws) registerImage(
 	log.Info(ctx, "Registering image")
 	r, err := ec2Client.RegisterImage(ctx, &params)
 	if err != nil {
-		return "", fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err)
+		return "", fmt.Errorf("cannot register image: %w", err)
 	}
 	if r.ImageId == nil {
-		return "", fmt.Errorf("cannot register image %s from snapshot %s: missing image ID", image, snapshot)
+		return "", errors.New("cannot register image: missing image ID")
 	}
 
 	return *r.ImageId, nil
@@ -706,10 +706,10 @@ func (*aws) getImageIDsByRegion(ctx context.Context, ec2Client *ec2.Client, imag
 			MaxResults: util.Ptr(int32(5)),
 		}, overrideRegion(region))
 		if err != nil {
-			return nil, fmt.Errorf("cannot get status of image in region %s: %w", region, err)
+			return nil, fmt.Errorf("cannot describe image in region %s: %w", region, err)
 		}
 		if len(r.Images) > 1 {
-			return nil, errors.New("too many images with the same name")
+			return nil, fmt.Errorf("too many images with the same name in region %s", region)
 		}
 		if len(r.Images) < 1 {
 			continue

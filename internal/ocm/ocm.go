@@ -323,7 +323,7 @@ func getPackages(ctx context.Context, source cloudprovider.ArtifactSource, manif
 	var obj io.ReadCloser
 	obj, err = source.GetObject(ctx, manifestPath.S3Key)
 	if err != nil {
-		return nil, fmt.Errorf("cannot get %s: %w", manifestPath.S3Key, err)
+		return nil, fmt.Errorf("cannot get package manifest: %w", err)
 	}
 	defer func() {
 		_ = obj.Close()
@@ -347,12 +347,12 @@ func getPackages(ctx context.Context, source cloudprovider.ArtifactSource, manif
 	}
 	err = scanner.Err()
 	if err != nil {
-		return nil, fmt.Errorf("cannot read %s: %w", manifestPath.S3Key, err)
+		return nil, fmt.Errorf("cannot read package manifest: %w", err)
 	}
 
 	err = obj.Close()
 	if err != nil {
-		return nil, fmt.Errorf("cannot close %s: %w", manifestPath.S3Key, err)
+		return nil, fmt.Errorf("cannot close package manifest: %w", err)
 	}
 
 	return packages, nil
