@@ -12,9 +12,6 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 )
 
-// Version is the released version of GLCI, or "dev".
-const Version = "dev"
-
 func main() {
 	var exitCode int
 	defer func() {
@@ -24,7 +21,7 @@ func main() {
 	mainCmd, cfg, err := cmd.Setup("glci", func(c *cobra.Command) {
 		c.Use = "glci"
 		c.Short = "GLCI - Garden Linux continuous integration"
-		c.Version = Version
+		c.Version = version
 		c.PersistentFlags().Bool("dev", false, "run in development mode")
 		c.PersistentFlags().String("config-file", "", "path to configuration file")
 		c.AddCommand(publishCmd())
