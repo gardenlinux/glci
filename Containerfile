@@ -9,7 +9,9 @@ RUN go mod download
 
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o glci github.com/gardenlinux/glci/cmd
+ARG version=dev
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o glci \
+    -ldflags "-X main.version=${version}" github.com/gardenlinux/glci/cmd
 
 FROM docker.io/library/debian:bookworm-20250630-slim
 WORKDIR /

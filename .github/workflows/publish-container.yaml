@@ -8,6 +8,9 @@ on:
     branches:
     - main
   pull_request:
+  release:
+    types:
+    - released
 
 jobs:
   publish-docker:
@@ -62,4 +65,5 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         file: Containerfile
+        build-args: version=${{ github.event.release.tag_name || 'dev' }}
         push: true
