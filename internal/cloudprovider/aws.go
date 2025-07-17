@@ -239,6 +239,14 @@ func (p *aws) Publish(
 		region := p.creds[target.Config].Region
 		lctx := log.WithValues(ctx, "sourceType", source.Type(), "sourceRepo", source.Repository(), "region", region)
 
+		var requireUEFI, secureBoot bool
+		var uefiData *string
+		requireUEFI, secureBoot, uefiData, err = p.prepareSecureBoot(lctx, source, manifest)
+		if err != nil {
+			return nil, fmt.Errorf("cannot prepare secureboot: %w", err)
+		}
+		lctx = log.WithValues(lctx, "requireUEFI", requireUEFI, "secureBoot", secureBoot)
+
 		var regions []string
 		regions, err = p.listRegions(lctx, ec2Client)
 		if err != nil {
@@ -252,7 +260,7 @@ func (p *aws) Publish(
 		}
 
 		var snapshot string
-		snapshot, err = p.importSnapshot(lctx, ec2Client, image, source.Repository(), imagePath.S3Key)
+		snapshot, err = p.importSnapshot(lctx, ec2Client, source, imagePath.S3Key, image)
 		if err != nil {
 			return nil, fmt.Errorf("cannot import snapshot for image %s: %w", image, err)
 		}
@@ -261,26 +269,6 @@ func (p *aws) Publish(
 		err = p.attachTags(lctx, ec2Client, snapshot, tags)
 		if err != nil {
 			return nil, fmt.Errorf("cannot attach tags to snapshot %s: %w", snapshot, err)
-		}
-
-		requireUEFI := manifest.RequireUEFI != nil && *manifest.RequireUEFI
-		secureBoot := manifest.SecureBoot != nil && *manifest.SecureBoot
-		lctx = log.WithValues(lctx, "requireUEFI", requireUEFI, "secureBoot", secureBoot)
-		var uefiData *string
-		if secureBoot {
-			var efivarsFile gl.S3ReleaseFile
-			efivarsFile, err = manifest.PathBySuffix(".secureboot.aws-efivars")
-			if err != nil {
-				return nil, fmt.Errorf("missing secureboot efivars: %w", err)
-			}
-
-			var efivars string
-			efivars, err = source.GetString(lctx, efivarsFile.S3Key)
-			if err != nil {
-				return nil, fmt.Errorf("cannot get secureboot efivars: %w", err)
-			}
-
-			uefiData = &efivars
 		}
 
 		var imageID string
@@ -301,7 +289,7 @@ func (p *aws) Publish(
 			return nil, fmt.Errorf("cannot finalize images: %w", err)
 		}
 
-		err = p.makeImagesLaunchable(lctx, ec2Client, images)
+		err = p.makePublic(lctx, ec2Client, images)
 		if err != nil {
 			return nil, fmt.Errorf("cannot finalize images: %w", err)
 		}
@@ -373,8 +361,8 @@ type awsCredentials struct {
 }
 
 type awsSourceConfig struct {
-	Bucket string `mapstructure:"bucket"`
 	Config string `mapstructure:"config"`
+	Bucket string `mapstructure:"bucket"`
 }
 
 type awsPublishingConfig struct {
@@ -454,6 +442,29 @@ func (p *aws) prepareTags(manifest *gl.Manifest) []ec2types.Tag {
 	return tags
 }
 
+func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, bool, *string, error) {
+	requireUEFI := manifest.RequireUEFI != nil && *manifest.RequireUEFI
+	secureBoot := manifest.SecureBoot != nil && *manifest.SecureBoot
+
+	var uefiData *string
+	if secureBoot {
+		efivarsFile, err := manifest.PathBySuffix(".secureboot.aws-efivars")
+		if err != nil {
+			return false, false, nil, fmt.Errorf("missing efivars: %w", err)
+		}
+
+		var efivars []byte
+		efivars, err = source.GetObjectBytes(ctx, efivarsFile.S3Key)
+		if err != nil {
+			return false, false, nil, fmt.Errorf("cannot get efivars: %w", err)
+		}
+
+		uefiData = util.Ptr(string(efivars))
+	}
+
+	return requireUEFI, secureBoot, uefiData, nil
+}
+
 func (*aws) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, error) {
 	log.Debug(ctx, "Listing available regions")
 	r, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
@@ -472,8 +483,9 @@ func (*aws) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, e
 	return regions, nil
 }
 
-func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, image, bucket, key string) (string, error) {
-	ctx = log.WithValues(ctx, "bucket", bucket, "key", key)
+func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, source ArtifactSource, key, image string) (string, error) {
+	bucket := source.Repository()
+	ctx = log.WithValues(ctx, "key", key)
 
 	log.Info(ctx, "Importing snapshot")
 	r, err := ec2Client.ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
@@ -557,7 +569,7 @@ func (*aws) registerImage(
 			Ebs: &ec2types.EbsBlockDevice{
 				DeleteOnTermination: util.Ptr(true),
 				SnapshotId:          &snapshot,
-				VolumeType:          ec2types.VolumeTypeGp2,
+				VolumeType:          ec2types.VolumeTypeGp3,
 			},
 		}},
 		BootMode:           ec2types.BootModeValuesUefiPreferred,
@@ -621,23 +633,23 @@ func (*aws) copyImage(
 }
 
 func (*aws) waitForImages(ctx context.Context, ec2Client *ec2.Client, images map[string]string) error {
-	for region, id := range images {
+	for region, imageID := range images {
 		var state ec2types.ImageState
 		for state != ec2types.ImageStateAvailable {
-			log.Debug(ctx, "Waiting for image", "toRegion", region, "toImageID", id)
+			log.Debug(ctx, "Waiting for image", "toRegion", region, "toImageID", imageID)
 			r, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
-				ImageIds: []string{id},
+				ImageIds: []string{imageID},
 			}, overrideRegion(region))
 			if err != nil {
-				return fmt.Errorf("cannot get status of image %s in region %s: %w", id, region, err)
+				return fmt.Errorf("cannot get status of image %s in region %s: %w", imageID, region, err)
 			}
 			if len(r.Images) != 1 || r.NextToken != nil {
-				return fmt.Errorf("cannot get status of image %s in region %s: missing images", id, region)
+				return fmt.Errorf("cannot get status of image %s in region %s: missing images", imageID, region)
 			}
 			state = r.Images[0].State
 
 			if state == ec2types.ImageStateInvalid || state == ec2types.ImageStateFailed || state == ec2types.ImageStateError {
-				return fmt.Errorf("image %s in region %s is in %s state", id, region, state)
+				return fmt.Errorf("image %s in region %s is in %s state", imageID, region, state)
 			}
 
 			if state != ec2types.ImageStateAvailable {
@@ -650,11 +662,11 @@ func (*aws) waitForImages(ctx context.Context, ec2Client *ec2.Client, images map
 	return nil
 }
 
-func (*aws) makeImagesLaunchable(ctx context.Context, ec2Client *ec2.Client, images map[string]string) error {
-	for region, id := range images {
-		log.Debug(ctx, "Adding launch permission to image", "toRegion", region, "toImageID", id)
+func (*aws) makePublic(ctx context.Context, ec2Client *ec2.Client, images map[string]string) error {
+	for region, imageID := range images {
+		log.Debug(ctx, "Adding launch permission to image", "toRegion", region, "toImageID", imageID)
 		_, err := ec2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
-			ImageId:   &id,
+			ImageId:   &imageID,
 			Attribute: util.Ptr("launchPermission"),
 			LaunchPermission: &ec2types.LaunchPermissionModifications{
 				Add: []ec2types.LaunchPermission{
@@ -665,7 +677,7 @@ func (*aws) makeImagesLaunchable(ctx context.Context, ec2Client *ec2.Client, ima
 			},
 		}, overrideRegion(region))
 		if err != nil {
-			return fmt.Errorf("cannot modify attribute of image %s in region %s: %w", id, region, err)
+			return fmt.Errorf("cannot modify attribute of image %s in region %s: %w", imageID, region, err)
 		}
 	}
 
@@ -713,10 +725,10 @@ func (*aws) getImageIDsByRegion(ctx context.Context, ec2Client *ec2.Client, imag
 }
 
 func (*aws) deregisterImage(ctx context.Context, ec2Client *ec2.Client, imageID, region string) error {
-	llctx := log.WithValues(ctx, "fromRegion", region)
+	ctx = log.WithValues(ctx, "fromRegion", region)
 
-	log.Info(llctx, "Deregistering image")
-	r, err := ec2Client.DeregisterImage(llctx, &ec2.DeregisterImageInput{
+	log.Info(ctx, "Deregistering image")
+	r, err := ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
 		ImageId:                   &imageID,
 		DeleteAssociatedSnapshots: util.Ptr(true),
 	}, overrideRegion(region))
