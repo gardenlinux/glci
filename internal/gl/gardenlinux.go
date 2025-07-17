@@ -15,17 +15,14 @@ const (
 type Manifest struct {
 	Version                string          `yaml:"version"`
 	BuildCommittish        string          `yaml:"build_committish"`
-	GardenLinuxEpoch       int64           `yaml:"gardenlinux_epoch"`
 	Architecture           Architecture    `yaml:"architecture"`
 	Platform               string          `yaml:"platform"`
 	Modifiers              []string        `yaml:"modifiers"`
 	BuildTimestamp         string          `yaml:"build_timestamp"`
 	Paths                  []S3ReleaseFile `yaml:"paths"`
-	BaseImage              *string         `yaml:"base_image,omitempty"`
 	RequireUEFI            *bool           `yaml:"require_uefi,omitempty"`
 	SecureBoot             *bool           `yaml:"secureboot,omitempty"`
 	PublishedImageMetadata any             `yaml:"published_image_metadata"`
-	S3Key                  string          `yaml:"s3_key"`
 	S3Bucket               string          `yaml:"s3_bucket"`
 }
 
