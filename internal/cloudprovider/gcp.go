@@ -288,6 +288,7 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot close object writer: %w", err)
 	}
+	log.Debug(ctx, "Blob uploaded")
 
 	var url string
 	url, err = bucket.SignedURL(blob.ObjectName(), &storage.SignedURLOptions{

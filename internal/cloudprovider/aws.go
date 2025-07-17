@@ -526,7 +526,7 @@ func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, source Ar
 	if status != "completed" {
 		return "", fmt.Errorf("unknown import task status %s from %s in bucket %s", status, key, bucket)
 	}
-	log.Info(ctx, "Snapshot imported")
+	log.Debug(ctx, "Snapshot imported")
 
 	return snapshot, nil
 }
