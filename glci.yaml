@@ -63,6 +63,10 @@ publishing:
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
+  - type: GCP
+    source: S3
+    config: gardenlinux
+    bucket: gardenlinux-images
   ocm:
     type: OCI
     config: gcr-readwrite

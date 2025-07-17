@@ -65,6 +65,10 @@ publishing:
         sec-by-def-public-image-exception: enabled
         purpose: test
         test-type: gardener-integration
+  - type: GCP
+    source: S3
+    config: gardenlinux-integration-test
+    bucket: gardenlinux-test-images
   ocm:
     type: OCI
     config: ar-gardenlinux-test
