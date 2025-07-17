@@ -11,10 +11,9 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 )
 
-func loadConfigAndCredentials(
-	ctx context.Context,
-	cfg *viper.Viper,
-) (glci.FlavorsConfig, glci.PublishingConfig, glci.AliasesConfig, glci.Credentials, error) {
+func loadConfigAndCredentials(ctx context.Context, cfg *viper.Viper) (glci.FlavorsConfig, glci.PublishingConfig, glci.AliasesConfig,
+	glci.Credentials, error,
+) {
 	log.Debug(ctx, "Loading configuration and credentials")
 
 	fcfg := cfg.Sub("flavors")

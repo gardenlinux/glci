@@ -27,13 +27,8 @@ func (d *ComponentDescriptor) ToYAML() ([]byte, error) {
 }
 
 // BuildComponentDescriptor generates a component desciptor that includes all data except the results of the publishing process.
-func BuildComponentDescriptor(
-	ctx context.Context,
-	source cloudprovider.ArtifactSource,
-	publications []cloudprovider.Publication,
-	ocmTarget cloudprovider.OCMTarget,
-	aliases map[string][]string,
-	version, commit string,
+func BuildComponentDescriptor(ctx context.Context, source cloudprovider.ArtifactSource, publications []cloudprovider.Publication,
+	ocmTarget cloudprovider.OCMTarget, aliases map[string][]string, version, commit string,
 ) (*ComponentDescriptor, error) {
 	log.Debug(ctx, "Building component descriptor")
 
@@ -188,27 +183,18 @@ func BuildComponentDescriptor(
 // AddPublicationOutput adds the outputs of the publishing process to an existing component descriptor.
 func AddPublicationOutput(descriptor *ComponentDescriptor, publications []cloudprovider.Publication) error {
 	if len(descriptor.Component.Resources) != len(publications)*2 {
-		return fmt.Errorf(
-			"invalid component descriptor: expected %d resources, got %d",
-			len(publications)*2,
-			len(descriptor.Component.Resources),
-		)
+		return fmt.Errorf("invalid component descriptor: expected %d resources, got %d", len(publications)*2,
+			len(descriptor.Component.Resources))
 	}
 
 	for i, publication := range publications {
 		if descriptor.Component.Resources[i*2].Type != "virtual_machine_image" {
-			return fmt.Errorf(
-				"invalid component descriptor: resource %d has incorrect type %s",
-				i*2,
-				descriptor.Component.Resources[i*2].Type,
-			)
+			return fmt.Errorf("invalid component descriptor: resource %d has incorrect type %s", i*2,
+				descriptor.Component.Resources[i*2].Type)
 		}
 		if descriptor.Component.Resources[i*2].Name != "gardenlinux" {
-			return fmt.Errorf(
-				"invalid component descriptor: resource %d has incorrect name %s",
-				i*2,
-				descriptor.Component.Resources[i*2].Name,
-			)
+			return fmt.Errorf("invalid component descriptor: resource %d has incorrect name %s", i*2,
+				descriptor.Component.Resources[i*2].Name)
 		}
 
 		descriptor.Component.Resources[i*2].Labels = append(descriptor.Component.Resources[i*2].Labels, componentDescriptorlabel{
