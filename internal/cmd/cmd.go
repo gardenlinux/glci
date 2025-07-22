@@ -9,8 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-
-	"github.com/gardenlinux/glci/internal/log"
 )
 
 // Setup sets up a Cobra command in such a way that it supports integration with Viper.
@@ -73,11 +71,13 @@ func RunFunc(run func(context.Context, *viper.Viper) error) func(*cobra.Command,
 	return func(c *cobra.Command, _ []string) error {
 		c.SilenceErrors = true
 		c.SilenceUsage = true
-		ctx := log.WithValues(c.Context(), "command", c.Name())
+
+		ctx := c.Context()
 		v, ok := ctx.Value(ctxkCfg{}).(*viper.Viper)
 		if !ok {
 			return errors.New("invalid context")
 		}
+
 		return run(ctx, v)
 	}
 }
