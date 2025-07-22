@@ -15,6 +15,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/logging"
 	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/gl"
@@ -58,7 +59,7 @@ func (p *aws) SetSourceConfig(ctx context.Context, cfg map[string]any) error {
 	}
 
 	var awsCfg aws2.Config
-	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(creds.Region),
+	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(creds.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
 	if err != nil {
 		return fmt.Errorf("cannot load default aws config: %w", err)
