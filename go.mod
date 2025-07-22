@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/compute v1.41.0
 	cloud.google.com/go/storage v1.55.0
 	cuelang.org/go v0.13.2
-	github.com/aws/aws-sdk-go-v2 v1.36.5
+	github.com/aws/aws-sdk-go-v2 v1.36.6
 	github.com/aws/aws-sdk-go-v2/config v1.29.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.70
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.232.0
