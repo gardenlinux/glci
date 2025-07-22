@@ -144,7 +144,6 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if err != nil {
 		return nil, fmt.Errorf("cannot upload blob for image %s in project %s: %w", image, project, err)
 	}
-	ctx = log.WithValues(ctx, "blob", blob.ObjectName())
 
 	err = p.insertImage(ctx, blobURL, image, architecture, secureBoot, pk, kek, db)
 	if err != nil {
@@ -269,18 +268,22 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 }
 
 func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image string) (*storage.ObjectHandle, string, error) {
-	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key)
+	blobName := image + ".tar.gz"
+	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "blob", blobName)
 
-	r, err := source.GetObject(ctx, key)
+	obj, err := source.GetObject(ctx, key)
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot get blob: %w", err)
 	}
+	defer func() {
+		_ = obj.Close()
+	}()
 
 	log.Info(ctx, "Uploading blob")
 	bucket := p.storageClient.Bucket(p.pubCfg.Bucket)
-	blob := bucket.Object(image + ".tar.gz")
+	blob := bucket.Object(blobName)
 	w := blob.NewWriter(ctx)
-	_, err = io.Copy(w, r)
+	_, err = io.Copy(w, obj)
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot write to object writer: %w", err)
 	}
@@ -290,14 +293,19 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	}
 	log.Debug(ctx, "Blob uploaded")
 
+	err = obj.Close()
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot close blob: %w", err)
+	}
+
 	var url string
-	url, err = bucket.SignedURL(blob.ObjectName(), &storage.SignedURLOptions{
+	url, err = bucket.SignedURL(blobName, &storage.SignedURLOptions{
 		Method:  "GET",
 		Expires: time.Now().Add(7 * time.Hour),
 		Scheme:  storage.SigningSchemeV4,
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot generate signed URL for blob %s: %w", blob.ObjectName(), err)
+		return nil, "", fmt.Errorf("cannot generate signed URL for blob %s: %w", blobName, err)
 	}
 
 	return blob, url, nil
@@ -375,6 +383,7 @@ func (*gcp) deleteBlob(ctx context.Context, blob *storage.ObjectHandle) error {
 func (p *gcp) makePublic(ctx context.Context, image string) error {
 	project := p.creds[p.pubCfg.Config].Project
 
+	log.Debug(ctx, "Setting IAM policy")
 	_, err := p.imagesClient.SetIamPolicy(ctx, &computepb.SetIamPolicyImageRequest{
 		GlobalSetPolicyRequestResource: &computepb.GlobalSetPolicyRequest{
 			Policy: &computepb.Policy{

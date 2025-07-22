@@ -585,7 +585,7 @@ func (*aws) registerImage(ctx context.Context, ec2Client *ec2.Client, snapshot, 
 	return *r.ImageId, nil
 }
 
-func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, imageName, imageID, fromRegion string,
+func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, image, imageID, fromRegion string,
 	toRegions []string,
 ) (map[string]string, error) {
 	images := make(map[string]string, len(toRegions))
@@ -598,16 +598,16 @@ func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, imageName, ima
 
 		log.Info(ctx, "Copying image", "toRegion", region)
 		r, err := ec2Client.CopyImage(ctx, &ec2.CopyImageInput{
-			Name:          &imageName,
+			Name:          &image,
 			SourceImageId: &imageID,
 			SourceRegion:  &fromRegion,
 			CopyImageTags: util.Ptr(true),
 		}, overrideRegion(region))
 		if err != nil {
-			return images, fmt.Errorf("cannot copy image %s to region %s: %w", imageID, region, err)
+			return nil, fmt.Errorf("cannot copy image %s to region %s: %w", imageID, region, err)
 		}
 		if r.ImageId == nil {
-			return images, fmt.Errorf("cannot copy image %s to region %s: missing image ID", imageID, region)
+			return nil, fmt.Errorf("cannot copy image %s to region %s: missing image ID", imageID, region)
 		}
 		images[region] = *r.ImageId
 	}
@@ -631,11 +631,11 @@ func (*aws) waitForImages(ctx context.Context, ec2Client *ec2.Client, images map
 			}
 			state = r.Images[0].State
 
-			if state == ec2types.ImageStateInvalid || state == ec2types.ImageStateFailed || state == ec2types.ImageStateError {
-				return fmt.Errorf("image %s in region %s is in %s state", imageID, region, state)
-			}
-
 			if state != ec2types.ImageStateAvailable {
+				if state != ec2types.ImageStatePending {
+					return fmt.Errorf("image %s in region %s has state %s", imageID, region, state)
+				}
+
 				time.Sleep(time.Second * 7)
 			}
 		}
@@ -698,9 +698,8 @@ func (*aws) getImageIDsByRegion(ctx context.Context, ec2Client *ec2.Client, imag
 			continue
 		}
 		if r.Images[0].ImageId == nil {
-			return nil, fmt.Errorf("missing image ID in region %s", region)
+			return nil, fmt.Errorf("cannot describe image in region %s: missing image ID", region)
 		}
-
 		images[region] = *r.Images[0].ImageId
 	}
 

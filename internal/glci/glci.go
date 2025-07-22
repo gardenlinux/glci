@@ -28,10 +28,12 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
+		found := false
 		for _, target := range targets {
 			if target.Type() != flavor.Platform {
 				continue
 			}
+			found = true
 			lctx := log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
 			log.Info(lctx, "Retrieving manifest")
@@ -73,6 +75,9 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 				Manifest: manifest,
 				Target:   target,
 			})
+		}
+		if !found {
+			return fmt.Errorf("no publishing target for %s", flavor.Cname)
 		}
 	}
 
@@ -147,10 +152,12 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
+		found := false
 		for _, target := range targets {
 			if target.Type() != flavor.Platform {
 				continue
 			}
+			found = true
 			lctx := log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
 			log.Info(lctx, "Retrieving manifest")
@@ -181,6 +188,9 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 				Manifest: manifest,
 				Target:   target,
 			})
+		}
+		if !found {
+			return fmt.Errorf("no publishing target for %s", flavor.Cname)
 		}
 	}
 
