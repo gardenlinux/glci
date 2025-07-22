@@ -8,6 +8,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/cmd"
 	"github.com/gardenlinux/glci/internal/glci"
+	"github.com/gardenlinux/glci/internal/log"
 )
 
 func publishCmd() *cobra.Command {
@@ -27,6 +28,8 @@ func publishCmd() *cobra.Command {
 }
 
 func publish(ctx context.Context, cfg *viper.Viper) error {
+	log.Info(ctx, "GLCI", "version", version)
+
 	flavorsCfg, publishingCfg, aliasesCfg, creds, err := loadConfigAndCredentials(ctx, cfg)
 	if err != nil {
 		return err

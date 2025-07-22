@@ -8,6 +8,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/cmd"
 	"github.com/gardenlinux/glci/internal/glci"
+	"github.com/gardenlinux/glci/internal/log"
 )
 
 func removeCmd() *cobra.Command {
@@ -27,6 +28,8 @@ func removeCmd() *cobra.Command {
 }
 
 func remove(ctx context.Context, cfg *viper.Viper) error {
+	log.Info(ctx, "GLCI", "version", version)
+
 	flavorsCfg, publishingCfg, _, creds, err := loadConfigAndCredentials(ctx, cfg)
 	if err != nil {
 		return err
