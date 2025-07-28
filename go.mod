@@ -11,12 +11,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.71
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.234.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.84.1
+	github.com/aws/smithy-go v1.22.4
 	github.com/go-logr/logr v1.4.3
 	github.com/go-logr/zerologr v1.2.3
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/goccy/go-yaml v1.18.0
 	github.com/onsi/ginkgo/v2 v2.23.4
-	github.com/onsi/gomega v1.37.0
+	github.com/onsi/gomega v1.38.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/rs/zerolog v1.34.0
@@ -50,7 +51,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.25.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.34.1 // indirect
-	github.com/aws/smithy-go v1.22.4 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20250326154945-ae57f3c0d45f // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
