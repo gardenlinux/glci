@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	aws2 "github.com/aws/aws-sdk-go-v2/aws"
@@ -18,14 +19,16 @@ import (
 	"github.com/aws/smithy-go/logging"
 	"github.com/goccy/go-yaml"
 
+	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
-	"github.com/gardenlinux/glci/internal/util"
+	"github.com/gardenlinux/glci/internal/ptr"
+	"github.com/gardenlinux/glci/internal/slc"
 )
 
 func init() {
-	util.CleanEnv("AWS_")
-	util.CleanEnv("_X_AMZN_")
+	env.Clean("AWS_")
+	env.Clean("_X_AMZN_")
 
 	registerArtifactSource(func() ArtifactSource {
 		return &aws{}
@@ -92,6 +95,12 @@ func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 			return fmt.Errorf("missing credentials config %s", target.Config)
 		}
 
+		if target.Regions != nil {
+			if !slices.Contains(*target.Regions, creds.Region) {
+				return fmt.Errorf("credentials region %s missing from list of regions", creds.Region)
+			}
+		}
+
 		var awsCfg aws2.Config
 		awsCfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(creds.Region),
 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
@@ -113,6 +122,9 @@ func (p *aws) Repository() string {
 }
 
 func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	if p.srcS3Client == nil {
+		return nil, errors.New("config not set")
+	}
 	ctx = log.WithValues(ctx, "source", p.Type())
 
 	log.Debug(ctx, "Getting object", "bucket", p.srcCfg.Bucket, "key", key)
@@ -181,6 +193,9 @@ func (p *aws) GetManifest(ctx context.Context, key string) (*gl.Manifest, error)
 }
 
 func (p *aws) PutManifest(ctx context.Context, key string, manifest *gl.Manifest) error {
+	if p.srcS3Client == nil {
+		return errors.New("config not set")
+	}
 	ctx = log.WithValues(ctx, "source", p.Type())
 
 	var buf bytes.Buffer
@@ -194,8 +209,8 @@ func (p *aws) PutManifest(ctx context.Context, key string, manifest *gl.Manifest
 		Bucket:          &p.srcCfg.Bucket,
 		Key:             &key,
 		Body:            &buf,
-		ContentEncoding: util.Ptr("utf-8"),
-		ContentType:     util.Ptr("text/yaml"),
+		ContentEncoding: ptr.P("utf-8"),
+		ContentType:     ptr.P("text/yaml"),
 	})
 	if err != nil {
 		return fmt.Errorf("cannot put object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
@@ -211,6 +226,10 @@ func (*aws) ImageSuffix() string {
 func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
 	error,
 ) {
+	if len(p.tgtEC2Clients) == 0 {
+		return nil, errors.New("config not set")
+	}
+
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
@@ -245,7 +264,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 			return nil, fmt.Errorf("cannot list regions: %w", err)
 		}
 		if target.Regions != nil {
-			regions = util.Subset(regions, *target.Regions)
+			regions = slc.Subset(regions, *target.Regions)
 		}
 		if len(regions) == 0 {
 			return nil, errors.New("no available regions")
@@ -299,6 +318,10 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 }
 
 func (p *aws) Remove(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) error {
+	if len(p.tgtEC2Clients) == 0 {
+		return errors.New("config not set")
+	}
+
 	for _, target := range p.pubCfg.Targets {
 		_, ok := sources[target.Source]
 		if !ok {
@@ -418,14 +441,14 @@ func (p *aws) prepareTags(manifest *gl.Manifest) []ec2types.Tag {
 
 		if p.pubCfg.ImageTags.IncludeGardenLinuxVersion != nil && *p.pubCfg.ImageTags.IncludeGardenLinuxVersion {
 			tags = append(tags, ec2types.Tag{
-				Key:   util.Ptr("gardenlinux-version"),
+				Key:   ptr.P("gardenlinux-version"),
 				Value: &manifest.Version,
 			})
 		}
 
 		if p.pubCfg.ImageTags.IncludeGardenLinuxCommittish != nil && *p.pubCfg.ImageTags.IncludeGardenLinuxCommittish {
 			tags = append(tags, ec2types.Tag{
-				Key:   util.Ptr("gardenlinux-committish"),
+				Key:   ptr.P("gardenlinux-committish"),
 				Value: &manifest.BuildCommittish,
 			})
 		}
@@ -451,7 +474,7 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 			return false, false, nil, fmt.Errorf("cannot get efivars: %w", err)
 		}
 
-		uefiData = util.Ptr(string(efivars))
+		uefiData = ptr.P(string(efivars))
 	}
 
 	return requireUEFI, secureBoot, uefiData, nil
@@ -483,13 +506,13 @@ func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, source Ar
 	r, err := ec2Client.ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
 		DiskContainer: &ec2types.SnapshotDiskContainer{
 			Description: &image,
-			Format:      util.Ptr("raw"),
+			Format:      ptr.P("raw"),
 			UserBucket: &ec2types.UserBucket{
 				S3Bucket: &bucket,
 				S3Key:    &key,
 			},
 		},
-		Encrypted: util.Ptr(false),
+		Encrypted: ptr.P(false),
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot import snapshot from %s in bucket %s: %w", key, bucket, err)
@@ -552,18 +575,18 @@ func (*aws) registerImage(ctx context.Context, ec2Client *ec2.Client, snapshot, 
 		Name:         &image,
 		Architecture: architecture,
 		BlockDeviceMappings: []ec2types.BlockDeviceMapping{{
-			DeviceName: util.Ptr("/dev/xvda"),
+			DeviceName: ptr.P("/dev/xvda"),
 			Ebs: &ec2types.EbsBlockDevice{
-				DeleteOnTermination: util.Ptr(true),
+				DeleteOnTermination: ptr.P(true),
 				SnapshotId:          &snapshot,
 				VolumeType:          ec2types.VolumeTypeGp3,
 			},
 		}},
 		BootMode:           ec2types.BootModeValuesUefiPreferred,
-		EnaSupport:         util.Ptr(true),
+		EnaSupport:         ptr.P(true),
 		ImdsSupport:        ec2types.ImdsSupportValuesV20,
-		RootDeviceName:     util.Ptr("/dev/xvda"),
-		VirtualizationType: util.Ptr("hvm"),
+		RootDeviceName:     ptr.P("/dev/xvda"),
+		VirtualizationType: ptr.P("hvm"),
 	}
 	if requireUEFI {
 		params.BootMode = ec2types.BootModeValuesUefi
@@ -602,7 +625,7 @@ func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, image, imageID
 			Name:          &image,
 			SourceImageId: &imageID,
 			SourceRegion:  &fromRegion,
-			CopyImageTags: util.Ptr(true),
+			CopyImageTags: ptr.P(true),
 		}, overrideRegion(region))
 		if err != nil {
 			return nil, fmt.Errorf("cannot copy image %s to region %s: %w", imageID, region, err)
@@ -651,7 +674,7 @@ func (*aws) makePublic(ctx context.Context, ec2Client *ec2.Client, images map[st
 		log.Debug(ctx, "Adding launch permission to image", "toRegion", region, "toImageID", imageID)
 		_, err := ec2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
 			ImageId:   &imageID,
-			Attribute: util.Ptr("launchPermission"),
+			Attribute: ptr.P("launchPermission"),
 			LaunchPermission: &ec2types.LaunchPermissionModifications{
 				Add: []ec2types.LaunchPermission{
 					{
@@ -681,13 +704,13 @@ func (*aws) getImageIDsByRegion(ctx context.Context, ec2Client *ec2.Client, imag
 		r, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 			Filters: []ec2types.Filter{
 				{
-					Name: util.Ptr("name"),
+					Name: ptr.P("name"),
 					Values: []string{
 						image,
 					},
 				},
 			},
-			MaxResults: util.Ptr(int32(5)),
+			MaxResults: ptr.P(int32(5)),
 		}, overrideRegion(region))
 		if err != nil {
 			return nil, fmt.Errorf("cannot describe image in region %s: %w", region, err)
@@ -713,7 +736,7 @@ func (*aws) deregisterImage(ctx context.Context, ec2Client *ec2.Client, imageID,
 	log.Info(ctx, "Deregistering image")
 	r, err := ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
 		ImageId:                   &imageID,
-		DeleteAssociatedSnapshots: util.Ptr(true),
+		DeleteAssociatedSnapshots: ptr.P(true),
 	}, overrideRegion(region))
 	if err != nil {
 		return fmt.Errorf("cannot deregister image %s in region %s: %w", imageID, region, err)
