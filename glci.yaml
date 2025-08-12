@@ -54,6 +54,10 @@ publishing:
     bucket: gardenlinux-github-releases
     config: gardenlinux-cn
   targets:
+  - type: Aliyun
+    source: S3
+    config: gardenlinux
+    bucket: gardenlinux-community
   - type: AWS
     targets:
     - source: S3

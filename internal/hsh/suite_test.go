@@ -1,4 +1,4 @@
-package util_test
+package hsh_test
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-func TestUtil(t *testing.T) {
+func TestHsh(t *testing.T) {
 	RegisterFailHandler(Fail)
 	t.Parallel()
 }

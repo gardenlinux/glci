@@ -53,6 +53,11 @@ publishing:
     bucket: gardenlinux-test-import
     config: gardenlinux-integration-test
   targets:
+  - type: Aliyun
+    source: S3
+    config: gardenlinux-integration-test
+    bucket: gardenlinux-test-upload
+    regions: [ eu-central-1, eu-west-1 ]
   - type: AWS
     targets:
     - source: S3

@@ -16,18 +16,20 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/option"
 
+	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
-	"github.com/gardenlinux/glci/internal/util"
+	"github.com/gardenlinux/glci/internal/ptr"
 )
 
 func init() {
-	util.CleanEnv("EXPERIMENTAL_GOOGLE_")
-	util.CleanEnv("GCE_")
-	util.CleanEnv("GOOGLE_")
-	util.CleanEnv("GRPC_")
-	util.CleanEnv("OTEL_")
-	util.CleanEnv("STORAGE_EMULATOR_HOST")
+	env.Clean("EXPERIMENTAL_GOOGLE_")
+	env.Clean("GCE_")
+	env.Clean("GOOGLE_")
+	env.Clean("GRPC_")
+	env.Clean("OTEL_")
+	env.Clean("STORAGE_EMULATOR_HOST")
 
 	registerPublishingTarget(func() PublishingTarget {
 		return &gcp{}
@@ -115,6 +117,10 @@ func (*gcp) ImageSuffix() string {
 func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
 	error,
 ) {
+	if p.storageClient == nil || p.imagesClient == nil {
+		return nil, errors.New("config not set")
+	}
+
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
@@ -167,6 +173,10 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 }
 
 func (p *gcp) Remove(ctx context.Context, cname string, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+	if p.storageClient == nil || p.imagesClient == nil {
+		return errors.New("config not set")
+	}
+
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	project := p.creds[p.pubCfg.Config].Project
 	ctx = log.WithValues(ctx, "target", p.Type(), "image", image, "project", project)
@@ -204,7 +214,7 @@ type gcpPublishingOutput struct {
 }
 
 func (*gcp) imageName(cname, version, committish string) string {
-	cname = util.Hash(fnv.New64(), cname)
+	cname = hsh.Hash(fnv.New64(), cname)
 	version = strings.ReplaceAll(version, ".", "-")
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
@@ -317,13 +327,13 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, architecture string,
 		Architecture: &architecture,
 		GuestOsFeatures: []*computepb.GuestOsFeature{
 			{
-				Type: util.Ptr("VIRTIO_SCSI_MULTIQUEUE"),
+				Type: ptr.P("VIRTIO_SCSI_MULTIQUEUE"),
 			},
 			{
-				Type: util.Ptr("UEFI_COMPATIBLE"),
+				Type: ptr.P("UEFI_COMPATIBLE"),
 			},
 			{
-				Type: util.Ptr("GVNIC"),
+				Type: ptr.P("GVNIC"),
 			},
 		},
 		Name: &image,
@@ -336,18 +346,18 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, architecture string,
 			Dbs: []*computepb.FileContentBuffer{
 				{
 					Content:  &db,
-					FileType: util.Ptr("X509"),
+					FileType: ptr.P("X509"),
 				},
 			},
 			Keks: []*computepb.FileContentBuffer{
 				{
 					Content:  &kek,
-					FileType: util.Ptr("X509"),
+					FileType: ptr.P("X509"),
 				},
 			},
 			Pk: &computepb.FileContentBuffer{
 				Content:  &pk,
-				FileType: util.Ptr("X509"),
+				FileType: ptr.P("X509"),
 			},
 		}
 	}
@@ -393,10 +403,10 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 						Members: []string{
 							"allAuthenticatedUsers",
 						},
-						Role: util.Ptr("roles/compute.imageUser"),
+						Role: ptr.P("roles/compute.imageUser"),
 					},
 				},
-				Version: util.Ptr(int32(3)),
+				Version: ptr.P(int32(3)),
 			},
 		},
 		Project:  project,
