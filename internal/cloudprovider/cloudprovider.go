@@ -20,6 +20,8 @@ type ArtifactSource interface {
 	SetSourceConfig(ctx context.Context, config map[string]any) error
 	Close() error
 	Repository() string
+	GetObjectURL(key string) string
+	GetObjectSize(ctx context.Context, key string) (int64, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, object io.Reader) error
 }
@@ -132,7 +134,6 @@ type Publication struct {
 	Cname    string
 	Manifest *gl.Manifest
 	Target   PublishingTarget
-	Output   PublishingOutput
 }
 
 // PublishingOutput is an opaque representation of the result of a publishing operation.

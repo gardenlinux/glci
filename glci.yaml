@@ -68,6 +68,17 @@ publishing:
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
+  - type: Azure
+    source: S3
+    storage_account_config: gardenlinux-community-gallery
+    service_principal_config: gardenlinux
+    gallery_config: gardenlinux-community-gallery-nvme
+  - type: Azure
+    source: S3-China
+    cloud: China
+    storage_account_config: gardenlinux-community-gallery-cn
+    service_principal_config: gardenlinux-cn
+    gallery_config: gardenlinux-community-gallery-nvme-cn
   - type: GCP
     source: S3
     config: gardenlinux

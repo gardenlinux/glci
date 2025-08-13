@@ -132,6 +132,38 @@ func (p *aws) Repository() string {
 	return p.srcCfg.Bucket
 }
 
+func (p *aws) GetObjectURL(key string) string {
+	return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", p.srcCfg.Bucket, key)
+}
+
+func (p *aws) GetObjectSize(ctx context.Context, key string) (int64, error) {
+	if p.srcS3Client == nil {
+		return 0, errors.New("config not set")
+	}
+	ctx = log.WithValues(ctx, "source", p.Type())
+
+	log.Debug(ctx, "Heading object", "bucket", p.srcCfg.Bucket, "key", key)
+	r, err := p.srcS3Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &p.srcCfg.Bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		var noSuchKey *s3types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			err = KeyNotFoundError{
+				err: err,
+			}
+		}
+
+		return 0, fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
+	}
+	if r.ContentLength == nil {
+		return 0, fmt.Errorf("cannot head object %s from bucket %s: missing content length", key, p.srcCfg.Bucket)
+	}
+
+	return *r.ContentLength, nil
+}
+
 func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	if p.srcS3Client == nil {
 		return nil, errors.New("config not set")

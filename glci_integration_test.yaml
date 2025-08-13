@@ -70,6 +70,12 @@ publishing:
         sec-by-def-public-image-exception: enabled
         purpose: test
         test-type: gardener-integration
+  - type: Azure
+    source: S3
+    storage_account_config: gardenlinux-integration-test
+    service_principal_config: gardenlinux-integration-test
+    gallery_config: gardenlinux-integration-test
+    regions: [ westeurope, northeurope ]
   - type: GCP
     source: S3
     config: gardenlinux-integration-test
