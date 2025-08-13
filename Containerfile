@@ -1,12 +1,10 @@
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.24.6 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.25.0 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
 WORKDIR /glci
 COPY go.mod go.mod
 COPY go.sum go.sum
-RUN go mod download
-
 COPY cmd/ cmd/
 COPY internal/ internal/
 ARG version=dev

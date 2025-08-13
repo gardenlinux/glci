@@ -51,6 +51,14 @@ func (*fake) Repository() string {
 	return "fake"
 }
 
+func (*fake) GetObjectURL(_ string) string {
+	return "https://example.com/fake"
+}
+
+func (*fake) GetObjectSize(_ context.Context, _ string) (int64, error) {
+	return 0, nil
+}
+
 func (p *fake) GetObject(_ context.Context, _ string) (io.ReadCloser, error) {
 	return p, nil
 }
