@@ -34,11 +34,12 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 				continue
 			}
 			found = true
+			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
 			lctx := log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
 			log.Info(lctx, "Retrieving manifest")
 			var manifest *gl.Manifest
-			manifest, err = manifestSource.GetManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit))
+			manifest, err = cloudprovider.GetManifest(lctx, manifestSource, manifestKey)
 			if err != nil {
 				return fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, err)
 			}
@@ -52,7 +53,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 
 			log.Debug(lctx, "Retrieving target manifest")
 			var targetManifest *gl.Manifest
-			targetManifest, err = manifestTarget.GetManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit))
+			targetManifest, err = cloudprovider.GetManifest(lctx, manifestTarget, manifestKey)
 			if err != nil && !errors.As(err, &cloudprovider.KeyNotFoundError{}) {
 				return fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, err)
 			}
@@ -89,6 +90,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 
 	log.Info(ctx, "Publishing images", "count", len(publications))
 	for i, publication := range publications {
+		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 		log.Info(lctx, "Publishing image")
@@ -100,8 +102,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		publications[i].Manifest.PublishedImageMetadata = output
 
 		log.Info(lctx, "Updating manifest")
-		err = manifestTarget.PutManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit),
-			publication.Manifest)
+		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publication.Manifest)
 		if err != nil {
 			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
 		}
@@ -158,11 +159,12 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 				continue
 			}
 			found = true
+			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
 			lctx := log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
 			log.Info(lctx, "Retrieving manifest")
 			var manifest *gl.Manifest
-			manifest, err = manifestTarget.GetManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit))
+			manifest, err = cloudprovider.GetManifest(lctx, manifestTarget, manifestKey)
 			if err != nil {
 				if errors.As(err, &cloudprovider.KeyNotFoundError{}) && manifestTarget != manifestSource {
 					log.Debug(lctx, "Manifest not found, skipping")
@@ -201,6 +203,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	}
 
 	for i, publication := range publications {
+		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 		log.Info(lctx, "Removing image")
@@ -212,8 +215,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		publications[i].Manifest.PublishedImageMetadata = output
 
 		log.Info(lctx, "Updating manifest")
-		err = manifestTarget.PutManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit),
-			publication.Manifest)
+		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publication.Manifest)
 		if err != nil {
 			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
 		}

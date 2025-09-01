@@ -74,11 +74,22 @@ linters:
       - name: struct-tag
         arguments:
         - mapstructure,remain
+        - yaml,remain
       - name: var-naming
         arguments:
         - []
         - []
         - [ skip-package-name-checks: true ]
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+          yaml: snake
+          xml: snake
+          bson: snake
+          avro: snake
+          header: snake
+          mapstructure: snake
   exclusions:
     rules:
     - path: internal/cloudprovider/.+\.go
