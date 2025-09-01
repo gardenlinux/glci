@@ -7,7 +7,7 @@ require (
 	cloud.google.com/go/storage v1.56.1
 	cuelang.org/go v0.14.1
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.11
-	github.com/alibabacloud-go/ecs-20140526/v7 v7.1.3
+	github.com/alibabacloud-go/ecs-20140526/v7 v7.2.0
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.2.3
 	github.com/aws/aws-sdk-go-v2 v1.38.3
 	github.com/aws/aws-sdk-go-v2/config v1.31.6
