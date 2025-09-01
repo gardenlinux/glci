@@ -55,15 +55,7 @@ func (p *fake) GetObject(_ context.Context, _ string) (io.ReadCloser, error) {
 	return p, nil
 }
 
-func (*fake) GetObjectBytes(_ context.Context, _ string) ([]byte, error) {
-	return nil, nil
-}
-
-func (*fake) GetManifest(_ context.Context, _ string) (*gl.Manifest, error) {
-	return &gl.Manifest{}, nil
-}
-
-func (*fake) PutManifest(_ context.Context, _ string, _ *gl.Manifest) error {
+func (*fake) PutObject(_ context.Context, _ string, _ io.Reader) error {
 	return nil
 }
 

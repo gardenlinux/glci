@@ -246,7 +246,7 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		}
 
 		var rawPK []byte
-		rawPK, err = source.GetObjectBytes(ctx, pkFile.S3Key)
+		rawPK, err = getObjectBytes(ctx, source, pkFile.S3Key)
 		if err != nil {
 			return false, "", "", "", fmt.Errorf("cannot get PK: %w", err)
 		}
@@ -259,7 +259,7 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		}
 
 		var rawKEK []byte
-		rawKEK, err = source.GetObjectBytes(ctx, kekFile.S3Key)
+		rawKEK, err = getObjectBytes(ctx, source, kekFile.S3Key)
 		if err != nil {
 			return false, "", "", "", fmt.Errorf("cannot get KEK: %w", err)
 		}
@@ -272,7 +272,7 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		}
 
 		var rawDB []byte
-		rawDB, err = source.GetObjectBytes(ctx, dbFile.S3Key)
+		rawDB, err = getObjectBytes(ctx, source, dbFile.S3Key)
 		if err != nil {
 			return false, "", "", "", fmt.Errorf("cannot get DB: %w", err)
 		}

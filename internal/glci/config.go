@@ -81,12 +81,12 @@ type cfgFlavor struct {
 type cfgSource struct {
 	ID     string         `mapstructure:"id"`
 	Type   string         `mapstructure:"type"`
-	Config map[string]any `mapstructure:",remain"`
+	Config map[string]any `mapstructure:"-,remain"`
 }
 
 type cfgTarget struct {
 	Type   string         `mapstructure:"type"`
-	Config map[string]any `mapstructure:",remain"`
+	Config map[string]any `mapstructure:"-,remain"`
 }
 
 // AliasesConfig contains package aliases which are reflected in the component descriptor.

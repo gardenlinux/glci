@@ -1,7 +1,6 @@
 package cloudprovider
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	aws2 "github.com/aws/aws-sdk-go-v2/aws"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -17,7 +16,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/logging"
-	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
@@ -61,7 +59,7 @@ func (p *aws) SetSourceConfig(ctx context.Context, cfg map[string]any) error {
 		return fmt.Errorf("missing credentials config %s", p.srcCfg.Config)
 	}
 
-	var awsCfg aws2.Config
+	var awsCfg awssdk.Config
 	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(creds.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
 	if err != nil {
@@ -114,7 +112,7 @@ func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 
 		p.pubCfg.Targets[t] = target
 
-		var awsCfg aws2.Config
+		var awsCfg awssdk.Config
 		awsCfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(creds.Region),
 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
 		if err != nil {
@@ -159,69 +157,17 @@ func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) 
 	return r.Body, nil
 }
 
-func (p *aws) GetObjectBytes(ctx context.Context, key string) ([]byte, error) {
-	body, err := p.GetObject(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = body.Close()
-	}()
-
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(body)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read object: %w", err)
-	}
-
-	err = body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("cannot close object: %w", err)
-	}
-
-	return buf.Bytes(), nil
-}
-
-func (p *aws) GetManifest(ctx context.Context, key string) (*gl.Manifest, error) {
-	body, err := p.GetObject(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = body.Close()
-	}()
-
-	manifest := &gl.Manifest{}
-	err = yaml.NewDecoder(body).Decode(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
-	}
-
-	err = body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("cannot close object: %w", err)
-	}
-
-	return manifest, nil
-}
-
-func (p *aws) PutManifest(ctx context.Context, key string, manifest *gl.Manifest) error {
+func (p *aws) PutObject(ctx context.Context, key string, object io.Reader) error {
 	if p.srcS3Client == nil {
 		return errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "source", p.Type())
 
-	var buf bytes.Buffer
-	err := yaml.NewEncoder(&buf).Encode(manifest)
-	if err != nil {
-		return fmt.Errorf("invalid manifest: %w", err)
-	}
-
 	log.Debug(ctx, "Putting object", "bucket", p.srcCfg.Bucket, "key", key)
-	_, err = p.srcS3Client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := p.srcS3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:          &p.srcCfg.Bucket,
 		Key:             &key,
-		Body:            &buf,
+		Body:            object,
 		ContentEncoding: ptr.P("utf-8"),
 		ContentType:     ptr.P("text/yaml"),
 	})
@@ -496,7 +442,7 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		}
 
 		var efivars []byte
-		efivars, err = source.GetObjectBytes(ctx, efivarsFile.S3Key)
+		efivars, err = getObjectBytes(ctx, source, efivarsFile.S3Key)
 		if err != nil {
 			return false, false, nil, fmt.Errorf("cannot get efivars: %w", err)
 		}

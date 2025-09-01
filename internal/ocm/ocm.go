@@ -16,8 +16,8 @@ import (
 
 // ComponentDescriptor is an OCM data structure that Gardener consumes.
 type ComponentDescriptor struct {
-	Meta      componentDescriptorMetadata  `json:"meta"`
-	Component componentDescriptorComponent `json:"component"`
+	Meta      componentDescriptorMetadata  `yaml:"meta"`
+	Component componentDescriptorComponent `yaml:"component"`
 }
 
 // ToYAML serializes a component desctiptor to YAML.
@@ -211,70 +211,76 @@ const (
 	githubRepoURL     = "https://" + gl.GardenLinuxRepo
 )
 
+//nolint:tagliatelle // Defined by OCM.
 type componentDescriptorMetadata struct {
-	ConfiguredVersion string `json:"configuredSchemaVersion"`
+	ConfiguredVersion string `yaml:"configuredSchemaVersion"`
 }
 
+//nolint:tagliatelle // Defined by OCM.
 type componentDescriptorComponent struct {
-	Name                string                                 `json:"name"`
-	Version             string                                 `json:"version"`
-	Provider            componentDescriptorProvider            `json:"provider"`
-	RepositoryContexts  []componentDescriptorRepositoryContext `json:"repositoryContexts"`
-	Sources             []componentDescriptorSource            `json:"sources"`
-	ComponentReferences []struct{}                             `json:"componentReferences"`
-	Resources           []componentDesciptorResource           `json:"resources"`
+	Name                string                                 `yaml:"name"`
+	Version             string                                 `yaml:"version"`
+	Provider            componentDescriptorProvider            `yaml:"provider"`
+	RepositoryContexts  []componentDescriptorRepositoryContext `yaml:"repositoryContexts"`
+	Sources             []componentDescriptorSource            `yaml:"sources"`
+	ComponentReferences []struct{}                             `yaml:"componentReferences"`
+	Resources           []componentDesciptorResource           `yaml:"resources"`
 }
 
 type componentDescriptorProvider struct {
-	Name string `json:"name"`
+	Name string `yaml:"name"`
 }
 
+//nolint:tagliatelle // Defined by OCM.
 type componentDescriptorRepositoryContext struct {
-	Type                 string `json:"type"`
-	ComponentNameMapping string `json:"componentNameMapping"`
-	BaseURL              string `json:"baseUrl"`
-	SubPath              string `json:"subPath"`
+	Type                 string `yaml:"type"`
+	ComponentNameMapping string `yaml:"componentNameMapping"`
+	BaseURL              string `yaml:"baseUrl"`
+	SubPath              string `yaml:"subPath"`
 }
 
 type componentDescriptorSource struct {
-	Name    string                     `json:"name"`
-	Version string                     `json:"version"`
-	Labels  []componentDescriptorlabel `json:"labels,omitempty"`
-	Type    string                     `json:"type"`
-	Access  componentDescriptorGitHub  `json:"access"`
+	Name    string                     `yaml:"name"`
+	Version string                     `yaml:"version"`
+	Labels  []componentDescriptorlabel `yaml:"labels,omitempty"`
+	Type    string                     `yaml:"type"`
+	Access  componentDescriptorGitHub  `yaml:"access"`
 }
 
 type componentDescriptorlabel struct {
-	Name  string `json:"name"`
-	Value any    `json:"value"`
+	Name  string `yaml:"name"`
+	Value any    `yaml:"value"`
 }
 
+//nolint:tagliatelle // Defined by OCM.
 type componentDescriptorGitHub struct {
-	Type    string `json:"type"`
-	RepoURL string `json:"repoUrl"`
-	Commit  string `json:"commit"`
+	Type    string `yaml:"type"`
+	RepoURL string `yaml:"repoUrl"`
+	Commit  string `yaml:"commit"`
 }
 
+//nolint:tagliatelle // Defined by OCM.
 type componentDesciptorResource struct {
-	Name          string                     `json:"name"`
-	Version       string                     `json:"version"`
-	ExtraIdentity map[string]string          `json:"extraIdentity,omitempty"`
-	Labels        []componentDescriptorlabel `json:"labels,omitempty"`
-	Type          string                     `json:"type"`
-	Digest        *componentDescriptorDigest `json:"digest,omitempty"`
-	Access        componentDescriptorS3      `json:"access"`
+	Name          string                     `yaml:"name"`
+	Version       string                     `yaml:"version"`
+	ExtraIdentity map[string]string          `yaml:"extraIdentity,omitempty"`
+	Labels        []componentDescriptorlabel `yaml:"labels,omitempty"`
+	Type          string                     `yaml:"type"`
+	Digest        *componentDescriptorDigest `yaml:"digest,omitempty"`
+	Access        componentDescriptorS3      `yaml:"access"`
 }
 
+//nolint:tagliatelle // Defined by OCM.
 type componentDescriptorDigest struct {
-	HashAlgorithm          string `json:"hashAlgorithm"`
-	NormalisationAlgorithm string `json:"normalisationAlgorithm"`
-	Value                  string `json:"value"`
+	HashAlgorithm          string `yaml:"hashAlgorithm"`
+	NormalisationAlgorithm string `yaml:"normalisationAlgorithm"`
+	Value                  string `yaml:"value"`
 }
 
 type componentDescriptorS3 struct {
-	Type   string `json:"type"`
-	Bucket string `json:"bucket"`
-	Key    string `json:"key"`
+	Type   string `yaml:"type"`
+	Bucket string `yaml:"bucket"`
+	Key    string `yaml:"key"`
 }
 
 type nameVersion struct {

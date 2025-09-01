@@ -1,6 +1,7 @@
 package cloudprovider
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,9 +21,7 @@ type ArtifactSource interface {
 	Close() error
 	Repository() string
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
-	GetObjectBytes(ctx context.Context, key string) ([]byte, error)
-	GetManifest(ctx context.Context, key string) (*gl.Manifest, error)
-	PutManifest(ctx context.Context, key string, manifest *gl.Manifest) error
+	PutObject(ctx context.Context, key string, object io.Reader) error
 }
 
 // PublishingTarget is a target onto which GLCI can publish Garden Linux images.
@@ -74,6 +73,55 @@ func NewOCMTarget(typ string) (OCMTarget, error) {
 	}
 
 	return nf(), nil
+}
+
+// GetManifest retrieves a manifest from an artifact source.
+func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gl.Manifest, error) {
+	body, err := source.GetObject(ctx, key)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Directly wraps the source.
+	}
+	defer func() {
+		_ = body.Close()
+	}()
+
+	var rawManifest map[string]any
+	err = yaml.NewDecoder(body).Decode(&rawManifest)
+	if err != nil {
+		return nil, fmt.Errorf("invalid manifest: %w", err)
+	}
+
+	manifest := &gl.Manifest{}
+	var decoder *mapstructure.Decoder
+	decoder, err = mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:  manifest,
+		TagName: "yaml",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invalid manifest: %w", err)
+	}
+	err = decoder.Decode(rawManifest)
+	if err != nil {
+		return nil, fmt.Errorf("invalid manifest: %w", err)
+	}
+
+	err = body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return manifest, nil
+}
+
+// PutManifest stores a manifest into an ArtifactSource.
+func PutManifest(ctx context.Context, source ArtifactSource, key string, manifest *gl.Manifest) error {
+	var buf bytes.Buffer
+	err := yaml.NewEncoder(&buf).Encode(manifest)
+	if err != nil {
+		return fmt.Errorf("invalid manifest: %w", err)
+	}
+
+	return source.PutObject(ctx, key, &buf) //nolint:wrapcheck // Directly wraps the source.
 }
 
 // Publication represents the act of publishing an image including what is being published where and what the result is.
@@ -159,15 +207,33 @@ func setConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	return nil
 }
 
+func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]byte, error) {
+	body, err := source.GetObject(ctx, key)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Directly wraps the source.
+	}
+	defer func() {
+		_ = body.Close()
+	}()
+
+	var buf bytes.Buffer
+	_, err = buf.ReadFrom(body)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read object: %w", err)
+	}
+
+	err = body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
 func publishingOutput[PUBOUT any](manifest *gl.Manifest) (PUBOUT, error) {
 	var pubOut PUBOUT
 
-	b, err := yaml.Marshal(manifest.PublishedImageMetadata)
-	if err != nil {
-		return pubOut, fmt.Errorf("invalid published image metadata in manifest: %w", err)
-	}
-
-	err = yaml.Unmarshal(b, &pubOut)
+	err := mapstructure.Decode(manifest.PublishedImageMetadata, &pubOut)
 	if err != nil {
 		return pubOut, fmt.Errorf("invalid published image metadata in manifest: %w", err)
 	}
