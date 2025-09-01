@@ -24,6 +24,7 @@ linters:
   - lll
   - mnd
   - nestif
+  - nilnil
   - nlreturn
   - varnamelen
   - wsl

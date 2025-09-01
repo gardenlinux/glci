@@ -204,11 +204,12 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 		log.Info(lctx, "Removing image")
-		err = publication.Target.Remove(lctx, publication.Cname, publication.Manifest, sources)
+		var output cloudprovider.PublishingOutput
+		output, err = publication.Target.Remove(lctx, publication.Manifest, sources)
 		if err != nil {
 			return fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), err)
 		}
-		publications[i].Manifest.PublishedImageMetadata = nil
+		publications[i].Manifest.PublishedImageMetadata = output
 
 		log.Info(lctx, "Updating manifest")
 		err = manifestTarget.PutManifest(lctx, fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit),

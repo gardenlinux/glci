@@ -97,6 +97,7 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	if p.ossClient == nil || len(p.ecsClients) == 0 {
 		return nil, errors.New("config not set")
 	}
+	ctx = log.WithValues(ctx, "target", p.Type())
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
@@ -105,8 +106,7 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	}
 	source := sources[p.pubCfg.Source]
 	region := p.creds[p.pubCfg.Config].Region
-	ctx = log.WithValues(ctx, "target", p.Type(), "image", image, "sourceType", source.Type(), "sourceRepo",
-		source.Repository(), "region", region)
+	ctx = log.WithValues(ctx, "image", image, "sourceType", source.Type(), "sourceRepo", source.Repository(), "region", region)
 
 	var regions []string
 	regions, err = p.listRegions(ctx)
@@ -159,43 +159,34 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 		output = append(output, aliyunPublishedImage{
 			Region: region,
 			ID:     imageID,
-			Name:   image,
+			Image:  image,
 		})
 	}
 
 	return output, nil
 }
 
-func (p *aliyun) Remove(ctx context.Context, cname string, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
 	if p.ossClient == nil || len(p.ecsClients) == 0 {
-		return errors.New("config not set")
+		return nil, errors.New("config not set")
 	}
+	ctx = log.WithValues(ctx, "target", p.Type())
 
-	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
-	ctx = log.WithValues(ctx, "target", p.Type(), "image", image)
-
-	regions, err := p.listRegions(ctx)
+	pubOut, err := publishingOutput[aliyunPublishingOutput](manifest)
 	if err != nil {
-		return fmt.Errorf("cannot list regions: %w", err)
-	}
-	if len(regions) == 0 {
-		return nil
+		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	var images map[string]string
-	images, err = p.getImageIDsByRegion(ctx, image, regions)
-	if err != nil {
-		return fmt.Errorf("cannot get image IDs for image %s: %w", image, err)
-	}
+	for _, img := range pubOut {
+		lctx := log.WithValues(ctx, "image", img.ID, "fromRegion", img.Region)
 
-	for region, imageID := range images {
-		err = p.deleteImage(ctx, imageID, region)
+		err = p.deleteImage(lctx, img.ID, img.Region)
 		if err != nil {
-			return fmt.Errorf("cannot delete image %s: %w", image, err)
+			return nil, fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, err)
 		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 type aliyun struct {
@@ -222,9 +213,9 @@ type aliyunPublishingConfig struct {
 type aliyunPublishingOutput []aliyunPublishedImage
 
 type aliyunPublishedImage struct {
-	Region string `mapstructure:"region"`
-	ID     string `mapstructure:"id"`
-	Name   string `mapstructure:"name"`
+	Region string `yaml:"region"`
+	ID     string `yaml:"id"`
+	Image  string `yaml:"image"`
 }
 
 func (*aliyun) imageName(cname, version, committish string) string {
@@ -524,63 +515,16 @@ func (p *aliyun) makePublic(ctx context.Context, images map[string]string) error
 	return nil
 }
 
-func (p *aliyun) getImageIDsByRegion(ctx context.Context, image string, regions []string) (map[string]string, error) {
-	images := make(map[string]string, len(regions))
-	for _, region := range regions {
-		log.Debug(ctx, "Getting image ID", "fromRegion", region)
-		c, err := p.ecsClient(region)
-		if err != nil {
-			return nil, err
-		}
-		err = ctx.Err()
-		if err != nil {
-			return nil, fmt.Errorf("cannot describe image in region %s: %w", region, err)
-		}
-		var r *client.DescribeImagesResponse
-		r, err = c.DescribeImages(&client.DescribeImagesRequest{
-			ImageName: &image,
-			RegionId:  &region,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("cannot describe image in region %s: %w", region, err)
-		}
-		if r.Body == nil {
-			return nil, fmt.Errorf("cannot describe image in region %s: missing body", region)
-		}
-		if r.Body.Images == nil {
-			return nil, fmt.Errorf("cannot describe image in region %s: missing images", region)
-		}
-		if len(r.Body.Images.Image) > 1 {
-			return nil, fmt.Errorf("too many images with the same name in region %s", region)
-		}
-		if len(r.Body.Images.Image) < 1 {
-			continue
-		}
-		if r.Body.Images.Image[0] == nil {
-			return nil, fmt.Errorf("cannot describe image in region %s: missing image", region)
-		}
-		if r.Body.Images.Image[0].ImageId == nil {
-			return nil, fmt.Errorf("cannot describe image in region %s: missing image ID", region)
-		}
-		images[region] = *r.Body.Images.Image[0].ImageId
-	}
-
-	return images, nil
-}
-
 func (p *aliyun) deleteImage(ctx context.Context, imageID, region string) error {
-	ctx = log.WithValues(ctx, "fromRegion", region)
-
-	log.Info(ctx, "Deleting image")
 	c, err := p.ecsClient(region)
 	if err != nil {
 		return err
 	}
 
-	log.Info(ctx, "Unpublishing image")
+	log.Debug(ctx, "Getting image status")
 	err = ctx.Err()
 	if err != nil {
-		return fmt.Errorf("cannot describe image in region %s: %w", region, err)
+		return fmt.Errorf("cannot describe image: %w", err)
 	}
 	var r *client.DescribeImagesResponse
 	r, err = c.DescribeImages(&client.DescribeImagesRequest{
@@ -588,23 +532,24 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string) error 
 		RegionId: &region,
 	})
 	if err != nil {
-		return fmt.Errorf("cannot describe image in region %s: %w", region, err)
+		return fmt.Errorf("cannot describe image: %w", err)
 	}
 	if r.Body == nil {
-		return fmt.Errorf("cannot describe image in region %s: missing body", region)
+		return errors.New("cannot describe image: missing body")
 	}
 	if r.Body.Images == nil || len(r.Body.Images.Image) != 1 {
-		return fmt.Errorf("cannot describe image in region %s: missing images", region)
+		return errors.New("cannot describe image: missing images")
 	}
 	if r.Body.Images.Image[0] == nil {
-		return fmt.Errorf("cannot describe image in region %s: missing image", region)
+		return errors.New("cannot describe image: missing image")
 	}
 	if r.Body.Images.Image[0].IsPublic == nil {
-		return fmt.Errorf("cannot describe image in region %s: missing status", region)
+		return errors.New("cannot describe image: missing status")
 	}
 	isPublic := *r.Body.Images.Image[0].IsPublic
 
 	if isPublic {
+		log.Debug(ctx, "Removing launch permission from image")
 		err = ctx.Err()
 		if err != nil {
 			return fmt.Errorf("cannot modify share permission of image in region %s: %w", region, err)
@@ -619,6 +564,7 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string) error 
 		}
 	}
 
+	log.Info(ctx, "Deleting image")
 	err = ctx.Err()
 	if err != nil {
 		return fmt.Errorf("cannot delete image %s in region %s: %w", imageID, region, err)

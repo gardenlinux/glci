@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/gl"
 )
@@ -32,7 +33,7 @@ type PublishingTarget interface {
 	Close() error
 	ImageSuffix() string
 	Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
-	Remove(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) error
+	Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
 }
 
 // OCMTarget is a target onto which GLCI can publish an OCM component descriptor.
@@ -156,4 +157,20 @@ func setConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	}
 
 	return nil
+}
+
+func publishingOutput[PUBOUT any](manifest *gl.Manifest) (PUBOUT, error) {
+	var pubOut PUBOUT
+
+	b, err := yaml.Marshal(manifest.PublishedImageMetadata)
+	if err != nil {
+		return pubOut, fmt.Errorf("invalid published image metadata in manifest: %w", err)
+	}
+
+	err = yaml.Unmarshal(b, &pubOut)
+	if err != nil {
+		return pubOut, fmt.Errorf("invalid published image metadata in manifest: %w", err)
+	}
+
+	return pubOut, nil
 }

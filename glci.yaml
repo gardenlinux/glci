@@ -63,6 +63,7 @@ publishing:
     - source: S3
       config: gardenlinux
     - source: S3-China
+      cloud: China
       config: gardenlinux-cn
     image_tags:
       static_tags:
