@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-yaml"
 
@@ -39,8 +40,9 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			ConfiguredVersion: "v2",
 		},
 		Component: componentDescriptorComponent{
-			Name:    gl.GardenLinuxRepo,
-			Version: version,
+			Name:         gl.GardenLinuxRepo,
+			Version:      version,
+			CreationTime: time.Now().Format(time.RFC3339),
 			Provider: componentDescriptorProvider{
 				Name: componentProvider,
 			},
@@ -220,6 +222,7 @@ type componentDescriptorMetadata struct {
 type componentDescriptorComponent struct {
 	Name                string                                 `yaml:"name"`
 	Version             string                                 `yaml:"version"`
+	CreationTime        string                                 `yaml:"creationTime"`
 	Provider            componentDescriptorProvider            `yaml:"provider"`
 	RepositoryContexts  []componentDescriptorRepositoryContext `yaml:"repositoryContexts"`
 	Sources             []componentDescriptorSource            `yaml:"sources"`
