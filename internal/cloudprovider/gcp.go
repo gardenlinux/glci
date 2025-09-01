@@ -120,21 +120,22 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if p.storageClient == nil || p.imagesClient == nil {
 		return nil, errors.New("config not set")
 	}
+	ctx = log.WithValues(ctx, "target", p.Type())
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
-	var architecture string
-	architecture, err = p.architecture(manifest.Architecture)
+	var arch string
+	arch, err = p.architecture(manifest.Architecture)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
 	}
 	source := sources[p.pubCfg.Source]
 	project := p.creds[p.pubCfg.Config].Project
-	ctx = log.WithValues(ctx, "target", p.Type(), "image", image, "architecture", architecture, "sourceType", source.Type(),
-		"sourceRepo", source.Repository(), "project", project)
+	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo",
+		source.Repository(), "project", project)
 
 	var secureBoot bool
 	var pk, kek, db string
@@ -151,7 +152,7 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		return nil, fmt.Errorf("cannot upload blob for image %s in project %s: %w", image, project, err)
 	}
 
-	err = p.insertImage(ctx, blobURL, image, architecture, secureBoot, pk, kek, db)
+	err = p.insertImage(ctx, blobURL, image, arch, secureBoot, pk, kek, db)
 	if err != nil {
 		return nil, fmt.Errorf("cannot insert image %s from blob %s in project %s: %w", image, blob.ObjectName(), project, err)
 	}
@@ -168,25 +169,29 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 
 	return gcpPublishingOutput{
 		Project: project,
-		Name:    image,
+		Image:   image,
 	}, nil
 }
 
-func (p *gcp) Remove(ctx context.Context, cname string, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
 	if p.storageClient == nil || p.imagesClient == nil {
-		return errors.New("config not set")
+		return nil, errors.New("config not set")
 	}
+	ctx = log.WithValues(ctx, "target", p.Type())
 
-	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
-	project := p.creds[p.pubCfg.Config].Project
-	ctx = log.WithValues(ctx, "target", p.Type(), "image", image, "project", project)
-
-	err := p.deleteImage(ctx, image)
+	pubOut, err := publishingOutput[gcpPublishingOutput](manifest)
 	if err != nil {
-		return fmt.Errorf("cannot delete image %s in project %s: %w", image, project, err)
+		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	return nil
+	ctx = log.WithValues(ctx, "image", pubOut.Image, "project", pubOut.Project)
+
+	err = p.deleteImage(ctx, pubOut.Image)
+	if err != nil {
+		return nil, fmt.Errorf("cannot delete image %s in project %s: %w", pubOut.Image, pubOut.Project, err)
+	}
+
+	return nil, nil
 }
 
 type gcp struct {
@@ -209,8 +214,8 @@ type gcpPublishingConfig struct {
 }
 
 type gcpPublishingOutput struct {
-	Project string `mapstructure:"project"`
-	Name    string `mapstructure:"name"`
+	Project string `yaml:"project"`
+	Image   string `yaml:"image"`
 }
 
 func (*gcp) imageName(cname, version, committish string) string {
@@ -321,10 +326,10 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	return blob, url, nil
 }
 
-func (p *gcp) insertImage(ctx context.Context, disk, image, architecture string, secureBoot bool, pk, kek, db string) error {
+func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureBoot bool, pk, kek, db string) error {
 	project := p.creds[p.pubCfg.Config].Project
 	imageResource := &computepb.Image{
-		Architecture: &architecture,
+		Architecture: &arch,
 		GuestOsFeatures: []*computepb.GuestOsFeature{
 			{
 				Type: ptr.P("VIRTIO_SCSI_MULTIQUEUE"),
