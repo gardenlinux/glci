@@ -9,12 +9,12 @@ require (
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.10
 	github.com/alibabacloud-go/ecs-20140526/v7 v7.1.3
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.2.3
-	github.com/aws/aws-sdk-go-v2 v1.38.1
+	github.com/aws/aws-sdk-go-v2 v1.38.3
 	github.com/aws/aws-sdk-go-v2/config v1.31.0
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.6
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.242.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.87.0
-	github.com/aws/smithy-go v1.22.5
+	github.com/aws/smithy-go v1.23.0
 	github.com/go-logr/logr v1.4.3
 	github.com/go-logr/zerologr v1.2.3
 	github.com/go-viper/mapstructure/v2 v2.4.0
