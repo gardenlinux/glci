@@ -182,15 +182,99 @@ func (*aws) ImageSuffix() string {
 	return ".raw"
 }
 
+func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
+	if !p.isConfigured() {
+		return false, errors.New("config not set")
+	}
+
+	awsOutput, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
+	if err != nil {
+		return false, err
+	}
+
+	for _, target := range p.pubCfg.Targets {
+		cld := p.cloud(target)
+
+		for _, img := range awsOutput {
+			if img.Cloud == cld {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func (p *aws) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
+	if !p.isConfigured() {
+		return nil, errors.New("config not set")
+	}
+
+	awsOutput, err := publishingOutput[awsPublishingOutput](output)
+	if err != nil {
+		return nil, err
+	}
+	var ownOutput awsPublishingOutput
+	ownOutput, err = publishingOutput[awsPublishingOutput](own)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, target := range p.pubCfg.Targets {
+		cld := p.cloud(target)
+
+		for _, img := range awsOutput {
+			if img.Cloud == cld {
+				return nil, errors.New("cannot add publishing output to existing publishing output")
+			}
+		}
+	}
+
+	return slices.Concat(awsOutput, ownOutput), nil
+}
+
+func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
+	if !p.isConfigured() {
+		return nil, errors.New("config not set")
+	}
+
+	azureOutput, err := publishingOutput[awsPublishingOutput](output)
+	if err != nil {
+		return nil, err
+	}
+
+	fout := slices.Clone(azureOutput)
+
+	for _, target := range p.pubCfg.Targets {
+		cld := p.cloud(target)
+
+		for i, img := range fout {
+			if img.Cloud == cld {
+				img.Cloud = ""
+				fout[i] = img
+			}
+		}
+	}
+
+	var filteredOutput awsPublishingOutput
+	for _, img := range fout {
+		if img.Cloud != "" {
+			filteredOutput = append(filteredOutput, img)
+		}
+	}
+
+	return filteredOutput, nil
+}
+
 func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
 	error,
 ) {
-	if len(p.tgtEC2Clients) == 0 {
+	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutput[awsPublishingOutput](manifest)
+	pubOut, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -293,12 +377,12 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 }
 
 func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error) {
-	if len(p.tgtEC2Clients) == 0 {
+	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutput[awsPublishingOutput](manifest)
+	pubOut, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -376,6 +460,10 @@ type awsPublishedImage struct {
 	Region string `yaml:"region"`
 	ID     string `yaml:"id"`
 	Image  string `yaml:"image"`
+}
+
+func (p *aws) isConfigured() bool {
+	return len(p.tgtEC2Clients) != 0
 }
 
 func (*aws) imageName(cname, version, committish string) string {

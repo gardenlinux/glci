@@ -114,10 +114,58 @@ func (*gcp) ImageSuffix() string {
 	return ".gcpimage.tar.gz"
 }
 
+func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
+	if !p.isConfigured() {
+		return false, errors.New("config not set")
+	}
+
+	output, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
+	if err != nil {
+		return false, err
+	}
+
+	return output.Image != "", nil
+}
+
+func (p *gcp) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
+	if !p.isConfigured() {
+		return nil, errors.New("config not set")
+	}
+
+	gcpOutput, err := publishingOutput[gcpPublishingOutput](output)
+	if err != nil {
+		return nil, err
+	}
+	var ownOutput gcpPublishingOutput
+	ownOutput, err = publishingOutput[gcpPublishingOutput](own)
+	if err != nil {
+		return nil, err
+	}
+
+	if gcpOutput.Project != "" || gcpOutput.Image != "" {
+		return nil, errors.New("cannot add publishing output to existing publishing output")
+	}
+
+	return &ownOutput, nil
+}
+
+func (p *gcp) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
+	if !p.isConfigured() {
+		return nil, errors.New("config not set")
+	}
+
+	_, err := publishingOutput[gcpPublishingOutput](output)
+	if err != nil {
+		return nil, err
+	}
+
+	return gcpPublishingOutput{}, nil
+}
+
 func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
 	error,
 ) {
-	if p.storageClient == nil || p.imagesClient == nil {
+	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
@@ -174,12 +222,12 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 }
 
 func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
-	if p.storageClient == nil || p.imagesClient == nil {
+	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutput[gcpPublishingOutput](manifest)
+	pubOut, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -216,6 +264,10 @@ type gcpPublishingConfig struct {
 type gcpPublishingOutput struct {
 	Project string `yaml:"project"`
 	Image   string `yaml:"image"`
+}
+
+func (p *gcp) isConfigured() bool {
+	return p.storageClient != nil && p.imagesClient != nil
 }
 
 func (*gcp) imageName(cname, version, committish string) string {
