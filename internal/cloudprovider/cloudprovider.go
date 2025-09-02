@@ -31,6 +31,9 @@ type PublishingTarget interface {
 	SetTargetConfig(ctx context.Context, credentials map[string]any, sources map[string]ArtifactSource) error
 	Close() error
 	ImageSuffix() string
+	IsPublished(manifest *gl.Manifest) (bool, error)
+	AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error)
+	RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error)
 	Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
 	Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
 }
@@ -230,13 +233,22 @@ func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]b
 	return buf.Bytes(), nil
 }
 
-func publishingOutput[PUBOUT any](manifest *gl.Manifest) (PUBOUT, error) {
-	var pubOut PUBOUT
+func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
+	var output PUBOUT
 
-	err := mapstructure.Decode(manifest.PublishedImageMetadata, &pubOut)
+	err := mapstructure.Decode(generic, &output)
 	if err != nil {
-		return pubOut, fmt.Errorf("invalid published image metadata in manifest: %w", err)
+		return output, fmt.Errorf("invalid publishing output: %w", err)
 	}
 
-	return pubOut, nil
+	return output, nil
+}
+
+func publishingOutputFromManifest[PUBOUT any](manifest *gl.Manifest) (PUBOUT, error) {
+	output, err := publishingOutput[PUBOUT](manifest.PublishedImageMetadata)
+	if err != nil {
+		return output, fmt.Errorf("invalid published image metadata in manifest: %w", err)
+	}
+
+	return output, nil
 }

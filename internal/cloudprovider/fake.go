@@ -63,6 +63,18 @@ func (*fake) ImageSuffix() string {
 	return ".fake"
 }
 
+func (*fake) IsPublished(_ *gl.Manifest) (bool, error) {
+	return false, nil
+}
+
+func (*fake) AddOwnPublishingOutput(output, _ PublishingOutput) (PublishingOutput, error) {
+	return output, nil
+}
+
+func (*fake) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
+	return output, nil
+}
+
 func (p *fake) Publish(_ context.Context, _ string, _ *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
 	return p, nil
 }

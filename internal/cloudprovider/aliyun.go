@@ -91,10 +91,58 @@ func (*aliyun) ImageSuffix() string {
 	return ".qcow2"
 }
 
+func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
+	if !p.isConfigured() {
+		return false, errors.New("config not set")
+	}
+
+	output, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
+	if err != nil {
+		return false, err
+	}
+
+	return len(output) != 0, nil
+}
+
+func (p *aliyun) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
+	if !p.isConfigured() {
+		return nil, errors.New("config not set")
+	}
+
+	aliyunOutput, err := publishingOutput[aliyunPublishingOutput](output)
+	if err != nil {
+		return nil, err
+	}
+	var ownOutput aliyunPublishingOutput
+	ownOutput, err = publishingOutput[aliyunPublishingOutput](own)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(aliyunOutput) != 0 {
+		return nil, errors.New("cannot add publishing output to existing publishing output")
+	}
+
+	return &ownOutput, nil
+}
+
+func (p *aliyun) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
+	if !p.isConfigured() {
+		return nil, errors.New("config not set")
+	}
+
+	_, err := publishingOutput[aliyunPublishingOutput](output)
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
 func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
 	error,
 ) {
-	if p.ossClient == nil || len(p.ecsClients) == 0 {
+	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
@@ -167,12 +215,12 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 }
 
 func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
-	if p.ossClient == nil || len(p.ecsClients) == 0 {
+	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutput[aliyunPublishingOutput](manifest)
+	pubOut, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -216,6 +264,10 @@ type aliyunPublishedImage struct {
 	Region string `yaml:"region"`
 	ID     string `yaml:"id"`
 	Image  string `yaml:"image"`
+}
+
+func (p *aliyun) isConfigured() bool {
+	return p.ossClient != nil && len(p.ecsClients) != 0
 }
 
 func (*aliyun) imageName(cname, version, committish string) string {

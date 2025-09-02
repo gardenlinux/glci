@@ -201,7 +201,7 @@ func AddPublicationOutput(descriptor *ComponentDescriptor, publications []cloudp
 
 		descriptor.Component.Resources[i*2].Labels = append(descriptor.Component.Resources[i*2].Labels, componentDescriptorlabel{
 			Name:  "gardener.cloud/gardenlinux/ci/published-image-metadata",
-			Value: publication.Output,
+			Value: publication.Manifest.PublishedImageMetadata,
 		})
 	}
 

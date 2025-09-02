@@ -26,9 +26,12 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
 	}()
 
-	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
+	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
+	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
+		flavorPubs := pubMap[flavor.Cname]
 		found := false
+
 		for _, target := range targets {
 			if target.Type() != flavor.Platform {
 				continue
@@ -65,7 +68,12 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 					return fmt.Errorf("target manifest for %s has incorrect commit %s", flavor.Cname, targetManifest.BuildCommittish)
 				}
 
-				if targetManifest.PublishedImageMetadata != nil {
+				var isPublished bool
+				isPublished, err = target.IsPublished(targetManifest)
+				if err != nil {
+					return fmt.Errorf("cannot determine publishing status for %s: %w", flavor.Cname, err)
+				}
+				if isPublished {
 					log.Info(lctx, "Already published, skipping")
 					continue
 				}
@@ -76,7 +84,9 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 				Manifest: manifest,
 				Target:   target,
 			})
+			pubMap[flavor.Cname] = append(flavorPubs, len(publications)-1)
 		}
+
 		if !found {
 			return fmt.Errorf("no publishing target for %s", flavor.Cname)
 		}
@@ -88,9 +98,14 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
 
-	log.Info(ctx, "Publishing images", "count", len(publications))
+	if len(publications) > 0 {
+		log.Info(ctx, "Publishing images", "count", len(publications))
+	} else {
+		log.Info(ctx, "Nothing to publish")
+	}
+
+	outputs := make([]cloudprovider.PublishingOutput, len(publications))
 	for i, publication := range publications {
-		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 		log.Info(lctx, "Publishing image")
@@ -99,12 +114,26 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		if err != nil {
 			return fmt.Errorf("cannot publish %s to %s: %w", publication.Cname, publication.Target.Type(), err)
 		}
-		publications[i].Manifest.PublishedImageMetadata = output
+		outputs[i] = output
+	}
+
+	for cname, indices := range pubMap {
+		lctx := log.WithValues(ctx, "cname", cname)
+
+		output := publications[indices[0]].Manifest.PublishedImageMetadata
+		for _, i := range indices {
+			output, err = publications[i].Target.AddOwnPublishingOutput(output, outputs[i])
+			if err != nil {
+				return fmt.Errorf("cannot add publishing output for %s: %w", cname, err)
+			}
+		}
+		publications[indices[0]].Manifest.PublishedImageMetadata = output
 
 		log.Info(lctx, "Updating manifest")
-		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publication.Manifest)
+		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", cname, version, commit)
+		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publications[indices[0]].Manifest)
 		if err != nil {
-			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
+			return fmt.Errorf("cannot put manifest for %s: %w", cname, err)
 		}
 	}
 
@@ -151,9 +180,12 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
 	}()
 
-	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
+	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
+	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
+		flavorPubs := pubMap[flavor.Cname]
 		found := false
+
 		for _, target := range targets {
 			if target.Type() != flavor.Platform {
 				continue
@@ -180,7 +212,12 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			}
 			commit = manifest.BuildCommittish
 
-			if manifest.PublishedImageMetadata == nil {
+			var isPublished bool
+			isPublished, err = target.IsPublished(manifest)
+			if err != nil {
+				return fmt.Errorf("cannot determine publishing status for %s: %w", flavor.Cname, err)
+			}
+			if !isPublished {
 				log.Debug(lctx, "Already removed, skipping")
 				continue
 			}
@@ -190,6 +227,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 				Manifest: manifest,
 				Target:   target,
 			})
+			pubMap[flavor.Cname] = append(flavorPubs, len(publications)-1)
 		}
 		if !found {
 			return fmt.Errorf("no publishing target for %s", flavor.Cname)
@@ -202,8 +240,8 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		log.Info(ctx, "Nothing to remove")
 	}
 
+	outputs := make([]cloudprovider.PublishingOutput, len(publications))
 	for i, publication := range publications {
-		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 		log.Info(lctx, "Removing image")
@@ -212,12 +250,26 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		if err != nil {
 			return fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), err)
 		}
-		publications[i].Manifest.PublishedImageMetadata = output
+		outputs[i] = output
+	}
+
+	for cname, indices := range pubMap {
+		lctx := log.WithValues(ctx, "cname", cname)
+
+		output := publications[indices[0]].Manifest.PublishedImageMetadata
+		for _, i := range indices {
+			output, err = publications[i].Target.RemoveOwnPublishingOutput(output)
+			if err != nil {
+				return fmt.Errorf("cannot remove publishing output for %s: %w", cname, err)
+			}
+		}
+		publications[indices[0]].Manifest.PublishedImageMetadata = output
 
 		log.Info(lctx, "Updating manifest")
-		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publication.Manifest)
+		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", cname, version, commit)
+		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publications[indices[0]].Manifest)
 		if err != nil {
-			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
+			return fmt.Errorf("cannot put manifest for %s: %w", cname, err)
 		}
 	}
 
