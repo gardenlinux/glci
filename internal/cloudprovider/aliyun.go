@@ -385,7 +385,7 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 	if err != nil {
 		return "", err
 	}
-	log.Info(ctx, "Image ready")
+	log.Debug(ctx, "Image ready")
 
 	return imageID, nil
 }
