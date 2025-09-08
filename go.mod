@@ -3,7 +3,7 @@ module github.com/gardenlinux/glci
 go 1.25.0
 
 require (
-	cloud.google.com/go/compute v1.44.0
+	cloud.google.com/go/compute v1.45.0
 	cloud.google.com/go/storage v1.56.1
 	cuelang.org/go v0.14.1
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.0
