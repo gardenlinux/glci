@@ -298,8 +298,7 @@ func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutp
 	return filteredOutput, nil
 }
 
-func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
-	error,
+func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error,
 ) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
@@ -611,7 +610,7 @@ func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, source Ar
 	var snapshot string
 	status := "active"
 	for status == "active" {
-		log.Debug(ctx, "Waiting for snapshot import")
+		log.Debug(ctx, "Waiting for snapshot")
 		var s *ec2.DescribeImportSnapshotTasksOutput
 		s, err = ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 			ImportTaskIds: []string{*r.ImportTaskId},

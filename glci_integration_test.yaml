@@ -80,6 +80,12 @@ publishing:
     source: S3
     config: gardenlinux-integration-test
     bucket: gardenlinux-test-images
+  - type: OpenStack
+    source: S3
+    config: gardenlinux
+    test: true
+    hypervisor: VMware
+    regions: [ eu-nl-1 ]
   ocm:
     type: OCI
     config: ar-gardenlinux-test

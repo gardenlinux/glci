@@ -63,7 +63,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 							Name: "cloud.gardener.cnudie/dso/scanning-hints/source_analysis/v1",
 							Value: map[string]any{
 								"policy":  "skip",
-								"comment": "repo only contains build instructions, source in this repo will not get incorporated into the final artifact",
+								"comment": "repo only contains build instructions",
 							},
 						},
 					},

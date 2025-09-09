@@ -83,6 +83,14 @@ publishing:
     source: S3
     config: gardenlinux
     bucket: gardenlinux-images
+  - type: OpenStack
+    source: S3
+    config: gardenlinux
+    hypervisor: Bare Metal
+  - type: OpenStack
+    source: S3
+    config: gardenlinux
+    hypervisor: VMware
   ocm:
     type: OCI
     config: gcr-readwrite

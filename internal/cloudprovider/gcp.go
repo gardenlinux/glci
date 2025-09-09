@@ -182,8 +182,8 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 	source := sources[p.pubCfg.Source]
 	project := p.creds[p.pubCfg.Config].Project
-	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo",
-		source.Repository(), "project", project)
+	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository(),
+		"project", project)
 
 	var secureBoot bool
 	var pk, kek, db string

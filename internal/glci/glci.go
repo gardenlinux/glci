@@ -166,8 +166,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 }
 
 // Remove removes a release from all cloud providers specified in the flavors and publishing configurations.
-func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, creds Credentials, version,
-	commit string,
+func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, creds Credentials, version, commit string,
 ) error {
 	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
 
