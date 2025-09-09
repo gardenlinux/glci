@@ -240,17 +240,14 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		log.Info(ctx, "Nothing to remove")
 	}
 
-	outputs := make([]cloudprovider.PublishingOutput, len(publications))
-	for i, publication := range publications {
+	for _, publication := range publications {
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 		log.Info(lctx, "Removing image")
-		var output cloudprovider.PublishingOutput
-		output, err = publication.Target.Remove(lctx, publication.Manifest, sources)
+		err = publication.Target.Remove(lctx, publication.Manifest, sources)
 		if err != nil {
 			return fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), err)
 		}
-		outputs[i] = output
 	}
 
 	for cname, indices := range pubMap {
