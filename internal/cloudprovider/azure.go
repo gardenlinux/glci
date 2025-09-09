@@ -262,20 +262,8 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutputFromManifest[azurePublishingOutput](manifest)
-	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
-	}
-	var output azurePublishingOutput
-	for _, img := range pubOut {
-		if img.Cloud != p.cloud() {
-			output = append(output, img)
-		}
-	}
-
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
-	var imagePath gl.S3ReleaseFile
-	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -337,6 +325,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		return nil, fmt.Errorf("cannot upload blob for image %s: %w", image, err)
 	}
 
+	var output azurePublishingOutput
 	if bios {
 		imageID, err = p.createImage(ctx, &gallery, blobURL, image, true)
 		if err != nil {
@@ -391,25 +380,23 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	return output, nil
 }
 
-func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
+func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
 	if !p.isConfigured() {
-		return nil, errors.New("config not set")
+		return errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
 	pubOut, err := publishingOutputFromManifest[azurePublishingOutput](manifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
+		return fmt.Errorf("invalid manifest: %w", err)
 	}
 
 	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "cloud", cld)
 
-	var output azurePublishingOutput
 	for _, img := range pubOut {
 		if img.Cloud != cld {
-			output = append(output, img)
 			continue
 		}
 		lctx := log.WithValues(ctx, "imageID", img.ID)
@@ -417,29 +404,29 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 		var imageDefinition, imageVersion string
 		imageDefinition, imageVersion, err = p.unpackPublicID(lctx, &gallery, img.ID)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		lctx = log.WithValues(lctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion)
 
 		var imageResourceGroup, image string
 		imageResourceGroup, image, err = p.deleteImageVersion(lctx, &gallery, imageDefinition, imageVersion)
 		if err != nil {
-			return nil, fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, err)
+			return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, err)
 		}
 		lctx = log.WithValues(lctx, "imageResourceGroup", imageResourceGroup, "image", image)
 
 		err = p.deleteImage(lctx, imageResourceGroup, image)
 		if err != nil {
-			return nil, fmt.Errorf("cannot delete image %s: %w", image, err)
+			return fmt.Errorf("cannot delete image %s: %w", image, err)
 		}
 
 		err = p.deleteEmptyImageDefinition(ctx, &gallery, imageDefinition)
 		if err != nil {
-			return nil, fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, err)
+			return fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, err)
 		}
 	}
 
-	return output, nil
+	return nil
 }
 
 type azure struct {
@@ -507,6 +494,14 @@ type azurePublishedImage struct {
 func (p *azure) isConfigured() bool {
 	return p.storageClient != nil && p.subscriptionsClient != nil && p.imagesClient != nil && p.galleryImagesClient != nil &&
 		p.galleryImageVersionsClient != nil && p.galleriesClient != nil && p.communityGalleryImageVersionsClient != nil
+}
+
+func (p *azure) cloud() string {
+	if p.pubCfg.china {
+		return "China"
+	}
+
+	return "public"
 }
 
 func (*azure) imageName(cname, version, committish string) string {
@@ -868,14 +863,6 @@ func (p *azure) getPublicID(ctx context.Context, gallery *azureGalleryCredential
 	}
 
 	return *givr.Identifier.UniqueID, nil
-}
-
-func (p *azure) cloud() string {
-	if p.pubCfg.china {
-		return "China"
-	}
-
-	return "public"
 }
 
 func (p *azure) deleteBlob(ctx context.Context, blob string) error {

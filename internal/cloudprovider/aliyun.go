@@ -96,12 +96,12 @@ func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, errors.New("config not set")
 	}
 
-	output, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
+	aliyunOutput, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
 	if err != nil {
 		return false, err
 	}
 
-	return len(output) != 0, nil
+	return len(aliyunOutput) != 0, nil
 }
 
 func (p *aliyun) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
@@ -214,15 +214,15 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	return output, nil
 }
 
-func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
+func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
 	if !p.isConfigured() {
-		return nil, errors.New("config not set")
+		return errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
 	pubOut, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
+		return fmt.Errorf("invalid manifest: %w", err)
 	}
 
 	for _, img := range pubOut {
@@ -230,11 +230,11 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 
 		err = p.deleteImage(lctx, img.ID, img.Region)
 		if err != nil {
-			return nil, fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, err)
+			return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, err)
 		}
 	}
 
-	return nil, nil
+	return nil
 }
 
 type aliyun struct {

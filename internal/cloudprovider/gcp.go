@@ -119,12 +119,12 @@ func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, errors.New("config not set")
 	}
 
-	output, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
+	gcpOutput, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
 	if err != nil {
 		return false, err
 	}
 
-	return output.Image != "", nil
+	return gcpOutput.Image != "", nil
 }
 
 func (p *gcp) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
@@ -221,25 +221,25 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}, nil
 }
 
-func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
+func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
 	if !p.isConfigured() {
-		return nil, errors.New("config not set")
+		return errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
 	pubOut, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
+		return fmt.Errorf("invalid manifest: %w", err)
 	}
 
 	ctx = log.WithValues(ctx, "image", pubOut.Image, "project", pubOut.Project)
 
 	err = p.deleteImage(ctx, pubOut.Image)
 	if err != nil {
-		return nil, fmt.Errorf("cannot delete image %s in project %s: %w", pubOut.Image, pubOut.Project, err)
+		return fmt.Errorf("cannot delete image %s in project %s: %w", pubOut.Image, pubOut.Project, err)
 	}
 
-	return nil, nil
+	return nil
 }
 
 type gcp struct {

@@ -87,8 +87,8 @@ func (p *fake) Publish(_ context.Context, _ string, _ *gl.Manifest, _ map[string
 	return p, nil
 }
 
-func (p *fake) Remove(_ context.Context, _ *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
-	return p, nil
+func (*fake) Remove(_ context.Context, _ *gl.Manifest, _ map[string]ArtifactSource) error {
+	return nil
 }
 
 func (*fake) OCMRepository() string {

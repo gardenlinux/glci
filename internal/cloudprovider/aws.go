@@ -306,23 +306,8 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
-	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
-	}
-	var output awsPublishingOutput
-	for _, target := range p.pubCfg.Targets {
-		for _, img := range pubOut {
-			if img.Cloud != p.cloud(target) {
-				output = append(output, img)
-			}
-		}
-		pubOut = output
-	}
-
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
-	var imagePath gl.S3ReleaseFile
-	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -334,6 +319,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	tags := p.prepareTags(manifest)
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch)
 
+	var output awsPublishingOutput
 	for _, target := range p.pubCfg.Targets {
 		source := sources[target.Source]
 		ec2Client := p.tgtEC2Clients[target.Config]
@@ -408,43 +394,42 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	return output, nil
 }
 
-func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error) {
+func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) error {
 	if !p.isConfigured() {
-		return nil, errors.New("config not set")
+		return errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
 	pubOut, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
+		return fmt.Errorf("invalid manifest: %w", err)
 	}
 
 	for _, target := range p.pubCfg.Targets {
 		_, ok := sources[target.Source]
 		if !ok {
-			return nil, fmt.Errorf("unknown source %s", target.Source)
+			return fmt.Errorf("unknown source %s", target.Source)
 		}
 	}
 
-	var output awsPublishingOutput
 	for _, target := range p.pubCfg.Targets {
 		ec2Client := p.tgtEC2Clients[target.Config]
+		lctx := log.WithValues(ctx, "cloud", target.Cloud)
 
 		for _, img := range pubOut {
 			if img.Cloud != p.cloud(target) {
-				output = append(output, img)
 				continue
 			}
-			lctx := log.WithValues(ctx, "cloud", img.Cloud, "region", img.Region, "id", img.ID, "image", img.Image)
+			llctx := log.WithValues(lctx, "region", img.Region, "id", img.ID, "image", img.Image)
 
-			err = p.deregisterImage(lctx, ec2Client, img.ID, img.Region)
+			err = p.deregisterImage(llctx, ec2Client, img.ID, img.Region)
 			if err != nil {
-				return nil, fmt.Errorf("cannot deregister image %s in region %s: %w", img.Image, img.Region, err)
+				return fmt.Errorf("cannot deregister image %s in region %s: %w", img.Image, img.Region, err)
 			}
 		}
 	}
 
-	return output, nil
+	return nil
 }
 
 type aws struct {
@@ -496,6 +481,14 @@ type awsPublishedImage struct {
 
 func (p *aws) isConfigured() bool {
 	return len(p.tgtEC2Clients) != 0
+}
+
+func (*aws) cloud(target awsTarget) string {
+	if target.china {
+		return "China"
+	}
+
+	return "public"
 }
 
 func (*aws) imageName(cname, version, committish string) string {
@@ -782,14 +775,6 @@ func (*aws) makePublic(ctx context.Context, ec2Client *ec2.Client, images map[st
 	}
 
 	return nil
-}
-
-func (*aws) cloud(target awsTarget) string {
-	if target.china {
-		return "China"
-	}
-
-	return "public"
 }
 
 func overrideRegion(region string) func(o *ec2.Options) {
