@@ -20,19 +20,17 @@ func LoadCredentials(ctx context.Context, credsFile, credsYamlBase64 string) (Cr
 	var credsYAML []byte
 	var err error
 
-	if credsFile != "" {
-		log.Debug(ctx, "Loading credentials from file", "file", credsFile)
-		credsYAML, err = os.ReadFile(filepath.Clean(credsFile))
-		if err != nil {
-			return nil, fmt.Errorf("cannot read credentials file: %w", err)
-		}
-	}
-
 	if credsYamlBase64 != "" {
 		log.Debug(ctx, "Loading credentials from Base64")
 		credsYAML, err = base64.StdEncoding.DecodeString(credsYamlBase64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid credentials: %w", err)
+		}
+	} else if credsFile != "" {
+		log.Debug(ctx, "Loading credentials from file", "file", credsFile)
+		credsYAML, err = os.ReadFile(filepath.Clean(credsFile))
+		if err != nil {
+			return nil, fmt.Errorf("cannot read credentials file: %w", err)
 		}
 	}
 
