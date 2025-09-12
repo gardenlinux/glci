@@ -499,7 +499,7 @@ type awsPublishingOutput struct {
 
 type awsPublishedImage struct {
 	Cloud  string `yaml:"cloud"`
-	Region string `yaml:"aws_region"`
+	Region string `yaml:"aws_region_id"`
 	ID     string `yaml:"ami_id"`
 	Image  string `yaml:"image_name"`
 }
