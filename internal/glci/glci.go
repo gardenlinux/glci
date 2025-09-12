@@ -120,6 +120,10 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 			return fmt.Errorf("cannot add publishing output for %s: %w", publication.Cname, err)
 		}
 		publication.Manifest.PublishedImageMetadata = manifestOutput
+		glciVer := glciVersion(ctx)
+		if glciVer != "" {
+			publication.Manifest.GLCIVersion = &glciVer
+		}
 
 		log.Info(lctx, "Updating manifest")
 		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
@@ -246,6 +250,10 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			return fmt.Errorf("cannot remove publishing output for %s: %w", publication.Cname, err)
 		}
 		publication.Manifest.PublishedImageMetadata = manifestOutput
+		glciVer := glciVersion(ctx)
+		if glciVer != "" {
+			publication.Manifest.GLCIVersion = &glciVer
+		}
 
 		log.Info(lctx, "Updating manifest")
 		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)

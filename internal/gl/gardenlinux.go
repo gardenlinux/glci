@@ -13,6 +13,7 @@ const (
 type Manifest struct {
 	Version                string          `yaml:"version"`
 	BuildCommittish        string          `yaml:"build_committish"`
+	GLCIVersion            *string         `yaml:"glci_version,omitempty"`
 	Architecture           Architecture    `yaml:"architecture"`
 	Platform               string          `yaml:"platform"`
 	Modifiers              []string        `yaml:"modifiers"`
