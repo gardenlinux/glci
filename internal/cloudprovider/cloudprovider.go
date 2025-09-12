@@ -237,7 +237,14 @@ func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]b
 func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
 	var output PUBOUT
 
-	err := mapstructure.Decode(generic, &output)
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:  &output,
+		TagName: "yaml",
+	})
+	if err != nil {
+		return output, fmt.Errorf("invalid publishing output: %w", err)
+	}
+	err = decoder.Decode(generic)
 	if err != nil {
 		return output, fmt.Errorf("invalid publishing output: %w", err)
 	}

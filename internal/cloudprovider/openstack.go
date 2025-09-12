@@ -16,6 +16,7 @@ import (
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 )
 
@@ -128,7 +129,10 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
-	for _, img := range openstackOutput {
+	if openstackOutput.Images == nil {
+		return false, nil
+	}
+	for _, img := range *openstackOutput.Images {
 		if img.Hypervisor == string(p.pubCfg.Hypervisor) {
 			return true, nil
 		}
@@ -152,19 +156,26 @@ func (p *openstack) AddOwnPublishingOutput(output, own PublishingOutput) (Publis
 		return nil, err
 	}
 
-	for _, img := range openstackOutput {
-		if img.Hypervisor == string(p.pubCfg.Hypervisor) {
-			return nil, errors.New("cannot add publishing output to existing publishing output")
-		}
+	if ownOutput.Images == nil {
+		ownOutput.Images = &[]openstackPublishedImage{}
 	}
-
-	for _, img := range ownOutput {
+	for _, img := range *ownOutput.Images {
 		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
 			return nil, errors.New("new publishing output has extraneous entries")
 		}
 	}
 
-	return slices.Concat(openstackOutput, ownOutput), nil
+	if openstackOutput.Images == nil {
+		return &ownOutput, nil
+	}
+	for _, img := range *openstackOutput.Images {
+		if img.Hypervisor == string(p.pubCfg.Hypervisor) {
+			return nil, errors.New("cannot add publishing output to existing publishing output")
+		}
+	}
+
+	ownOutput.Images = ptr.P(slices.Concat(*openstackOutput.Images, *ownOutput.Images))
+	return &ownOutput, nil
 }
 
 func (p *openstack) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
@@ -177,15 +188,21 @@ func (p *openstack) RemoveOwnPublishingOutput(output PublishingOutput) (Publishi
 		return nil, err
 	}
 
-	var filteredOutput openstackPublishingOutput
-
-	for _, img := range openstackOutput {
-		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
-			filteredOutput = append(filteredOutput, img)
+	var otherImages []openstackPublishedImage
+	if openstackOutput.Images != nil {
+		for _, img := range *openstackOutput.Images {
+			if img.Hypervisor != string(p.pubCfg.Hypervisor) {
+				otherImages = append(otherImages, img)
+			}
 		}
 	}
+	if len(otherImages) == 0 {
+		return nil, nil
+	}
 
-	return filteredOutput, nil
+	return &openstackPublishingOutput{
+		Images: &otherImages,
+	}, nil
 }
 
 func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
@@ -246,17 +263,18 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 		return nil, fmt.Errorf("cannot finalize images: %w", err)
 	}
 
-	output := make(openstackPublishingOutput, 0, len(imgs))
+	outputImages := make([]openstackPublishedImage, 0, len(imgs))
 	for region, imageID := range imgs {
-		output = append(output, openstackPublishedImage{
+		outputImages = append(outputImages, openstackPublishedImage{
 			Region:     region,
 			ID:         imageID,
 			Image:      image,
 			Hypervisor: string(p.pubCfg.Hypervisor),
 		})
 	}
-
-	return output, nil
+	return &openstackPublishingOutput{
+		Images: &outputImages,
+	}, nil
 }
 
 func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
@@ -265,14 +283,17 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 	}
 	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutputFromManifest[openstackPublishingOutput](manifest)
+	pubOut, err := publishingOutputFromManifest[*openstackPublishingOutput](manifest)
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	if pubOut == nil || pubOut.Images == nil {
+		return errors.New("invalid manifest: missing published images")
 	}
 
 	ctx = log.WithValues(ctx, "hypervisor", p.pubCfg.Hypervisor)
 
-	for _, img := range pubOut {
+	for _, img := range *pubOut.Images {
 		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
 			continue
 		}
@@ -327,12 +348,14 @@ const (
 	openstackHypervisorVMware    openstackHypervisor = "VMware"
 )
 
-type openstackPublishingOutput []openstackPublishedImage
+type openstackPublishingOutput struct {
+	Images *[]openstackPublishedImage `yaml:"published_openstack_images,omitempty"`
+}
 
 type openstackPublishedImage struct {
-	Region     string `yaml:"region"`
-	ID         string `yaml:"id"`
-	Image      string `yaml:"image"`
+	Region     string `yaml:"region_name"`
+	ID         string `yaml:"image_id"`
+	Image      string `yaml:"image_name"`
 	Hypervisor string `yaml:"hypervisor"`
 }
 

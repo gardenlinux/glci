@@ -101,7 +101,7 @@ func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
-	return len(aliyunOutput) != 0, nil
+	return aliyunOutput.Images != nil && len(*aliyunOutput.Images) != 0, nil
 }
 
 func (p *aliyun) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
@@ -119,7 +119,7 @@ func (p *aliyun) AddOwnPublishingOutput(output, own PublishingOutput) (Publishin
 		return nil, err
 	}
 
-	if len(aliyunOutput) != 0 {
+	if aliyunOutput.Images != nil && len(*aliyunOutput.Images) != 0 {
 		return nil, errors.New("cannot add publishing output to existing publishing output")
 	}
 
@@ -202,16 +202,17 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 		return nil, fmt.Errorf("cannot make images public: %w", err)
 	}
 
-	var output aliyunPublishingOutput
+	outputImages := make([]aliyunPublishedImage, 0, len(images))
 	for region, imageID = range images {
-		output = append(output, aliyunPublishedImage{
+		outputImages = append(outputImages, aliyunPublishedImage{
 			Region: region,
 			ID:     imageID,
 			Image:  image,
 		})
 	}
-
-	return output, nil
+	return &aliyunPublishingOutput{
+		Images: &outputImages,
+	}, nil
 }
 
 func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
@@ -224,8 +225,11 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
+	if pubOut.Images == nil {
+		return errors.New("invalid manifest: missing published images")
+	}
 
-	for _, img := range pubOut {
+	for _, img := range *pubOut.Images {
 		lctx := log.WithValues(ctx, "image", img.ID, "fromRegion", img.Region)
 
 		err = p.deleteImage(lctx, img.ID, img.Region)
@@ -258,12 +262,14 @@ type aliyunPublishingConfig struct {
 	Regions *[]string `mapstructure:"regions,omitempty"`
 }
 
-type aliyunPublishingOutput []aliyunPublishedImage
+type aliyunPublishingOutput struct {
+	Images *[]aliyunPublishedImage `yaml:"published_alicloud_images,omitempty"`
+}
 
 type aliyunPublishedImage struct {
-	Region string `yaml:"region"`
-	ID     string `yaml:"id"`
-	Image  string `yaml:"image"`
+	Region string `yaml:"region_id"`
+	ID     string `yaml:"image_id"`
+	Image  string `yaml:"image_name"`
 }
 
 func (p *aliyun) isConfigured() bool {

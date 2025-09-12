@@ -224,10 +224,13 @@ func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
+	if awsOutput.Images == nil {
+		return false, nil
+	}
 	for _, target := range p.pubCfg.Targets {
 		cld := p.cloud(target)
 
-		for _, img := range awsOutput {
+		for _, img := range *awsOutput.Images {
 			if img.Cloud == cld {
 				return true, nil
 			}
@@ -252,17 +255,25 @@ func (p *aws) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOu
 		return nil, err
 	}
 
+	if ownOutput.Images == nil {
+		ownOutput.Images = &[]awsPublishedImage{}
+	}
+
+	if awsOutput.Images == nil {
+		return &ownOutput, nil
+	}
 	for _, target := range p.pubCfg.Targets {
 		cld := p.cloud(target)
 
-		for _, img := range awsOutput {
+		for _, img := range *awsOutput.Images {
 			if img.Cloud == cld {
 				return nil, errors.New("cannot add publishing output to existing publishing output")
 			}
 		}
 	}
 
-	return slices.Concat(awsOutput, ownOutput), nil
+	ownOutput.Images = ptr.P(slices.Concat(*awsOutput.Images, *ownOutput.Images))
+	return &ownOutput, nil
 }
 
 func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
@@ -270,32 +281,40 @@ func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutp
 		return nil, errors.New("config not set")
 	}
 
-	azureOutput, err := publishingOutput[awsPublishingOutput](output)
+	awsOutput, err := publishingOutput[awsPublishingOutput](output)
 	if err != nil {
 		return nil, err
 	}
 
-	fout := slices.Clone(azureOutput)
+	var fout []awsPublishedImage
+	if awsOutput.Images != nil {
+		fout = slices.Clone(*awsOutput.Images)
 
-	for _, target := range p.pubCfg.Targets {
-		cld := p.cloud(target)
+		for _, target := range p.pubCfg.Targets {
+			cld := p.cloud(target)
 
-		for i, img := range fout {
-			if img.Cloud == cld {
-				img.Cloud = ""
-				fout[i] = img
+			for i, img := range fout {
+				if img.Cloud == cld {
+					img.Cloud = ""
+					fout[i] = img
+				}
 			}
 		}
 	}
 
-	var filteredOutput awsPublishingOutput
+	var otherImages []awsPublishedImage
 	for _, img := range fout {
 		if img.Cloud != "" {
-			filteredOutput = append(filteredOutput, img)
+			otherImages = append(otherImages, img)
 		}
 	}
+	if len(otherImages) == 0 {
+		return nil, nil
+	}
 
-	return filteredOutput, nil
+	return &awsPublishingOutput{
+		Images: &otherImages,
+	}, nil
 }
 
 func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error,
@@ -318,7 +337,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	tags := p.prepareTags(manifest)
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch)
 
-	var output awsPublishingOutput
+	var outputImages []awsPublishedImage
 	for _, target := range p.pubCfg.Targets {
 		source := sources[target.Source]
 		ec2Client := p.tgtEC2Clients[target.Config]
@@ -381,7 +400,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		}
 
 		for region, imageID = range images {
-			output = append(output, awsPublishedImage{
+			outputImages = append(outputImages, awsPublishedImage{
 				Cloud:  p.cloud(target),
 				Region: region,
 				ID:     imageID,
@@ -390,7 +409,9 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		}
 	}
 
-	return output, nil
+	return &awsPublishingOutput{
+		Images: &outputImages,
+	}, nil
 }
 
 func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) error {
@@ -402,6 +423,9 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[str
 	pubOut, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	if pubOut.Images == nil {
+		return errors.New("invalid manifest: missing published images")
 	}
 
 	for _, target := range p.pubCfg.Targets {
@@ -415,7 +439,7 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[str
 		ec2Client := p.tgtEC2Clients[target.Config]
 		lctx := log.WithValues(ctx, "cloud", target.Cloud)
 
-		for _, img := range pubOut {
+		for _, img := range *pubOut.Images {
 			if img.Cloud != p.cloud(target) {
 				continue
 			}
@@ -469,13 +493,15 @@ type awsImageTags struct {
 	StaticTags                   *map[string]string `mapstructure:"static_tags,omitempty"`
 }
 
-type awsPublishingOutput []awsPublishedImage
+type awsPublishingOutput struct {
+	Images *[]awsPublishedImage `yaml:"published_aws_images,omitempty"`
+}
 
 type awsPublishedImage struct {
 	Cloud  string `yaml:"cloud"`
-	Region string `yaml:"region"`
-	ID     string `yaml:"id"`
-	Image  string `yaml:"image"`
+	Region string `yaml:"aws_region"`
+	ID     string `yaml:"ami_id"`
+	Image  string `yaml:"image_name"`
 }
 
 func (p *aws) isConfigured() bool {

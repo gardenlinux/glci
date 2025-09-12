@@ -191,7 +191,10 @@ func (p *azure) IsPublished(manifest *gl.Manifest) (bool, error) {
 
 	cld := p.cloud()
 
-	for _, img := range azureOutput {
+	if azureOutput.Images == nil {
+		return false, nil
+	}
+	for _, img := range *azureOutput.Images {
 		if img.Cloud == cld {
 			return true, nil
 		}
@@ -217,19 +220,26 @@ func (p *azure) AddOwnPublishingOutput(output, own PublishingOutput) (Publishing
 
 	cld := p.cloud()
 
-	for _, img := range azureOutput {
-		if img.Cloud == cld {
-			return nil, errors.New("cannot add publishing output to existing publishing output")
-		}
+	if ownOutput.Images == nil {
+		ownOutput.Images = &[]azurePublishedImage{}
 	}
-
-	for _, img := range ownOutput {
+	for _, img := range *ownOutput.Images {
 		if img.Cloud != cld {
 			return nil, errors.New("new publishing output has extraneous entries")
 		}
 	}
 
-	return slices.Concat(azureOutput, ownOutput), nil
+	if azureOutput.Images == nil {
+		return &ownOutput, nil
+	}
+	for _, img := range *azureOutput.Images {
+		if img.Cloud == cld {
+			return nil, errors.New("cannot add publishing output to existing publishing output")
+		}
+	}
+
+	ownOutput.Images = ptr.P(slices.Concat(*azureOutput.Images, *ownOutput.Images))
+	return &ownOutput, nil
 }
 
 func (p *azure) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
@@ -243,15 +253,22 @@ func (p *azure) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOu
 	}
 
 	cld := p.cloud()
-	var filteredOutput azurePublishingOutput
 
-	for _, img := range azureOutput {
-		if img.Cloud != cld {
-			filteredOutput = append(filteredOutput, img)
+	var otherImages []azurePublishedImage
+	if azureOutput.Images != nil {
+		for _, img := range *azureOutput.Images {
+			if img.Cloud != cld {
+				otherImages = append(otherImages, img)
+			}
 		}
 	}
+	if len(otherImages) == 0 {
+		return nil, nil
+	}
 
-	return filteredOutput, nil
+	return &azurePublishingOutput{
+		Images: &otherImages,
+	}, nil
 }
 
 func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
@@ -325,7 +342,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		return nil, fmt.Errorf("cannot upload blob for image %s: %w", image, err)
 	}
 
-	var output azurePublishingOutput
+	outputImages := make([]azurePublishedImage, 0, 2)
 	if bios {
 		imageID, err = p.createImage(ctx, &gallery, blobURL, image, true)
 		if err != nil {
@@ -342,7 +359,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 			return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, err)
 		}
 
-		output = append(output, azurePublishedImage{
+		outputImages = append(outputImages, azurePublishedImage{
 			Cloud: p.cloud(),
 			ID:    publicID,
 			Gen:   "V1",
@@ -369,7 +386,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, err)
 	}
 
-	output = append(output, azurePublishedImage{
+	outputImages = append(outputImages, azurePublishedImage{
 		Cloud: p.cloud(),
 		ID:    publicID,
 		Gen:   "V2",
@@ -377,7 +394,9 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 
 	log.Info(ctx, "Image ready")
 
-	return output, nil
+	return &azurePublishingOutput{
+		Images: &outputImages,
+	}, nil
 }
 
 func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
@@ -390,12 +409,15 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
+	if pubOut.Images == nil {
+		return errors.New("invalid manifest: missing published images")
+	}
 
 	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "cloud", cld)
 
-	for _, img := range pubOut {
+	for _, img := range *pubOut.Images {
 		if img.Cloud != cld {
 			continue
 		}
@@ -483,11 +505,13 @@ type azurePublishingConfig struct {
 	china                  bool
 }
 
-type azurePublishingOutput []azurePublishedImage
+type azurePublishingOutput struct {
+	Images *[]azurePublishedImage `yaml:"published_gallery_images,omitempty"`
+}
 
 type azurePublishedImage struct {
-	Cloud string `yaml:"cloud"`
-	ID    string `yaml:"id"`
+	Cloud string `yaml:"azure_cloud"`
+	ID    string `yaml:"community_gallery_image_id"`
 	Gen   string `yaml:"hyper_v_generation"`
 }
 
