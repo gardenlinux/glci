@@ -124,7 +124,7 @@ func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
-	return gcpOutput.Image != "", nil
+	return gcpOutput.Project != nil && *gcpOutput.Project != "" && gcpOutput.Image != nil && *gcpOutput.Image != "", nil
 }
 
 func (p *gcp) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
@@ -142,7 +142,7 @@ func (p *gcp) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOu
 		return nil, err
 	}
 
-	if gcpOutput.Project != "" || gcpOutput.Image != "" {
+	if (gcpOutput.Project != nil && *gcpOutput.Project != "") || (gcpOutput.Image != nil && *gcpOutput.Image != "") {
 		return nil, errors.New("cannot add publishing output to existing publishing output")
 	}
 
@@ -159,7 +159,7 @@ func (p *gcp) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutp
 		return nil, err
 	}
 
-	return gcpPublishingOutput{}, nil
+	return nil, nil
 }
 
 func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
@@ -215,9 +215,9 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		return nil, fmt.Errorf("cannot make image %s public in project %s: %w", image, project, err)
 	}
 
-	return gcpPublishingOutput{
-		Project: project,
-		Image:   image,
+	return &gcpPublishingOutput{
+		Project: &project,
+		Image:   &image,
 	}, nil
 }
 
@@ -231,12 +231,14 @@ func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
+	if pubOut.Project == nil || pubOut.Image == nil {
+		return errors.New("invalid manifest: missing published images")
+	}
+	ctx = log.WithValues(ctx, "image", *pubOut.Image, "project", *pubOut.Project)
 
-	ctx = log.WithValues(ctx, "image", pubOut.Image, "project", pubOut.Project)
-
-	err = p.deleteImage(ctx, pubOut.Image)
+	err = p.deleteImage(ctx, *pubOut.Image)
 	if err != nil {
-		return fmt.Errorf("cannot delete image %s in project %s: %w", pubOut.Image, pubOut.Project, err)
+		return fmt.Errorf("cannot delete image %s in project %s: %w", *pubOut.Image, *pubOut.Project, err)
 	}
 
 	return nil
@@ -262,8 +264,8 @@ type gcpPublishingConfig struct {
 }
 
 type gcpPublishingOutput struct {
-	Project string `yaml:"project"`
-	Image   string `yaml:"image"`
+	Project *string `yaml:"gcp_project_name,omitempty"`
+	Image   *string `yaml:"gcp_image_name,omitempty"`
 }
 
 func (p *gcp) isConfigured() bool {
