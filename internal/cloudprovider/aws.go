@@ -80,46 +80,41 @@ func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 		return errors.New("credentials not set")
 	}
 
-	p.tgtEC2Clients = make(map[string]*ec2.Client, len(p.pubCfg.Targets))
-	for t, target := range p.pubCfg.Targets {
-		_, ok := sources[target.Source]
-		if !ok {
-			return fmt.Errorf("unknown source %s", target.Source)
-		}
-
-		var creds awsCredentials
-		creds, ok = p.creds[target.Config]
-		if !ok {
-			return fmt.Errorf("missing credentials config %s", target.Config)
-		}
-
-		target.china = false
-		if target.Cloud != nil {
-			switch *target.Cloud {
-			case "China":
-				target.china = true
-			case "":
-			default:
-				return fmt.Errorf("unknown cloud %s", *target.Cloud)
-			}
-		}
-
-		if target.Regions != nil {
-			if !slices.Contains(*target.Regions, creds.Region) {
-				return fmt.Errorf("credentials region %s missing from list of regions", creds.Region)
-			}
-		}
-
-		p.pubCfg.Targets[t] = target
-
-		var awsCfg awssdk.Config
-		awsCfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(creds.Region),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
-		if err != nil {
-			return fmt.Errorf("cannot load default AWS config: %w", err)
-		}
-		p.tgtEC2Clients[target.Config] = ec2.NewFromConfig(awsCfg)
+	_, ok := sources[p.pubCfg.Source]
+	if !ok {
+		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
+
+	var creds awsCredentials
+	creds, ok = p.creds[p.pubCfg.Config]
+	if !ok {
+		return fmt.Errorf("missing credentials config %s", p.pubCfg.Config)
+	}
+
+	p.pubCfg.china = false
+	if p.pubCfg.Cloud != nil {
+		switch *p.pubCfg.Cloud {
+		case "China":
+			p.pubCfg.china = true
+		case "":
+		default:
+			return fmt.Errorf("unknown cloud %s", *p.pubCfg.Cloud)
+		}
+	}
+
+	if p.pubCfg.Regions != nil {
+		if !slices.Contains(*p.pubCfg.Regions, creds.Region) {
+			return fmt.Errorf("credentials region %s missing from list of regions", creds.Region)
+		}
+	}
+
+	var awsCfg awssdk.Config
+	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(creds.Region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
+	if err != nil {
+		return fmt.Errorf("cannot load default AWS config: %w", err)
+	}
+	p.tgtEC2Client = ec2.NewFromConfig(awsCfg)
 
 	return nil
 }
@@ -224,16 +219,15 @@ func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
+	cld := p.cloud()
+
 	if awsOutput.Images == nil {
 		return false, nil
 	}
-	for _, target := range p.pubCfg.Targets {
-		cld := p.cloud(target)
 
-		for _, img := range *awsOutput.Images {
-			if img.Cloud == cld {
-				return true, nil
-			}
+	for _, img := range *awsOutput.Images {
+		if img.Cloud == cld {
+			return true, nil
 		}
 	}
 
@@ -255,20 +249,23 @@ func (p *aws) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOu
 		return nil, err
 	}
 
+	cld := p.cloud()
+
 	if ownOutput.Images == nil {
 		ownOutput.Images = &[]awsPublishedImage{}
+	}
+	for _, img := range *ownOutput.Images {
+		if img.Cloud != cld {
+			return nil, errors.New("new publishing output has extraneous entries")
+		}
 	}
 
 	if awsOutput.Images == nil {
 		return &ownOutput, nil
 	}
-	for _, target := range p.pubCfg.Targets {
-		cld := p.cloud(target)
-
-		for _, img := range *awsOutput.Images {
-			if img.Cloud == cld {
-				return nil, errors.New("cannot add publishing output to existing publishing output")
-			}
+	for _, img := range *awsOutput.Images {
+		if img.Cloud == cld {
+			return nil, errors.New("cannot add publishing output to existing publishing output")
 		}
 	}
 
@@ -286,26 +283,14 @@ func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutp
 		return nil, err
 	}
 
-	var fout []awsPublishedImage
-	if awsOutput.Images != nil {
-		fout = slices.Clone(*awsOutput.Images)
-
-		for _, target := range p.pubCfg.Targets {
-			cld := p.cloud(target)
-
-			for i, img := range fout {
-				if img.Cloud == cld {
-					img.Cloud = ""
-					fout[i] = img
-				}
-			}
-		}
-	}
+	cld := p.cloud()
 
 	var otherImages []awsPublishedImage
-	for _, img := range fout {
-		if img.Cloud != "" {
-			otherImages = append(otherImages, img)
+	if awsOutput.Images != nil {
+		for _, img := range *awsOutput.Images {
+			if img.Cloud != cld {
+				otherImages = append(otherImages, img)
+			}
 		}
 	}
 	if len(otherImages) == 0 {
@@ -334,79 +319,75 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
 	}
+	source := sources[p.pubCfg.Source]
+	region := p.creds[p.pubCfg.Config].Region
 	tags := p.prepareTags(manifest)
-	ctx = log.WithValues(ctx, "image", image, "architecture", arch)
+	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository(),
+		"region", region)
 
-	var outputImages []awsPublishedImage
-	for _, target := range p.pubCfg.Targets {
-		source := sources[target.Source]
-		ec2Client := p.tgtEC2Clients[target.Config]
-		region := p.creds[target.Config].Region
-		lctx := log.WithValues(ctx, "sourceType", source.Type(), "sourceRepo", source.Repository(), "region", region)
+	var requireUEFI, secureBoot bool
+	var uefiData *string
+	requireUEFI, secureBoot, uefiData, err = p.prepareSecureBoot(ctx, source, manifest)
+	if err != nil {
+		return nil, fmt.Errorf("cannot prepare secureboot: %w", err)
+	}
+	ctx = log.WithValues(ctx, "requireUEFI", requireUEFI, "secureBoot", secureBoot)
 
-		var requireUEFI, secureBoot bool
-		var uefiData *string
-		requireUEFI, secureBoot, uefiData, err = p.prepareSecureBoot(lctx, source, manifest)
-		if err != nil {
-			return nil, fmt.Errorf("cannot prepare secureboot: %w", err)
-		}
-		lctx = log.WithValues(lctx, "requireUEFI", requireUEFI, "secureBoot", secureBoot)
+	var regions []string
+	regions, err = p.listRegions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cannot list regions: %w", err)
+	}
+	if p.pubCfg.Regions != nil {
+		regions = slc.Subset(regions, *p.pubCfg.Regions)
+	}
+	if len(regions) == 0 {
+		return nil, errors.New("no available regions")
+	}
 
-		var regions []string
-		regions, err = p.listRegions(lctx, ec2Client)
-		if err != nil {
-			return nil, fmt.Errorf("cannot list regions: %w", err)
-		}
-		if target.Regions != nil {
-			regions = slc.Subset(regions, *target.Regions)
-		}
-		if len(regions) == 0 {
-			return nil, errors.New("no available regions")
-		}
+	var snapshot string
+	snapshot, err = p.importSnapshot(ctx, source, imagePath.S3Key, image)
+	if err != nil {
+		return nil, fmt.Errorf("cannot import snapshot for image %s: %w", image, err)
+	}
+	ctx = log.WithValues(ctx, "snapshot", snapshot)
 
-		var snapshot string
-		snapshot, err = p.importSnapshot(lctx, ec2Client, source, imagePath.S3Key, image)
-		if err != nil {
-			return nil, fmt.Errorf("cannot import snapshot for image %s: %w", image, err)
-		}
-		lctx = log.WithValues(lctx, "snapshot", snapshot)
+	err = p.attachTags(ctx, snapshot, tags)
+	if err != nil {
+		return nil, fmt.Errorf("cannot attach tags to snapshot %s: %w", snapshot, err)
+	}
 
-		err = p.attachTags(lctx, ec2Client, snapshot, tags)
-		if err != nil {
-			return nil, fmt.Errorf("cannot attach tags to snapshot %s: %w", snapshot, err)
-		}
+	var imageID string
+	imageID, err = p.registerImage(ctx, snapshot, image, arch, requireUEFI, uefiData)
+	if err != nil {
+		return nil, fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err)
+	}
+	ctx = log.WithValues(ctx, "imageID", imageID)
 
-		var imageID string
-		imageID, err = p.registerImage(lctx, ec2Client, snapshot, image, arch, requireUEFI, uefiData)
-		if err != nil {
-			return nil, fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err)
-		}
-		lctx = log.WithValues(lctx, "imageID", imageID)
+	var images map[string]string
+	images, err = p.copyImage(ctx, image, imageID, region, regions)
+	if err != nil {
+		return nil, fmt.Errorf("cannot copy image %s: %w", image, err)
+	}
 
-		var images map[string]string
-		images, err = p.copyImage(lctx, ec2Client, image, imageID, region, regions)
-		if err != nil {
-			return nil, fmt.Errorf("cannot copy image %s: %w", image, err)
-		}
+	err = p.waitForImages(ctx, images)
+	if err != nil {
+		return nil, fmt.Errorf("cannot finalize images: %w", err)
+	}
 
-		err = p.waitForImages(lctx, ec2Client, images)
-		if err != nil {
-			return nil, fmt.Errorf("cannot finalize images: %w", err)
-		}
+	err = p.makePublic(ctx, images)
+	if err != nil {
+		return nil, fmt.Errorf("cannot make images public: %w", err)
+	}
 
-		err = p.makePublic(lctx, ec2Client, images)
-		if err != nil {
-			return nil, fmt.Errorf("cannot make images public: %w", err)
-		}
-
-		for region, imageID = range images {
-			outputImages = append(outputImages, awsPublishedImage{
-				Cloud:  p.cloud(target),
-				Region: region,
-				ID:     imageID,
-				Image:  image,
-			})
-		}
+	outputImages := make([]awsPublishedImage, 0, len(images))
+	for region, imageID = range images {
+		outputImages = append(outputImages, awsPublishedImage{
+			Cloud:  p.cloud(),
+			Region: region,
+			ID:     imageID,
+			Image:  image,
+		})
 	}
 
 	return &awsPublishingOutput{
@@ -414,7 +395,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}, nil
 }
 
-func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) error {
+func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -428,27 +409,18 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[str
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	for _, target := range p.pubCfg.Targets {
-		_, ok := sources[target.Source]
-		if !ok {
-			return fmt.Errorf("unknown source %s", target.Source)
+	cld := p.cloud()
+	ctx = log.WithValues(ctx, "cloud", cld)
+
+	for _, img := range *pubOut.Images {
+		if img.Cloud != cld {
+			continue
 		}
-	}
+		lctx := log.WithValues(ctx, "region", img.Region, "id", img.ID, "image", img.Image)
 
-	for _, target := range p.pubCfg.Targets {
-		ec2Client := p.tgtEC2Clients[target.Config]
-		lctx := log.WithValues(ctx, "cloud", target.Cloud)
-
-		for _, img := range *pubOut.Images {
-			if img.Cloud != p.cloud(target) {
-				continue
-			}
-			llctx := log.WithValues(lctx, "region", img.Region, "id", img.ID, "image", img.Image)
-
-			err = p.deregisterImage(llctx, ec2Client, img.ID, img.Region)
-			if err != nil {
-				return fmt.Errorf("cannot deregister image %s in region %s: %w", img.Image, img.Region, err)
-			}
+		err = p.deregisterImage(lctx, img.ID, img.Region)
+		if err != nil {
+			return fmt.Errorf("cannot deregister image %s in region %s: %w", img.Image, img.Region, err)
 		}
 	}
 
@@ -456,11 +428,11 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, sources map[str
 }
 
 type aws struct {
-	creds         map[string]awsCredentials
-	srcCfg        awsSourceConfig
-	pubCfg        awsPublishingConfig
-	srcS3Client   *s3.Client
-	tgtEC2Clients map[string]*ec2.Client
+	creds        map[string]awsCredentials
+	srcCfg       awsSourceConfig
+	pubCfg       awsPublishingConfig
+	srcS3Client  *s3.Client
+	tgtEC2Client *ec2.Client
 }
 
 type awsCredentials struct {
@@ -475,16 +447,12 @@ type awsSourceConfig struct {
 }
 
 type awsPublishingConfig struct {
-	Targets   []awsTarget   `mapstructure:"targets"`
+	Source    string        `mapstructure:"source"`
+	Cloud     *string       `mapstructure:"cloud,omitempty"`
+	Config    string        `mapstructure:"config"`
+	Regions   *[]string     `mapstructure:"regions,omitempty"`
 	ImageTags *awsImageTags `mapstructure:"image_tags,omitempty"`
-}
-
-type awsTarget struct {
-	Source  string    `mapstructure:"source"`
-	Cloud   *string   `mapstructure:"cloud,omitempty"`
-	Config  string    `mapstructure:"config"`
-	Regions *[]string `mapstructure:"regions,omitempty"`
-	china   bool
+	china     bool
 }
 
 type awsImageTags struct {
@@ -505,11 +473,11 @@ type awsPublishedImage struct {
 }
 
 func (p *aws) isConfigured() bool {
-	return len(p.tgtEC2Clients) != 0
+	return p.tgtEC2Client != nil
 }
 
-func (*aws) cloud(target awsTarget) string {
-	if target.china {
+func (p *aws) cloud() string {
+	if p.pubCfg.china {
 		return "China"
 	}
 
@@ -591,9 +559,9 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 	return requireUEFI, secureBoot, uefiData, nil
 }
 
-func (*aws) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, error) {
+func (p *aws) listRegions(ctx context.Context) ([]string, error) {
 	log.Debug(ctx, "Listing available regions")
-	r, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
+	r, err := p.tgtEC2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
 	if err != nil {
 		return nil, fmt.Errorf("cannot describe regions: %w", err)
 	}
@@ -609,12 +577,12 @@ func (*aws) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, e
 	return regions, nil
 }
 
-func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, source ArtifactSource, key, image string) (string, error) {
+func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, image string) (string, error) {
 	bucket := source.Repository()
 	ctx = log.WithValues(ctx, "key", key)
 
 	log.Info(ctx, "Importing snapshot")
-	r, err := ec2Client.ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
+	r, err := p.tgtEC2Client.ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
 		DiskContainer: &ec2types.SnapshotDiskContainer{
 			Description: &image,
 			Format:      ptr.P("raw"),
@@ -638,7 +606,7 @@ func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, source Ar
 	for status == "active" {
 		log.Debug(ctx, "Waiting for snapshot")
 		var s *ec2.DescribeImportSnapshotTasksOutput
-		s, err = ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
+		s, err = p.tgtEC2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 			ImportTaskIds: []string{*r.ImportTaskId},
 		})
 		if err != nil {
@@ -666,9 +634,9 @@ func (*aws) importSnapshot(ctx context.Context, ec2Client *ec2.Client, source Ar
 	return snapshot, nil
 }
 
-func (*aws) attachTags(ctx context.Context, ec2Client *ec2.Client, obj string, tags []ec2types.Tag) error {
+func (p *aws) attachTags(ctx context.Context, obj string, tags []ec2types.Tag) error {
 	log.Debug(ctx, "Attaching tags", "object", obj)
-	_, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+	_, err := p.tgtEC2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 		Resources: []string{obj},
 		Tags:      tags,
 	})
@@ -679,8 +647,8 @@ func (*aws) attachTags(ctx context.Context, ec2Client *ec2.Client, obj string, t
 	return nil
 }
 
-func (*aws) registerImage(ctx context.Context, ec2Client *ec2.Client, snapshot, image string, arch ec2types.ArchitectureValues,
-	requireUEFI bool, uefiData *string,
+func (p *aws) registerImage(ctx context.Context, snapshot, image string, arch ec2types.ArchitectureValues, requireUEFI bool,
+	uefiData *string,
 ) (string, error) {
 	params := ec2.RegisterImageInput{
 		Name:         &image,
@@ -709,7 +677,7 @@ func (*aws) registerImage(ctx context.Context, ec2Client *ec2.Client, snapshot, 
 	}
 
 	log.Info(ctx, "Registering image")
-	r, err := ec2Client.RegisterImage(ctx, &params)
+	r, err := p.tgtEC2Client.RegisterImage(ctx, &params)
 	if err != nil {
 		return "", fmt.Errorf("cannot register image: %w", err)
 	}
@@ -720,9 +688,7 @@ func (*aws) registerImage(ctx context.Context, ec2Client *ec2.Client, snapshot, 
 	return *r.ImageId, nil
 }
 
-func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, image, imageID, fromRegion string,
-	toRegions []string,
-) (map[string]string, error) {
+func (p *aws) copyImage(ctx context.Context, image, imageID, fromRegion string, toRegions []string) (map[string]string, error) {
 	images := make(map[string]string, len(toRegions))
 
 	for _, region := range toRegions {
@@ -732,7 +698,7 @@ func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, image, imageID
 		}
 
 		log.Info(ctx, "Copying image", "toRegion", region)
-		r, err := ec2Client.CopyImage(ctx, &ec2.CopyImageInput{
+		r, err := p.tgtEC2Client.CopyImage(ctx, &ec2.CopyImageInput{
 			Name:          &image,
 			SourceImageId: &imageID,
 			SourceRegion:  &fromRegion,
@@ -750,12 +716,12 @@ func (*aws) copyImage(ctx context.Context, ec2Client *ec2.Client, image, imageID
 	return images, nil
 }
 
-func (*aws) waitForImages(ctx context.Context, ec2Client *ec2.Client, images map[string]string) error {
+func (p *aws) waitForImages(ctx context.Context, images map[string]string) error {
 	for region, imageID := range images {
 		var state ec2types.ImageState
 		for state != ec2types.ImageStateAvailable {
 			log.Debug(ctx, "Waiting for image", "toRegion", region, "toImageID", imageID)
-			r, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
+			r, err := p.tgtEC2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 				ImageIds: []string{imageID},
 			}, overrideRegion(region))
 			if err != nil {
@@ -780,10 +746,10 @@ func (*aws) waitForImages(ctx context.Context, ec2Client *ec2.Client, images map
 	return nil
 }
 
-func (*aws) makePublic(ctx context.Context, ec2Client *ec2.Client, images map[string]string) error {
+func (p *aws) makePublic(ctx context.Context, images map[string]string) error {
 	for region, imageID := range images {
 		log.Debug(ctx, "Adding launch permission to image", "toRegion", region, "toImageID", imageID)
-		_, err := ec2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
+		_, err := p.tgtEC2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
 			ImageId:   &imageID,
 			Attribute: ptr.P("launchPermission"),
 			LaunchPermission: &ec2types.LaunchPermissionModifications{
@@ -808,9 +774,9 @@ func overrideRegion(region string) func(o *ec2.Options) {
 	}
 }
 
-func (*aws) deregisterImage(ctx context.Context, ec2Client *ec2.Client, imageID, region string) error {
+func (p *aws) deregisterImage(ctx context.Context, imageID, region string) error {
 	log.Info(ctx, "Deregistering image")
-	r, err := ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
+	r, err := p.tgtEC2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
 		ImageId:                   &imageID,
 		DeleteAssociatedSnapshots: ptr.P(true),
 	}, overrideRegion(region))

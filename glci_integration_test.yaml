@@ -59,10 +59,9 @@ publishing:
     bucket: gardenlinux-test-upload
     regions: [ eu-central-1, eu-west-1 ]
   - type: AWS
-    targets:
-    - source: S3
-      config: gardenlinux-integration-test
-      regions: [ eu-central-1, eu-west-1 ]
+    source: S3
+    config: gardenlinux-integration-test
+    regions: [ eu-central-1, eu-west-1 ]
     image_tags:
       include_gardenlinux_version: true
       include_gardenlinux_committish: true
