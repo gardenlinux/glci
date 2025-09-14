@@ -60,11 +60,16 @@ publishing:
     bucket: gardenlinux-community
   - type: AWS
     targets:
-    - source: S3
-      config: gardenlinux
-    - source: S3-China
-      cloud: China
-      config: gardenlinux-cn
+    source: S3
+    config: gardenlinux
+    image_tags:
+      static_tags:
+        sec-by-def-public-image-exception: enabled
+  - type: AWS
+    targets:
+    source: S3-China
+    cloud: China
+    config: gardenlinux-cn
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
