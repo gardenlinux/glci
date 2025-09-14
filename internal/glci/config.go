@@ -1,7 +1,6 @@
 package glci
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
@@ -74,11 +73,6 @@ func (c *PublishingConfig) Validate() error {
 	return nil
 }
 
-// WithVersion stores the GLCI version string into the context.
-func WithVersion(ctx context.Context, version string) context.Context {
-	return context.WithValue(ctx, ctxkVer{}, version)
-}
-
 type cfgFlavor struct {
 	Platform string `mapstructure:"platform"`
 	Cname    string `mapstructure:"cname"`
@@ -101,11 +95,4 @@ type AliasesConfig map[string][]string
 // Validate ensures that the aliases configuration is valid.
 func (*AliasesConfig) Validate() error {
 	return nil
-}
-
-type ctxkVer struct{}
-
-func glciVersion(ctx context.Context) string {
-	ver, _ := ctx.Value(ctxkVer{}).(string) //nolint:revive // An invalid or missing version results in an empty string.
-	return ver
 }
