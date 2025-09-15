@@ -613,17 +613,22 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 }
 
 func (p *azure) listRegions(ctx context.Context) ([]string, error) {
+	unusableRegions := []string{
+		"brazilus",
+		"jioindiacentral",
+	}
 	spcreds := p.servicePrincipalCreds[p.pubCfg.ServicePrincipalConfig]
-
-	regions := make([]string, 0)
 
 	log.Debug(ctx, "Listing available locations")
 	pager := p.subscriptionsClient.NewListLocationsPager(spcreds.SubscriptionID, nil)
+
+	regions := make([]string, 0)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("cannot list locations: %w", err)
 		}
+
 		for _, location := range page.Value {
 			if location == nil {
 				return nil, errors.New("cannot list locations: missing location")
@@ -631,6 +636,19 @@ func (p *azure) listRegions(ctx context.Context) ([]string, error) {
 			if location.Name == nil {
 				return nil, errors.New("cannot list locations: missing location name")
 			}
+			if location.Metadata == nil || location.Metadata.RegionType == nil {
+				return nil, errors.New("cannot list locations: missing region type")
+			}
+			if *location.Metadata.RegionType == armsubscriptions.RegionTypeLogical {
+				continue
+			}
+			if slices.Contains(unusableRegions, *location.Name) {
+				continue
+			}
+			if strings.HasSuffix(*location.Name, "euap") || strings.HasSuffix(*location.Name, "usstg") {
+				continue
+			}
+
 			regions = append(regions, *location.Name)
 		}
 	}
