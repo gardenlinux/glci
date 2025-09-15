@@ -373,7 +373,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	var snapshot string
 	snapshot, err = p.importSnapshot(ctx, source, imagePath.S3Key, image)
 	if err != nil {
-		return nil, fmt.Errorf("cannot import snapshot for image %s: %w", image, err)
+		return nil, fmt.Errorf("cannot import snapshot from %s for image %s: %w", imagePath.S3Key, image, err)
 	}
 	ctx = log.WithValues(ctx, "snapshot", snapshot)
 
@@ -621,10 +621,10 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 		Encrypted: ptr.P(false),
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot import snapshot from %s in bucket %s: %w", key, bucket, err)
+		return "", fmt.Errorf("cannot import snapshot in bucket %s: %w", bucket, err)
 	}
 	if r.ImportTaskId == nil {
-		return "", fmt.Errorf("cannot import snapshot from %s in bucket %s: missing import task ID", key, bucket)
+		return "", fmt.Errorf("cannot import snapshot in bucket %s: missing import task ID", bucket)
 	}
 	ctx = log.WithValues(ctx, "taskId", *r.ImportTaskId)
 
@@ -643,18 +643,23 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 			return "", fmt.Errorf("cannot describe import snapshot tasks with id %s: missing import snapshot tasks", *r.ImportTaskId)
 		}
 		task := s.ImportSnapshotTasks[0]
-		if task.SnapshotTaskDetail == nil || task.SnapshotTaskDetail.Status == nil || task.SnapshotTaskDetail.SnapshotId == nil {
+		if task.SnapshotTaskDetail == nil || task.SnapshotTaskDetail.Status == nil {
 			return "", fmt.Errorf("cannot describe import snapshot tasks with id %s: missing import snapshot task detail", *r.ImportTaskId)
 		}
 		status = *task.SnapshotTaskDetail.Status
-		snapshot = *task.SnapshotTaskDetail.SnapshotId
+		if task.SnapshotTaskDetail.SnapshotId != nil {
+			snapshot = *task.SnapshotTaskDetail.SnapshotId
+		}
 
 		if status == "active" {
 			time.Sleep(time.Second * 7)
 		}
 	}
 	if status != "completed" {
-		return "", fmt.Errorf("unknown import task status %s from %s in bucket %s", status, key, bucket)
+		return "", fmt.Errorf("unknown import task status %s in bucket %s", status, bucket)
+	}
+	if snapshot == "" {
+		return "", fmt.Errorf("cannot describe import snapshot tasks with id %s: missing snapshot ID", *r.ImportTaskId)
 	}
 	log.Debug(ctx, "Snapshot imported")
 
