@@ -29,7 +29,6 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
-		flavorPubs := pubMap[flavor.Cname]
 		found := false
 
 		for _, target := range targets {
@@ -92,7 +91,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 				Manifest: manifest,
 				Target:   target,
 			})
-			pubMap[flavor.Cname] = append(flavorPubs, len(publications)-1)
+			pubMap[flavor.Cname] = append(pubMap[flavor.Cname], len(publications)-1)
 		}
 
 		if !found {
@@ -131,6 +130,9 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		glciVer := glciVersion(ctx)
 		if glciVer != "" {
 			publication.Manifest.GLCIVersion = &glciVer
+		}
+		for _, j := range pubMap[publication.Cname] {
+			publications[j].Manifest = publication.Manifest
 		}
 
 		log.Info(lctx, "Updating manifest")

@@ -107,6 +107,9 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		if glciVer != "" {
 			publication.Manifest.GLCIVersion = &glciVer
 		}
+		for _, j := range pubMap[publication.Cname] {
+			publications[j].Manifest = publication.Manifest
+		}
 
 		log.Info(lctx, "Updating manifest")
 		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
