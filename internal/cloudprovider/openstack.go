@@ -78,7 +78,7 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 
 	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(creds.Projects))
 	for _, proj := range creds.Projects {
-		if !slices.Contains(*p.pubCfg.Regions, proj.Region) {
+		if p.pubCfg.Regions != nil && !slices.Contains(*p.pubCfg.Regions, proj.Region) {
 			continue
 		}
 
@@ -382,7 +382,7 @@ type openstackPublishingConfig struct {
 type openstackHypervisor string
 
 const (
-	openstackHypervisorBareMetal openstackHypervisor = "Base Metal"
+	openstackHypervisorBareMetal openstackHypervisor = "Bare Metal"
 	openstackHypervisorVMware    openstackHypervisor = "VMware"
 )
 
