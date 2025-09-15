@@ -30,6 +30,8 @@ flavors:
     cname: gcp-gardener_prod_usi-amd64
   - platform: GCP
     cname: gcp-gardener_prod_usi-arm64
+  - platform: OpenStack
+    cname: openstack-gardener_prod_usi-amd64
   - platform: AWS
     cname: aws-gardener_prod_tpm2_trustedboot-amd64
   - platform: AWS
@@ -87,10 +89,12 @@ publishing:
   - type: OpenStack
     source: S3
     config: gardenlinux
+    source_china: S3-China
     hypervisor: Bare Metal
   - type: OpenStack
     source: S3
     config: gardenlinux
+    source_china: S3-China
     hypervisor: VMware
   ocm:
     type: OCI
