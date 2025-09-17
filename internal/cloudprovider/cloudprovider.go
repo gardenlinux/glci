@@ -86,7 +86,8 @@ func NewOCMTarget(typ string) (OCMTarget, error) {
 func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gl.Manifest, error) {
 	body, err := source.GetObject(ctx, key)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // Directly wraps the source.
+		//nolint:wrapcheck // Directly wraps the source.
+		return nil, err
 	}
 	defer func() {
 		_ = body.Close()
@@ -128,7 +129,8 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	return source.PutObject(ctx, key, &buf) //nolint:wrapcheck // Directly wraps the source.
+	//nolint:wrapcheck // Directly wraps the source.
+	return source.PutObject(ctx, key, &buf)
 }
 
 // Publication represents the act of publishing an image including what is being published where and what the result is.
@@ -220,7 +222,8 @@ func flavor(cname string) string {
 func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]byte, error) {
 	body, err := source.GetObject(ctx, key)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // Directly wraps the source.
+		//nolint:wrapcheck // Directly wraps the source.
+		return nil, err
 	}
 	defer func() {
 		_ = body.Close()
