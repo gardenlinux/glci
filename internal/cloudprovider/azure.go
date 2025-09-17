@@ -109,20 +109,14 @@ func (p *azure) SetTargetConfig(_ context.Context, cfg map[string]any, sources m
 		return fmt.Errorf("missing service principal credentials config %s", p.pubCfg.ServicePrincipalConfig)
 	}
 
-	_, ok = p.galleryCreds[p.pubCfg.GalleryConfig]
+	var gcreds azureGalleryCredentials
+	gcreds, ok = p.galleryCreds[p.pubCfg.GalleryConfig]
 	if !ok {
 		return fmt.Errorf("missing gallery credentials config %s", p.pubCfg.GalleryConfig)
 	}
 
-	p.pubCfg.china = false
-	if p.pubCfg.Cloud != nil {
-		switch *p.pubCfg.Cloud {
-		case "China":
-			p.pubCfg.china = true
-		case "":
-		default:
-			return fmt.Errorf("unknown cloud %s", *p.pubCfg.Cloud)
-		}
+	if strings.HasPrefix(gcreds.Region, "china") {
+		p.pubCfg.china = true
 	}
 
 	apiEndpoint := "core.windows.net"
@@ -497,7 +491,6 @@ type azureGalleryCredentials struct {
 
 type azurePublishingConfig struct {
 	Source                 string    `mapstructure:"source"`
-	Cloud                  *string   `mapstructure:"cloud,omitempty"`
 	StorageAccountConfig   string    `mapstructure:"storage_account_config"`
 	ServicePrincipalConfig string    `mapstructure:"service_principal_config"`
 	GalleryConfig          string    `mapstructure:"gallery_config"`

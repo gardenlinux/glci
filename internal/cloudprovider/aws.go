@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -91,15 +92,8 @@ func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 		return fmt.Errorf("missing credentials config %s", p.pubCfg.Config)
 	}
 
-	p.pubCfg.china = false
-	if p.pubCfg.Cloud != nil {
-		switch *p.pubCfg.Cloud {
-		case "China":
-			p.pubCfg.china = true
-		case "":
-		default:
-			return fmt.Errorf("unknown cloud %s", *p.pubCfg.Cloud)
-		}
+	if strings.HasPrefix(creds.Region, "cn-") {
+		p.pubCfg.china = true
 	}
 
 	if p.pubCfg.Regions != nil {
@@ -459,7 +453,6 @@ type awsSourceConfig struct {
 
 type awsPublishingConfig struct {
 	Source    string        `mapstructure:"source"`
-	Cloud     *string       `mapstructure:"cloud,omitempty"`
 	Config    string        `mapstructure:"config"`
 	Regions   *[]string     `mapstructure:"regions,omitempty"`
 	ImageTags *awsImageTags `mapstructure:"image_tags,omitempty"`
