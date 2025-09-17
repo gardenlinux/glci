@@ -57,17 +57,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			}
 			commit = manifest.BuildCommittish
 
-			if target.CanPublish(manifest) {
-				continue
-			}
-
-			var isPublished bool
-			isPublished, err = target.IsPublished(manifest)
-			if err != nil {
-				return fmt.Errorf("cannot determine publishing status for %s: %w", flavor.Cname, err)
-			}
-			if !isPublished {
-				log.Debug(lctx, "Already removed, skipping")
+			if !target.CanPublish(manifest) {
 				continue
 			}
 
@@ -91,6 +81,16 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 
 	for i, publication := range publications {
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
+
+		var isPublished bool
+		isPublished, err = publication.Target.IsPublished(publication.Manifest)
+		if err != nil {
+			return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
+		}
+		if !isPublished {
+			log.Debug(lctx, "Already removed, skipping")
+			continue
+		}
 
 		log.Info(lctx, "Removing image")
 		err = publication.Target.Remove(lctx, publication.Manifest, sources)

@@ -76,15 +76,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 					return errors.New("target manifest does not correspond to source manifest")
 				}
 
-				var isPublished bool
-				isPublished, err = target.IsPublished(targetManifest)
-				if err != nil {
-					return fmt.Errorf("cannot determine publishing status for %s: %w", flavor.Cname, err)
-				}
-				if isPublished {
-					log.Info(lctx, "Already published, skipping")
-					continue
-				}
+				manifest = targetManifest
 			}
 
 			publications = append(publications, cloudprovider.Publication{
@@ -114,6 +106,16 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 
 	for i, publication := range publications {
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
+
+		var isPublished bool
+		isPublished, err = publication.Target.IsPublished(publication.Manifest)
+		if err != nil {
+			return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
+		}
+		if isPublished {
+			log.Info(lctx, "Already published, skipping")
+			continue
+		}
 
 		log.Info(lctx, "Publishing image")
 		var output cloudprovider.PublishingOutput
