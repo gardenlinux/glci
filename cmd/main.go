@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gardenlinux/glci/internal/cmd"
+	"github.com/gardenlinux/glci/internal/glci"
 	"github.com/gardenlinux/glci/internal/log"
 )
 
@@ -24,8 +25,7 @@ func main() {
 		c.Version = version
 		c.PersistentFlags().Bool("dev", false, "run in development mode")
 		c.PersistentFlags().String("config-file", "", "path to configuration file")
-		c.AddCommand(publishCmd())
-		c.AddCommand(removeCmd())
+		c.AddCommand(publishCmd(), removeCmd())
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
@@ -37,7 +37,7 @@ func main() {
 		syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 	defer stop()
 
-	err = mainCmd.ExecuteContext(ctx)
+	err = mainCmd.ExecuteContext(glci.WithVersion(glci.WithStart(ctx, cmd.StartTime()), version))
 	if err != nil {
 		log.Error(ctx, err)
 		exitCode = 1

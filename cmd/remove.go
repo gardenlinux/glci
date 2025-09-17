@@ -28,7 +28,6 @@ func removeCmd() *cobra.Command {
 }
 
 func remove(ctx context.Context, cfg *viper.Viper) error {
-	ctx = glci.WithVersion(ctx, version)
 	log.Info(ctx, "GLCI", "version", version)
 
 	flavorsCfg, publishingCfg, _, creds, err := loadConfigAndCredentials(ctx, cfg)
