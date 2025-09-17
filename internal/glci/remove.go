@@ -24,6 +24,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
 	}()
 
+	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
@@ -103,7 +104,6 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			return fmt.Errorf("cannot remove publishing output for %s: %w", publication.Cname, err)
 		}
 		publication.Manifest.PublishedImageMetadata = manifestOutput
-		glciVer := glciVersion(ctx)
 		if glciVer != "" {
 			publication.Manifest.GLCIVersion = &glciVer
 		}

@@ -29,7 +29,7 @@ func (d *ComponentDescriptor) ToYAML() ([]byte, error) {
 
 // BuildComponentDescriptor generates a component desciptor that includes all data except the results of the publishing process.
 func BuildComponentDescriptor(ctx context.Context, source cloudprovider.ArtifactSource, publications []cloudprovider.Publication,
-	ocmTarget cloudprovider.OCMTarget, aliases map[string][]string, version, commit string,
+	ocmTarget cloudprovider.OCMTarget, aliases map[string][]string, glciVersion, version, commit string,
 ) (*ComponentDescriptor, error) {
 	log.Debug(ctx, "Building component descriptor")
 
@@ -97,13 +97,20 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			return nil, fmt.Errorf("missing rootfs for %s: %w", publication.Cname, err)
 		}
 
-		labels := append(make([]componentDescriptorlabel, 0, 3), componentDescriptorlabel{
+		labels := make([]componentDescriptorlabel, 0, 3)
+		labels = append(labels, componentDescriptorlabel{
 			Name: "gardener.cloud/gardenlinux/ci/build-metadata",
 			Value: map[string]any{
 				"modifiers":      publication.Manifest.Modifiers,
 				"buildTimestamp": publication.Manifest.BuildTimestamp,
 			},
 		})
+		if glciVersion != "" {
+			labels = append(labels, componentDescriptorlabel{
+				Name:  "gardenlinux.io/glci/version",
+				Value: glciVersion,
+			})
+		}
 
 		packageVersions := getPackageVersions(packages, aliases)
 		if len(packageVersions) > 0 {
