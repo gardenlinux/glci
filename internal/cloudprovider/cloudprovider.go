@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/goccy/go-yaml"
@@ -33,6 +34,7 @@ type PublishingTarget interface {
 	SetTargetConfig(ctx context.Context, credentials map[string]any, sources map[string]ArtifactSource) error
 	Close() error
 	ImageSuffix() string
+	CanPublish(manifest *gl.Manifest) bool
 	IsPublished(manifest *gl.Manifest) (bool, error)
 	AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error)
 	RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error)
@@ -209,6 +211,10 @@ func setConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	}
 
 	return nil
+}
+
+func flavor(cname string) string {
+	return strings.SplitN(cname, "-", 2)[0]
 }
 
 func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]byte, error) {

@@ -119,9 +119,27 @@ func (*openstack) ImageSuffix() string {
 	return ".vmdk"
 }
 
+func (p *openstack) CanPublish(manifest *gl.Manifest) bool {
+	if !p.isConfigured() {
+		return false
+	}
+
+	hypervisor, err := p.hypervisor(manifest.Platform)
+	if err != nil {
+		return false
+	}
+
+	return hypervisor == p.pubCfg.Hypervisor
+}
+
 func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
+	}
+
+	_, err := p.hypervisor(manifest.Platform)
+	if err != nil {
+		return false, fmt.Errorf("invalid manifest: %w", err)
 	}
 
 	openstackOutput, err := publishingOutputFromManifest[openstackPublishingOutput](manifest)
@@ -211,10 +229,22 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	f := flavor(cname)
+	hypervisor, err := p.hypervisor(f)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cname: %w", err)
+	}
+	if hypervisor != p.pubCfg.Hypervisor {
+		return nil, nil
+	}
+	if f != manifest.Platform {
+		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	var imagePath gl.S3ReleaseFile
+	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -281,9 +311,17 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
 
-	pubOut, err := publishingOutputFromManifest[*openstackPublishingOutput](manifest)
+	hypervisor, err := p.hypervisor(manifest.Platform)
+	if err != nil {
+		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	if hypervisor != p.pubCfg.Hypervisor {
+		return nil
+	}
+
+	var pubOut *openstackPublishingOutput
+	pubOut, err = publishingOutputFromManifest[*openstackPublishingOutput](manifest)
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -361,6 +399,24 @@ type openstackPublishedImage struct {
 
 func (p *openstack) isConfigured() bool {
 	return len(p.imagesClients) != 0
+}
+
+func (p *openstack) hypervisor(platform string) (openstackHypervisor, error) {
+	h, ok := strings.CutPrefix(platform, "openstack")
+	if !ok {
+		return "", fmt.Errorf("invalid platform %s for target %s", platform, p.Type())
+	}
+
+	switch h {
+	case "baremetal":
+		return openstackHypervisorBareMetal, nil
+	case "vmware":
+		return openstackHypervisorVMware, nil
+	case "":
+		return openstackHypervisorVMware, nil
+	default:
+		return "", fmt.Errorf("invalid hypervisor %s", h)
+	}
 }
 
 func (p *openstack) imageName(cname, version, committish string) string {

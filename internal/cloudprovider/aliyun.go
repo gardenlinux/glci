@@ -91,6 +91,14 @@ func (*aliyun) ImageSuffix() string {
 	return ".qcow2"
 }
 
+func (p *aliyun) CanPublish(manifest *gl.Manifest) bool {
+	if !p.isConfigured() {
+		return false
+	}
+
+	return flavor(manifest.Platform) == "ali"
+}
+
 func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -145,7 +153,14 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	f := flavor(cname)
+	if f != "ali" {
+		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
+	}
+	if f != manifest.Platform {
+		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
@@ -219,7 +234,10 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	if flavor(manifest.Platform) != "ali" {
+		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
+	}
 
 	pubOut, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
 	if err != nil {
