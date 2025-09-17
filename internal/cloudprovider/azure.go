@@ -719,7 +719,12 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 	ctx = log.WithValues(ctx, "key", key, "container", container, "blob", blob, "size", size)
 
 	log.Info(ctx, "Uploading blob")
-	srcURL := source.GetObjectURL(key)
+	var url string
+	url, err = source.GetObjectURL(ctx, key)
+	if err != nil {
+		return "", "", fmt.Errorf("cannot get image URL for %s: %w", key, err)
+	}
+
 	blobClient := p.storageClient.ServiceClient().NewContainerClient(container).NewPageBlobClient(blob)
 	_, err = blobClient.Create(ctx, size, nil)
 	if err != nil {
@@ -728,7 +733,7 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 	var offset int64
 	for offset < size {
 		block := min(size-offset, 4*1024*1024)
-		_, err = blobClient.UploadPagesFromURL(ctx, srcURL, offset, offset, block, nil)
+		_, err = blobClient.UploadPagesFromURL(ctx, url, offset, offset, block, nil)
 		if err != nil {
 			return "", "", fmt.Errorf("cannot upload to blob %s in container %s: %w", blob, container, err)
 		}

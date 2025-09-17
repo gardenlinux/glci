@@ -424,10 +424,16 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 		}
 	default:
 	}
+	url, err := source.GetObjectURL(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("cannot get image URL for %s: %w", key, err)
+	}
+
 	ctx = log.WithValues(ctx, "key", key)
 
 	log.Info(ctx, "Creating image")
-	img, err := images.Create(ctx, imageClient, images.CreateOpts{
+	var img *images.Image
+	img, err = images.Create(ctx, imageClient, images.CreateOpts{
 		Name:            image,
 		Visibility:      &visibility,
 		ContainerFormat: "bare",
@@ -441,7 +447,7 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 	log.Debug(ctx, "Importing image")
 	err = imageimport.Create(ctx, imageClient, img.ID, imageimport.CreateOpts{
 		Name: imageimport.WebDownloadMethod,
-		URI:  source.GetObjectURL(key),
+		URI:  url,
 	}).ExtractErr()
 	if err != nil {
 		return "", fmt.Errorf("cannot import image: %w", err)

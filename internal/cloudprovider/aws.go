@@ -127,8 +127,19 @@ func (p *aws) Repository() string {
 	return p.srcCfg.Bucket
 }
 
-func (p *aws) GetObjectURL(key string) string {
-	return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", p.srcCfg.Bucket, key)
+func (p *aws) GetObjectURL(ctx context.Context, key string) (string, error) {
+	srcPresignClient := s3.NewPresignClient(p.srcS3Client, func(o *s3.PresignOptions) {
+		o.Expires = time.Hour * 7
+	})
+	presigned, err := srcPresignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: &p.srcCfg.Bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return "", fmt.Errorf("cannot get presigned URL: %w", err)
+	}
+
+	return presigned.URL, nil
 }
 
 func (p *aws) GetObjectSize(ctx context.Context, key string) (int64, error) {
