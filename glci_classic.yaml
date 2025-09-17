@@ -1,0 +1,83 @@
+flavors:
+  flavors:
+  - platform: Aliyun
+    cname: ali-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod-arm64
+  - platform: Azure
+    cname: azure-gardener_prod-amd64
+  - platform: Azure
+    cname: azure-gardener_prod-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod-arm64
+  - platform: OpenStack
+    cname: openstack-gardener_prod-amd64
+  - platform: OpenStack
+    cname: openstackbaremetal-gardener_prod-amd64
+publishing:
+  manifest_source: S3
+  sources:
+  - id: S3
+    type: AWS
+    bucket: gardenlinux-github-releases
+    config: gardenlinux
+  - id: S3-China
+    type: AWS
+    bucket: gardenlinux-github-releases
+    config: gardenlinux-cn
+  targets:
+  - type: Aliyun
+    source: S3
+    config: gardenlinux
+    bucket: gardenlinux-community
+  - type: AWS
+    source: S3
+    config: gardenlinux
+    image_tags:
+      static_tags:
+        sec-by-def-public-image-exception: enabled
+  - type: AWS
+    source: S3-China
+    config: gardenlinux-cn
+    image_tags:
+      static_tags:
+        sec-by-def-public-image-exception: enabled
+  - type: Azure
+    source: S3
+    storage_account_config: gardenlinux-community-gallery
+    service_principal_config: gardenlinux
+    gallery_config: gardenlinux-community-gallery-nvme
+  - type: Azure
+    source: S3-China
+    storage_account_config: gardenlinux-community-gallery-cn
+    service_principal_config: gardenlinux-cn
+    gallery_config: gardenlinux-community-gallery-nvme-cn
+  - type: GCP
+    source: S3
+    config: gardenlinux
+    bucket: gardenlinux-images
+  - type: OpenStack
+    source: S3
+    config: gardenlinux
+    source_china: S3-China
+    hypervisor: Bare Metal
+  - type: OpenStack
+    source: S3
+    config: gardenlinux
+    source_china: S3-China
+    hypervisor: VMware
+  ocm:
+    type: OCI
+    config: gcr-readwrite
+    repository: europe-docker.pkg.dev/gardener-project/releases
+aliases:
+  auditd: [ audit ]
+  libc-bin: [ glibc ]
+  python3-blinker: [ blinker ]
+  python3-jinja2: [ Jinja2 ]
+  python3-jwt: [ PyJWT ]
+  python3-markupsafe: [ MarkupSafe ]
