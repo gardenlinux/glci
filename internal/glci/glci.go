@@ -106,11 +106,14 @@ func closeSourcesAndTargets(sources map[string]cloudprovider.ArtifactSource, tar
 	return errors.Join(errs...)
 }
 
-type ctxkVer struct{}
-type ctxkStart struct{}
+type (
+	ctxkVer   struct{}
+	ctxkStart struct{}
+)
 
 func glciVersion(ctx context.Context) string {
-	ver, _ := ctx.Value(ctxkVer{}).(string) //nolint:revive // An invalid or missing version results in an empty string.
+	//nolint:revive // An invalid or missing version results in an empty string.
+	ver, _ := ctx.Value(ctxkVer{}).(string)
 	return ver
 }
 

@@ -12,7 +12,8 @@ import (
 	"github.com/spf13/viper"
 )
 
-func init() { // nolint:gochecknoinits // This needs to be run as early as possible.
+//nolint:gochecknoinits // This needs to be run as early as possible.
+func init() {
 	startTime = time.Now()
 }
 
@@ -36,7 +37,8 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 
 		cmd, args, err := rootCmd.Find(os.Args[1:])
 		if err != nil {
-			return nil, nil, err //nolint:wrapcheck // Directly wraps the Cobra error message.
+			//nolint:wrapcheck // Directly wraps the Cobra error message.
+			return nil, nil, err
 		}
 
 		cmd.InitDefaultHelpFlag()
@@ -44,12 +46,14 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 
 		err = cmd.ParseFlags(args)
 		if err != nil {
-			return nil, nil, err //nolint:wrapcheck // Directly wraps the Cobra error message.
+			//nolint:wrapcheck // Directly wraps the Cobra error message.
+			return nil, nil, err
 		}
 
 		err = cfg.BindPFlags(cmd.Flags())
 		if err != nil {
-			return nil, nil, err //nolint:wrapcheck // Directly wraps the Viper error message.
+			//nolint:wrapcheck // Directly wraps the Viper error message.
+			return nil, nil, err
 		}
 		cfg.SetEnvPrefix(strings.ToUpper(rootCmd.Name()))
 		cfg.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
@@ -92,6 +96,7 @@ func StartTime() time.Time {
 	return startTime
 }
 
-var startTime time.Time // nolint:gochecknoglobals // This needs to be set as early as possible.
+//nolint:gochecknoglobals // This needs to be set as early as possible.
+var startTime time.Time
 
 type ctxkCfg struct{}
