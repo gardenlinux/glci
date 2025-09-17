@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 )
@@ -11,6 +12,11 @@ import (
 // WithVersion stores the GLCI version string into the context.
 func WithVersion(ctx context.Context, version string) context.Context {
 	return context.WithValue(ctx, ctxkVer{}, version)
+}
+
+// WithStart stores the GLCI start time into the context.
+func WithStart(ctx context.Context, start time.Time) context.Context {
+	return context.WithValue(ctx, ctxkStart{}, start)
 }
 
 func loadCredentialsAndConfig(ctx context.Context, creds Credentials, publishingConfig PublishingConfig) (cloudprovider.ArtifactSource,
@@ -101,8 +107,17 @@ func closeSourcesAndTargets(sources map[string]cloudprovider.ArtifactSource, tar
 }
 
 type ctxkVer struct{}
+type ctxkStart struct{}
 
 func glciVersion(ctx context.Context) string {
 	ver, _ := ctx.Value(ctxkVer{}).(string) //nolint:revive // An invalid or missing version results in an empty string.
 	return ver
+}
+
+func execTime(ctx context.Context) time.Duration {
+	start, ok := ctx.Value(ctxkStart{}).(time.Time)
+	if !ok {
+		return time.Duration(0)
+	}
+	return time.Since(start)
 }

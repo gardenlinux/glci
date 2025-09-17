@@ -107,6 +107,11 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	for i, publication := range publications {
 		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
+		uptime := execTime(lctx)
+		if uptime != 0 && uptime.Hours() > 5 {
+			return errors.New("publishing taking too long, restart GLCI to resume")
+		}
+
 		var isPublished bool
 		isPublished, err = publication.Target.IsPublished(publication.Manifest)
 		if err != nil {

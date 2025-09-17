@@ -28,7 +28,6 @@ func publishCmd() *cobra.Command {
 }
 
 func publish(ctx context.Context, cfg *viper.Viper) error {
-	ctx = glci.WithVersion(ctx, version)
 	log.Info(ctx, "GLCI", "version", version)
 
 	flavorsCfg, publishingCfg, aliasesCfg, creds, err := loadConfigAndCredentials(ctx, cfg)

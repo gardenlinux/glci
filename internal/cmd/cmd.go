@@ -6,10 +6,15 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+func init() { // nolint:gochecknoinits // This needs to be run as early as possible.
+	startTime = time.Now()
+}
 
 // Setup sets up a Cobra command in such a way that it supports integration with Viper.
 func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Viper, error) {
@@ -23,8 +28,8 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 	cfg := viper.New()
 	cfg.SetConfigName(name)
 	cfg.AddConfigPath(".")
-
 	rootCmd.SetContext(context.WithValue(context.Background(), ctxkCfg{}, cfg))
+
 	if len(os.Args) > 1 && os.Args[1] != cobra.ShellCompRequestCmd && os.Args[1] != cobra.ShellCompNoDescRequestCmd {
 		rootCmd.InitDefaultHelpCmd()
 		rootCmd.InitDefaultCompletionCmd(os.Args[1:]...)
@@ -81,5 +86,12 @@ func RunFunc(run func(context.Context, *viper.Viper) error) func(*cobra.Command,
 		return run(ctx, v)
 	}
 }
+
+// StartTime returns the approximate start time of the process.
+func StartTime() time.Time {
+	return startTime
+}
+
+var startTime time.Time // nolint:gochecknoglobals // This needs to be set as early as possible.
 
 type ctxkCfg struct{}
