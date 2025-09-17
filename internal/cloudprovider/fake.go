@@ -71,6 +71,10 @@ func (*fake) ImageSuffix() string {
 	return ".fake"
 }
 
+func (*fake) CanPublish(_ *gl.Manifest) bool {
+	return true
+}
+
 func (*fake) IsPublished(_ *gl.Manifest) (bool, error) {
 	return false, nil
 }

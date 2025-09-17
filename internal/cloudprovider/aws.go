@@ -214,6 +214,19 @@ func (*aws) ImageSuffix() string {
 	return ".raw"
 }
 
+func (p *aws) CanPublish(manifest *gl.Manifest) bool {
+	if !p.isConfigured() {
+		return false
+	}
+
+	if flavor(manifest.Platform) != "aws" {
+		return false
+	}
+
+	chinaAndSecureBoot := p.pubCfg.china && manifest.SecureBoot != nil && *manifest.SecureBoot
+	return !chinaAndSecureBoot
+}
+
 func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -312,7 +325,14 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	f := flavor(cname)
+	if f != "aws" {
+		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
+	}
+	if f != manifest.Platform {
+		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
@@ -404,7 +424,10 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	if flavor(manifest.Platform) != "aws" {
+		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
+	}
 
 	pubOut, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
 	if err != nil {

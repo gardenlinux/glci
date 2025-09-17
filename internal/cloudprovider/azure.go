@@ -173,6 +173,14 @@ func (*azure) ImageSuffix() string {
 	return ".vhd"
 }
 
+func (p *azure) CanPublish(manifest *gl.Manifest) bool {
+	if !p.isConfigured() {
+		return false
+	}
+
+	return flavor(manifest.Platform) == "azure"
+}
+
 func (p *azure) IsPublished(manifest *gl.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -271,7 +279,14 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	f := flavor(cname)
+	if f != "azure" {
+		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
+	}
+	if f != manifest.Platform {
+		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
@@ -397,7 +412,10 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	if flavor(manifest.Platform) != "azure" {
+		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
+	}
 
 	pubOut, err := publishingOutputFromManifest[azurePublishingOutput](manifest)
 	if err != nil {

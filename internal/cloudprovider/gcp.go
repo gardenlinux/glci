@@ -114,6 +114,14 @@ func (*gcp) ImageSuffix() string {
 	return ".gcpimage.tar.gz"
 }
 
+func (p *gcp) CanPublish(manifest *gl.Manifest) bool {
+	if !p.isConfigured() {
+		return false
+	}
+
+	return flavor(manifest.Platform) == "gcp"
+}
+
 func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -168,7 +176,14 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	f := flavor(cname)
+	if f != "gcp" {
+		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
+	}
+	if f != manifest.Platform {
+		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
@@ -225,7 +240,10 @@ func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "target", p.Type())
+
+	if flavor(manifest.Platform) != "gcp" {
+		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
+	}
 
 	pubOut, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
 	if err != nil {

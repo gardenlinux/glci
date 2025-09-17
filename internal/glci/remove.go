@@ -56,6 +56,10 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			}
 			commit = manifest.BuildCommittish
 
+			if target.CanPublish(manifest) {
+				continue
+			}
+
 			var isPublished bool
 			isPublished, err = target.IsPublished(manifest)
 			if err != nil {

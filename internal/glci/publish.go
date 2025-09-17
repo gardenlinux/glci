@@ -54,6 +54,10 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 			}
 			commit = manifest.BuildCommittish
 
+			if !target.CanPublish(manifest) {
+				continue
+			}
+
 			log.Debug(lctx, "Retrieving target manifest")
 			var targetManifest *gl.Manifest
 			targetManifest, err = cloudprovider.GetManifest(lctx, manifestTarget, manifestKey)
@@ -66,6 +70,10 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 				}
 				if targetManifest.BuildCommittish != commit {
 					return fmt.Errorf("target manifest for %s has incorrect commit %s", flavor.Cname, targetManifest.BuildCommittish)
+				}
+
+				if !target.CanPublish(targetManifest) {
+					return errors.New("target manifest does not correspond to source manifest")
 				}
 
 				var isPublished bool
