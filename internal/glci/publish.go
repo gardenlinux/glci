@@ -26,6 +26,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
 	}()
 
+	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
@@ -100,7 +101,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	}
 
 	var descriptor *ocm.ComponentDescriptor
-	descriptor, err = ocm.BuildComponentDescriptor(ctx, manifestSource, publications, ocmTarget, aliasesConfig, version, commit)
+	descriptor, err = ocm.BuildComponentDescriptor(ctx, manifestSource, publications, ocmTarget, aliasesConfig, glciVer, version, commit)
 	if err != nil {
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
@@ -127,7 +128,6 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 			return fmt.Errorf("cannot add publishing output for %s: %w", publication.Cname, err)
 		}
 		publication.Manifest.PublishedImageMetadata = manifestOutput
-		glciVer := glciVersion(ctx)
 		if glciVer != "" {
 			publication.Manifest.GLCIVersion = &glciVer
 		}
