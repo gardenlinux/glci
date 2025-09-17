@@ -370,7 +370,7 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	var url string
 	url, err = bucket.SignedURL(blobName, &storage.SignedURLOptions{
 		Method:  "GET",
-		Expires: time.Now().Add(7 * time.Hour),
+		Expires: time.Now().Add(time.Hour * 7),
 		Scheme:  storage.SigningSchemeV4,
 	})
 	if err != nil {
