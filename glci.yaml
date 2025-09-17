@@ -59,16 +59,13 @@ publishing:
     config: gardenlinux
     bucket: gardenlinux-community
   - type: AWS
-    targets:
     source: S3
     config: gardenlinux
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
   - type: AWS
-    targets:
     source: S3-China
-    cloud: China
     config: gardenlinux-cn
     image_tags:
       static_tags:
@@ -80,7 +77,6 @@ publishing:
     gallery_config: gardenlinux-community-gallery-nvme
   - type: Azure
     source: S3-China
-    cloud: China
     storage_account_config: gardenlinux-community-gallery-cn
     service_principal_config: gardenlinux-cn
     gallery_config: gardenlinux-community-gallery-nvme-cn
