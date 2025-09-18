@@ -305,7 +305,9 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	}
 	source := sources[p.pubCfg.Source]
 	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
-	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository())
+	cld := p.cloud()
+	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository(), "cloud",
+		cld)
 
 	var requireUEFI, secureBoot bool
 	var pk, kek, db string

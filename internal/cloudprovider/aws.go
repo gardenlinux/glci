@@ -347,8 +347,9 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	source := sources[p.pubCfg.Source]
 	region := p.creds[p.pubCfg.Config].Region
 	tags := p.prepareTags(manifest)
+	cld := p.cloud()
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository(),
-		"region", region)
+		"region", region, "cloud", cld)
 
 	var requireUEFI, secureBoot bool
 	var uefiData *string
