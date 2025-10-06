@@ -23,6 +23,7 @@ func publishCmd() *cobra.Command {
 	c.Flags().String("credentials-base64", "", "base64 encoded credentials YAML (overrides --credentials-file)")
 	c.Flags().StringP("version", "v", "", "release version")
 	c.Flags().StringP("commit", "c", "", "release commit(ish)")
+	c.Flags().Bool("omit-component-descriptor", false, "omit publishing a component descriptor")
 
 	return c
 }
@@ -36,5 +37,6 @@ func publish(ctx context.Context, cfg *viper.Viper) error {
 	}
 
 	//nolint:wrapcheck // Directly wraps the GLCI command.
-	return glci.Publish(ctx, flavorsCfg, publishingCfg, aliasesCfg, creds, cfg.GetString("version"), cfg.GetString("commit"))
+	return glci.Publish(ctx, flavorsCfg, publishingCfg, aliasesCfg, creds, cfg.GetString("version"), cfg.GetString("commit"),
+		cfg.GetBool("omit-component-descriptor"))
 }

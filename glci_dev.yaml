@@ -98,3 +98,4 @@ aliases:
   python3-jinja2: [ Jinja2 ]
   python3-jwt: [ PyJWT ]
   python3-markupsafe: [ MarkupSafe ]
+omit-component-descriptor: true
