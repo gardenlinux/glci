@@ -1,5 +1,7 @@
 flavors:
   flavors:
+  - platform: Aliyun
+    cname: ali-gardener_prod-amd64
   - platform: AWS
     cname: aws-gardener_prod-amd64
   - platform: AWS
@@ -14,6 +16,32 @@ flavors:
     cname: gcp-gardener_prod-arm64
   - platform: OpenStack
     cname: openstack-gardener_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_usi-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_usi-arm64
+  - platform: Azure
+    cname: azure-gardener_prod_usi-amd64
+  - platform: Azure
+    cname: azure-gardener_prod_usi-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod_usi-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod_usi-arm64
+  - platform: OpenStack
+    cname: openstack-gardener_prod_usi-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_tpm2_trustedboot-amd64
+  - platform: AWS
+    cname: aws-gardener_prod_tpm2_trustedboot-arm64
+  - platform: Azure
+    cname: azure-gardener_prod_tpm2_trustedboot-amd64
+  - platform: Azure
+    cname: azure-gardener_prod_tpm2_trustedboot-arm64
+  - platform: GCP
+    cname: gcp-gardener_prod_tpm2_trustedboot-amd64
+  - platform: GCP
+    cname: gcp-gardener_prod_tpm2_trustedboot-arm64
 publishing:
   manifest_source: S3
   manifest_target: S3test
