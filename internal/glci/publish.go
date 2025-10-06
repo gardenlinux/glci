@@ -13,7 +13,7 @@ import (
 
 // Publish publishes a release to all cloud providers specified in the flavors and publishing configurations.
 func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, aliasesConfig AliasesConfig,
-	creds Credentials, version, commit string,
+	creds Credentials, version, commit string, omitComponentDescritpr bool,
 ) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
@@ -150,22 +150,24 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		}
 	}
 
-	log.Debug(ctx, "Finalizing component descriptor")
-	err = ocm.AddPublicationOutput(descriptor, publications)
-	if err != nil {
-		return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
-	}
+	if !omitComponentDescritpr {
+		log.Debug(ctx, "Finalizing component descriptor")
+		err = ocm.AddPublicationOutput(descriptor, publications)
+		if err != nil {
+			return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
+		}
 
-	var descriptorYAML []byte
-	descriptorYAML, err = descriptor.ToYAML()
-	if err != nil {
-		return fmt.Errorf("invalid component descriptor: %w", err)
-	}
+		var descriptorYAML []byte
+		descriptorYAML, err = descriptor.ToYAML()
+		if err != nil {
+			return fmt.Errorf("invalid component descriptor: %w", err)
+		}
 
-	log.Info(ctx, "Publishing component descriptor")
-	err = ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
-	if err != nil {
-		return fmt.Errorf("cannot publish component descriptor: %w", err)
+		log.Info(ctx, "Publishing component descriptor")
+		err = ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
+		if err != nil {
+			return fmt.Errorf("cannot publish component descriptor: %w", err)
+		}
 	}
 
 	log.Debug(ctx, "Closing sources and targets")
