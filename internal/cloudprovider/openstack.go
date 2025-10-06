@@ -70,8 +70,7 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 	}
 
 	switch p.pubCfg.Hypervisor {
-	case openstackHypervisorBareMetal:
-	case openstackHypervisorVMware:
+	case openstackHypervisorBareMetal, openstackHypervisorVMware:
 	default:
 		return fmt.Errorf("unknown hypervisor %s", p.pubCfg.Hypervisor)
 	}
@@ -410,9 +409,7 @@ func (p *openstack) hypervisor(platform string) (openstackHypervisor, error) {
 	switch h {
 	case "baremetal":
 		return openstackHypervisorBareMetal, nil
-	case "vmware":
-		return openstackHypervisorVMware, nil
-	case "":
+	case "vmware", "":
 		return openstackHypervisorVMware, nil
 	default:
 		return "", fmt.Errorf("invalid hypervisor %s", h)

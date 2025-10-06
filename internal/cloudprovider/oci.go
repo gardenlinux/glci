@@ -184,7 +184,7 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 		return fmt.Errorf("cannot tag OCI manifest: %w", err)
 	}
 
-	log.Debug(ctx, "Copying artifact", "repo", p.repo)
+	log.Debug(ctx, "Copying artifact", "repo", p.ociCfg.Repository)
 	_, err = oras.Copy(ctx, fs, version, p.repo, version, oras.DefaultCopyOptions)
 	if err != nil {
 		return fmt.Errorf("cannot upload OCI artifact to %s: %w", p.ociCfg.Repository, err)

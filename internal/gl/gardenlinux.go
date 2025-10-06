@@ -23,7 +23,8 @@ type Manifest struct {
 	SecureBoot             *bool           `yaml:"secureboot,omitempty"`
 	PublishedImageMetadata any             `yaml:"published_image_metadata"`
 	S3Bucket               string          `yaml:"s3_bucket"`
-	Unknown                map[string]any  `yaml:"-,inline,remain"`
+	//nolint:revive // The inline and remain tags overrides the -, which is necessary to avoid an implicit name.
+	Unknown map[string]any `yaml:"-,inline,remain"`
 }
 
 // Architecture is a CPU architecture.

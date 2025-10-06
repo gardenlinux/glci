@@ -79,13 +79,15 @@ type cfgFlavor struct {
 }
 
 type cfgSource struct {
-	ID     string         `mapstructure:"id"`
-	Type   string         `mapstructure:"type"`
+	ID   string `mapstructure:"id"`
+	Type string `mapstructure:"type"`
+	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
 	Config map[string]any `mapstructure:"-,remain"`
 }
 
 type cfgTarget struct {
-	Type   string         `mapstructure:"type"`
+	Type string `mapstructure:"type"`
+	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
 	Config map[string]any `mapstructure:"-,remain"`
 }
 
