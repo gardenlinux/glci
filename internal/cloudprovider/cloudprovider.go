@@ -39,7 +39,7 @@ type PublishingTarget interface {
 	AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error)
 	RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error)
 	Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
-	Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource) error
+	Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource, steamroll bool) error
 }
 
 // OCMTarget is a target onto which GLCI can publish an OCM component descriptor.

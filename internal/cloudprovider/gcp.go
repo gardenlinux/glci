@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	computev1 "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
 	"github.com/gardenlinux/glci/internal/env"
@@ -236,7 +238,7 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}, nil
 }
 
-func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -254,7 +256,7 @@ func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	}
 	ctx = log.WithValues(ctx, "image", *pubOut.Image, "project", *pubOut.Project)
 
-	err = p.deleteImage(ctx, *pubOut.Image)
+	err = p.deleteImage(ctx, *pubOut.Image, steamroll)
 	if err != nil {
 		return fmt.Errorf("cannot delete image %s in project %s: %w", *pubOut.Image, *pubOut.Project, err)
 	}
@@ -496,7 +498,7 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	return nil
 }
 
-func (p *gcp) deleteImage(ctx context.Context, image string) error {
+func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) error {
 	project := p.creds[p.pubCfg.Config].Project
 
 	log.Info(ctx, "Deleting image")
@@ -505,20 +507,17 @@ func (p *gcp) deleteImage(ctx context.Context, image string) error {
 		Project: project,
 	})
 	if err != nil {
+		var errr *googleapi.Error
+		if steamroll && errors.As(err, &errr) && errr.Code == http.StatusNotFound {
+			log.Debug(ctx, "Image not found but the steamroller keeps going")
+			return nil
+		}
 		return fmt.Errorf("cannot delete image: %w", err)
 	}
 
 	err = op.Wait(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot delete image via operation %s: %w", op.Name(), err)
-	}
-
-	log.Debug(ctx, "Ensuring that blob is deleted")
-	bucket := p.storageClient.Bucket(p.pubCfg.Bucket)
-	blob := bucket.Object(image + ".tar.gz")
-	err = blob.Delete(ctx)
-	if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
-		return fmt.Errorf("cannot delete blob %s: %w", blob.ObjectName(), err)
 	}
 
 	return nil

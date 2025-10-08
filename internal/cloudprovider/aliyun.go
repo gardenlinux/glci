@@ -230,7 +230,7 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	}, nil
 }
 
-func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -250,7 +250,7 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 	for _, img := range *pubOut.Images {
 		lctx := log.WithValues(ctx, "image", img.ID, "fromRegion", img.Region)
 
-		err = p.deleteImage(lctx, img.ID, img.Region)
+		err = p.deleteImage(lctx, img.ID, img.Region, steamroll)
 		if err != nil {
 			return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, err)
 		}
@@ -591,7 +591,7 @@ func (p *aliyun) makePublic(ctx context.Context, images map[string]string) error
 	return nil
 }
 
-func (p *aliyun) deleteImage(ctx context.Context, imageID, region string) error {
+func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, steamroll bool) error {
 	c, err := p.ecsClient(region)
 	if err != nil {
 		return err
@@ -613,8 +613,15 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string) error 
 	if r.Body == nil {
 		return errors.New("cannot describe image: missing body")
 	}
-	if r.Body.Images == nil || len(r.Body.Images.Image) != 1 {
+	if r.Body.Images == nil || r.Body.Images.Image == nil || len(r.Body.Images.Image) > 1 {
 		return errors.New("cannot describe image: missing images")
+	}
+	if len(r.Body.Images.Image) != 1 {
+		if steamroll {
+			log.Debug(ctx, "Image not found but the steamroller keeps going")
+			return nil
+		}
+		return errors.New("cannot describe image: image not found")
 	}
 	if r.Body.Images.Image[0] == nil {
 		return errors.New("cannot describe image: missing image")
@@ -628,7 +635,7 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string) error 
 		log.Debug(ctx, "Removing launch permission from image")
 		err = ctx.Err()
 		if err != nil {
-			return fmt.Errorf("cannot modify share permission of image in region %s: %w", region, err)
+			return fmt.Errorf("cannot modify share permission: %w", err)
 		}
 		_, err = c.ModifyImageSharePermission(&client.ModifyImageSharePermissionRequest{
 			ImageId:  &imageID,
@@ -636,21 +643,23 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string) error 
 			RegionId: &region,
 		})
 		if err != nil {
-			return fmt.Errorf("cannot modify share permission of image in region %s: %w", region, err)
+			return fmt.Errorf("cannot modify share permission: %w", err)
 		}
+	} else if !steamroll {
+		return errors.New("image is not public")
 	}
 
 	log.Info(ctx, "Deleting image")
 	err = ctx.Err()
 	if err != nil {
-		return fmt.Errorf("cannot delete image %s in region %s: %w", imageID, region, err)
+		return fmt.Errorf("cannot delete image: %w", err)
 	}
 	_, err = c.DeleteImage(&client.DeleteImageRequest{
 		ImageId:  &imageID,
 		RegionId: &region,
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete image %s in region %s: %w", imageID, region, err)
+		return fmt.Errorf("cannot delete image: %w", err)
 	}
 
 	return nil

@@ -16,6 +16,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/logging"
 
 	"github.com/gardenlinux/glci/internal/env"
@@ -421,7 +422,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}, nil
 }
 
-func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -445,11 +446,11 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 		if img.Cloud != cld {
 			continue
 		}
-		lctx := log.WithValues(ctx, "region", img.Region, "id", img.ID, "image", img.Image)
+		lctx := log.WithValues(ctx, "region", img.Region, "imageID", img.ID, "image", img.Image)
 
-		err = p.deregisterImage(lctx, img.ID, img.Region)
+		err = p.deregisterImage(lctx, img.ID, img.Region, steamroll)
 		if err != nil {
-			return fmt.Errorf("cannot deregister image %s in region %s: %w", img.Image, img.Region, err)
+			return fmt.Errorf("cannot deregister image %s in region %s: %w", img.ID, img.Region, err)
 		}
 	}
 
@@ -807,17 +808,22 @@ func overrideRegion(region string) func(o *ec2.Options) {
 	}
 }
 
-func (p *aws) deregisterImage(ctx context.Context, imageID, region string) error {
+func (p *aws) deregisterImage(ctx context.Context, imageID, region string, steamroll bool) error {
 	log.Info(ctx, "Deregistering image")
 	r, err := p.tgtEC2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
 		ImageId:                   &imageID,
 		DeleteAssociatedSnapshots: ptr.P(true),
 	}, overrideRegion(region))
 	if err != nil {
-		return fmt.Errorf("cannot deregister image %s: %w", imageID, err)
+		var errr *smithy.GenericAPIError
+		if steamroll && errors.As(err, &errr) && errr.Code == "InvalidAMIID.Unavailable" {
+			log.Debug(ctx, "Image not found but the steamroller keeps going")
+			return nil
+		}
+		return fmt.Errorf("cannot deregister image: %w", err)
 	}
 	if r.Return != nil && !*r.Return {
-		return fmt.Errorf("cannot deregister image %s: operation failed", imageID)
+		return errors.New("cannot deregister image: operation failed")
 	}
 	errs := make([]error, 0, len(r.DeleteSnapshotResults))
 	for _, result := range r.DeleteSnapshotResults {
@@ -827,7 +833,7 @@ func (p *aws) deregisterImage(ctx context.Context, imageID, region string) error
 	}
 	err = errors.Join(errs...)
 	if err != nil {
-		return fmt.Errorf("cannot deregister image %s: %w", imageID, err)
+		return fmt.Errorf("cannot deregister image: %w", err)
 	}
 
 	return nil

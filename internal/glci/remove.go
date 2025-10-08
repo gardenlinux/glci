@@ -12,6 +12,7 @@ import (
 
 // Remove removes a release from all cloud providers specified in the flavors and publishing configurations.
 func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, creds Credentials, version, commit string,
+	steamroll bool,
 ) error {
 	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
 
@@ -93,7 +94,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		}
 
 		log.Info(lctx, "Removing image")
-		err = publication.Target.Remove(lctx, publication.Manifest, sources)
+		err = publication.Target.Remove(lctx, publication.Manifest, sources, steamroll)
 		if err != nil {
 			return fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), err)
 		}
