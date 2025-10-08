@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -141,7 +142,8 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	openstackOutput, err := publishingOutputFromManifest[openstackPublishingOutput](manifest)
+	var openstackOutput openstackPublishingOutput
+	openstackOutput, err = publishingOutputFromManifest[openstackPublishingOutput](manifest)
 	if err != nil {
 		return false, err
 	}
@@ -306,7 +308,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	}, nil
 }
 
-func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -330,14 +332,25 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 
 	ctx = log.WithValues(ctx, "hypervisor", p.pubCfg.Hypervisor)
 
+	regions := p.listRegions()
+	if p.pubCfg.Regions != nil {
+		regions = slc.Subset(regions, *p.pubCfg.Regions)
+	}
+	if len(regions) == 0 {
+		return errors.New("no available regions")
+	}
+
 	for _, img := range *pubOut.Images {
 		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
 			continue
 		}
 		lctx := log.WithValues(ctx, "region", img.Region, "imageID", img.ID)
 
-		log.Info(lctx, "Deleting image")
-		err = images.Delete(lctx, p.imagesClients[img.Region], img.ID).ExtractErr()
+		if !slices.Contains(regions, img.Region) {
+			return fmt.Errorf("image %s is in unknown region %s", img.ID, img.Region)
+		}
+
+		err = p.deleteImage(lctx, img.ID, img.Region, steamroll)
 		if err != nil {
 			return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, err)
 		}
@@ -481,7 +494,6 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 	if err != nil {
 		return "", fmt.Errorf("cannot get image URL for %s: %w", key, err)
 	}
-
 	ctx = log.WithValues(ctx, "key", key)
 
 	log.Info(ctx, "Creating image")
@@ -531,6 +543,21 @@ func (p *openstack) waitForImages(ctx context.Context, imgs map[string]string) e
 		}
 	}
 	log.Info(ctx, "Images ready", "count", len(imgs))
+
+	return nil
+}
+
+func (p *openstack) deleteImage(ctx context.Context, id, region string, steamroll bool) error {
+	log.Info(ctx, "Deleting image")
+	err := images.Delete(ctx, p.imagesClients[region], id).ExtractErr()
+	if err != nil {
+		var errr gophercloud.ErrUnexpectedResponseCode
+		if steamroll && errors.As(err, &errr) && errr.Actual == http.StatusNotFound {
+			log.Debug(ctx, "Image not found but the steamroller keeps going")
+			return nil
+		}
+		return fmt.Errorf("cannot delete image: %w", err)
+	}
 
 	return nil
 }

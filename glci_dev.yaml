@@ -99,3 +99,4 @@ aliases:
   python3-jwt: [ PyJWT ]
   python3-markupsafe: [ MarkupSafe ]
 omit-component-descriptor: true
+steamroll: true

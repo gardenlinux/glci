@@ -23,6 +23,7 @@ func removeCmd() *cobra.Command {
 	c.Flags().String("credentials-base64", "", "base64 encoded credentials YAML (overrides --credentials-file)")
 	c.Flags().StringP("version", "v", "", "release version")
 	c.Flags().StringP("commit", "c", "", "release commit(ish)")
+	c.Flags().Bool("steamroll", false, "ignore errors while destroying things")
 
 	return c
 }
@@ -36,5 +37,5 @@ func remove(ctx context.Context, cfg *viper.Viper) error {
 	}
 
 	//nolint:wrapcheck // Directly wraps the GLCI command.
-	return glci.Remove(ctx, flavorsCfg, publishingCfg, creds, cfg.GetString("version"), cfg.GetString("commit"))
+	return glci.Remove(ctx, flavorsCfg, publishingCfg, creds, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
 }

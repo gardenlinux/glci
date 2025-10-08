@@ -410,7 +410,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	}, nil
 }
 
-func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource) error {
+func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -437,15 +437,19 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 		}
 		lctx := log.WithValues(ctx, "imageID", img.ID)
 
-		var imageDefinition, imageVersion string
-		imageDefinition, imageVersion, err = p.unpackPublicID(lctx, &gallery, img.ID)
+		var imageResourceGroup, imageDefinition, image, imageVersion string
+		imageResourceGroup, imageDefinition, image, imageVersion, err = p.getMetadata(lctx, &gallery, img.ID)
 		if err != nil {
-			return err
+			var errr *azcore.ResponseError
+			if steamroll && errors.As(err, &errr) && errr.StatusCode == http.StatusNotFound {
+				log.Debug(ctx, "Image not found but the steamroller keeps going")
+				continue
+			}
+			return fmt.Errorf("cannot get metadata: %w", err)
 		}
 		lctx = log.WithValues(lctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion)
 
-		var imageResourceGroup, image string
-		imageResourceGroup, image, err = p.deleteImageVersion(lctx, &gallery, imageDefinition, imageVersion)
+		err = p.deleteImageVersion(lctx, &gallery, imageDefinition, imageVersion)
 		if err != nil {
 			return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, err)
 		}
@@ -941,27 +945,27 @@ func (p *azure) deleteBlob(ctx context.Context, blob string) error {
 	return nil
 }
 
-func (p *azure) unpackPublicID(ctx context.Context, gallery *azureGalleryCredentials, imageID string) (string, string, error) {
+func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredentials, imageID string) (string, string, string, string, error) {
 	parts := strings.Split(imageID, "/")
 	if len(parts) != 7 {
-		return "", "", fmt.Errorf("invalid image ID %s", imageID)
+		return "", "", "", "", fmt.Errorf("invalid image ID %s", imageID)
 	}
 	imageGallery := parts[2]
 	imageDefinition := parts[4]
 	imageVersion := parts[6]
 
 	log.Debug(ctx, "Getting gallery")
-	r, err := p.galleriesClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, nil)
+	gr, err := p.galleriesClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("cannot get gallery %s: %w", gallery.Gallery, err)
+		return "", "", "", "", fmt.Errorf("cannot get gallery %s: %w", gallery.Gallery, err)
 	}
-	if r.Properties == nil || r.Properties.SharingProfile == nil || r.Properties.SharingProfile.CommunityGalleryInfo == nil {
-		return "", "", fmt.Errorf("cannot get gallery %s: missing public names", gallery.Gallery)
+	if gr.Properties == nil || gr.Properties.SharingProfile == nil || gr.Properties.SharingProfile.CommunityGalleryInfo == nil {
+		return "", "", "", "", fmt.Errorf("cannot get gallery %s: missing public names", gallery.Gallery)
 	}
 	found := false
-	for _, name := range r.Properties.SharingProfile.CommunityGalleryInfo.PublicNames {
+	for _, name := range gr.Properties.SharingProfile.CommunityGalleryInfo.PublicNames {
 		if name == nil {
-			return "", "", fmt.Errorf("cannot get gallery%s : missing public name", gallery.Gallery)
+			return "", "", "", "", fmt.Errorf("cannot get gallery%s : missing public name", gallery.Gallery)
 		}
 		if *name == imageGallery {
 			found = true
@@ -969,46 +973,44 @@ func (p *azure) unpackPublicID(ctx context.Context, gallery *azureGalleryCredent
 		}
 	}
 	if !found {
-		return "", "", fmt.Errorf("cannot get gallery %s: no public name matches gallery %s", gallery.Gallery, imageGallery)
+		return "", "", "", "", fmt.Errorf("cannot get gallery %s: no public name matches gallery %s", gallery.Gallery, imageGallery)
 	}
 
-	return imageDefinition, imageVersion, nil
-}
-
-func (p *azure) deleteImageVersion(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, imageVersion string) (string,
-	string, error,
-) {
 	log.Debug(ctx, "Getting gallery image version")
-	r, err := p.galleryImageVersionsClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
+	var givr armcompute.GalleryImageVersionsClientGetResponse
+	givr, err = p.galleryImageVersionsClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("cannot get gallery image version: %w", err)
+		return "", "", "", "", fmt.Errorf("cannot get gallery image version: %w", err)
 	}
-	if r.Properties == nil || r.Properties.StorageProfile == nil || r.Properties.StorageProfile.Source == nil ||
-		r.Properties.StorageProfile.Source.ID == nil {
-		return "", "", errors.New("cannot get gallery image version: missing source ID")
+	if givr.Properties == nil || givr.Properties.StorageProfile == nil || givr.Properties.StorageProfile.Source == nil ||
+		givr.Properties.StorageProfile.Source.ID == nil {
+		return "", "", "", "", errors.New("cannot get gallery image version: missing source ID")
 	}
-	parts := strings.Split(*r.Properties.StorageProfile.Source.ID, "/")
+	parts = strings.Split(*givr.Properties.StorageProfile.Source.ID, "/")
 	if len(parts) != 9 {
-		return "", "", fmt.Errorf("cannot get gallery image version: invalid source %s", *r.Properties.StorageProfile.Source.ID)
+		return "", "", "", "", fmt.Errorf("cannot get gallery image version: invalid source %s", *givr.Properties.StorageProfile.Source.ID)
 	}
 	imageResourceGroup := parts[4]
 	image := parts[8]
 
+	return imageResourceGroup, imageDefinition, image, imageVersion, nil
+}
+
+func (p *azure) deleteImageVersion(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, imageVersion string) error {
 	log.Info(ctx, "Deleting image version")
-	var poller *runtime.Poller[armcompute.GalleryImageVersionsClientDeleteResponse]
-	poller, err = p.galleryImageVersionsClient.BeginDelete(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
+	poller, err := p.galleryImageVersionsClient.BeginDelete(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("cannot delete gallery image version: %w", err)
+		return fmt.Errorf("cannot delete gallery image version: %w", err)
 	}
 
 	_, err = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 		Frequency: time.Second * 7,
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("cannot delete gallery image version: %w", err)
+		return fmt.Errorf("cannot delete gallery image version: %w", err)
 	}
 
-	return imageResourceGroup, image, nil
+	return nil
 }
 
 func (p *azure) deleteImage(ctx context.Context, imageResourceGroup, image string) error {
