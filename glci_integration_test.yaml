@@ -1,5 +1,7 @@
 flavors:
   flavors:
+  - platform: Aliyun
+    cname: ali-gardener_prod-amd64
   - platform: AWS
     cname: aws-gardener_prod-amd64
   - platform: AWS
