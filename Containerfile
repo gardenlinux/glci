@@ -28,5 +28,6 @@ ENTRYPOINT ["/glci"]
 COPY --from=builder /glci/glci .
 COPY glci.yaml glci.yaml
 COPY glci_integration_test.yaml glci_integration_test.yaml
+COPY glci_dev.yaml glci_dev.yaml
 
 USER 65532:65532
