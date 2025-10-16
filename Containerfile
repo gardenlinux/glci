@@ -27,6 +27,7 @@ ENV GLCI_CREDENTIALS_FILE=/gardenlinux-credentials.json GLCI_CREDENTIALS_BASE64=
 ENTRYPOINT ["/glci"]
 COPY --from=builder /glci/glci .
 COPY glci.yaml glci.yaml
+COPY glci_classic.yaml glci_classic.yaml
 COPY glci_integration_test.yaml glci_integration_test.yaml
 COPY glci_dev.yaml glci_dev.yaml
 
