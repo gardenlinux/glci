@@ -33,8 +33,6 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 ) (*ComponentDescriptor, error) {
 	log.Debug(ctx, "Building component descriptor")
 
-	baseURL, subPath := baseAndSub(ocmTarget.OCMRepository())
-
 	descriptor := &ComponentDescriptor{
 		Meta: componentDescriptorMetadata{
 			ConfiguredVersion: "v2",
@@ -43,15 +41,11 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			Name:         gl.GardenLinuxRepo,
 			Version:      version,
 			CreationTime: time.Now().Format(time.RFC3339),
-			Provider: componentDescriptorProvider{
-				Name: componentProvider,
-			},
+			Provider:     componentProvider,
 			RepositoryContexts: []componentDescriptorRepositoryContext{
 				{
-					Type:                 "OCIRegistry",
-					ComponentNameMapping: "urlPath",
-					BaseURL:              baseURL,
-					SubPath:              subPath,
+					Type:    "OCIRegistry",
+					BaseURL: ocmTarget.OCMRepository(),
 				},
 			},
 			Sources: []componentDescriptorSource{
@@ -216,7 +210,7 @@ func AddPublicationOutput(descriptor *ComponentDescriptor, publications []cloudp
 }
 
 const (
-	componentProvider = "sap-se"
+	componentProvider = "SAP SE"
 	githubRepoURL     = "https://" + gl.GardenLinuxRepo
 )
 
@@ -230,23 +224,17 @@ type componentDescriptorComponent struct {
 	Name                string                                 `yaml:"name"`
 	Version             string                                 `yaml:"version"`
 	CreationTime        string                                 `yaml:"creationTime"`
-	Provider            componentDescriptorProvider            `yaml:"provider"`
+	Provider            string                                 `yaml:"provider"`
 	RepositoryContexts  []componentDescriptorRepositoryContext `yaml:"repositoryContexts"`
 	Sources             []componentDescriptorSource            `yaml:"sources"`
 	ComponentReferences []struct{}                             `yaml:"componentReferences"`
 	Resources           []componentDesciptorResource           `yaml:"resources"`
 }
 
-type componentDescriptorProvider struct {
-	Name string `yaml:"name"`
-}
-
 //nolint:tagliatelle // Defined by OCM.
 type componentDescriptorRepositoryContext struct {
-	Type                 string `yaml:"type"`
-	ComponentNameMapping string `yaml:"componentNameMapping"`
-	BaseURL              string `yaml:"baseUrl"`
-	SubPath              string `yaml:"subPath"`
+	Type    string `yaml:"type"`
+	BaseURL string `yaml:"baseUrl"`
 }
 
 type componentDescriptorSource struct {
@@ -296,22 +284,6 @@ type componentDescriptorS3 struct {
 type nameVersion struct {
 	name    string
 	version string
-}
-
-func baseAndSub(repo string) (string, string) {
-	var scheme, sub string
-	base := repo
-	i := strings.Index(base, "://")
-	if i >= 0 {
-		scheme = base[:i+3]
-		base = base[i+3:]
-	}
-	i = strings.Index(base, "/")
-	if i >= 0 {
-		sub = base[i+1:]
-		base = scheme + base[:i]
-	}
-	return base, sub
 }
 
 func getPackages(ctx context.Context, source cloudprovider.ArtifactSource, manifest *gl.Manifest) ([]nameVersion, error) {
