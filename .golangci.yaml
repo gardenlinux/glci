@@ -22,6 +22,7 @@ linters:
   - interfacebloat
   - ireturn
   - lll
+  - maintidx
   - mnd
   - nestif
   - nilnil

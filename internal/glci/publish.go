@@ -28,6 +28,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 
 	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
+	cdPublications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
 	for _, flavor := range flavorsConfig.Flavors {
 		found := false
@@ -79,11 +80,12 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 				manifest = targetManifest
 			}
 
-			publications = append(publications, cloudprovider.Publication{
+			publication := cloudprovider.Publication{
 				Cname:    flavor.Cname,
 				Manifest: manifest,
 				Target:   target,
-			})
+			}
+			publications = append(publications, publication)
 			pubMap[flavor.Cname] = append(pubMap[flavor.Cname], len(publications)-1)
 		}
 
@@ -91,9 +93,12 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 			return fmt.Errorf("no publishing target for %s", flavor.Cname)
 		}
 	}
+	for _, j := range pubMap {
+		cdPublications = append(cdPublications, publications[j[0]])
+	}
 
 	var descriptor *ocm.ComponentDescriptor
-	descriptor, err = ocm.BuildComponentDescriptor(ctx, manifestSource, publications, ocmTarget, aliasesConfig, glciVer, version, commit)
+	descriptor, err = ocm.BuildComponentDescriptor(ctx, manifestSource, cdPublications, ocmTarget, aliasesConfig, glciVer, version, commit)
 	if err != nil {
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
@@ -151,8 +156,12 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	}
 
 	if !omitComponentDescritpr {
+		for i, publication := range cdPublications {
+			cdPublications[i].Manifest = publications[pubMap[publication.Cname][0]].Manifest
+		}
+
 		log.Debug(ctx, "Finalizing component descriptor")
-		err = ocm.AddPublicationOutput(descriptor, publications)
+		err = ocm.AddPublicationOutput(descriptor, cdPublications)
 		if err != nil {
 			return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
 		}

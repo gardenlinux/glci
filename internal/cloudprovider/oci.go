@@ -79,9 +79,10 @@ func (p *oci) OCMRepository() string {
 }
 
 func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, descriptor []byte) error {
-	if p.repo == nil {
-		return errors.New("OCI not configured")
+	if !p.isConfigured() {
+		return errors.New("config not set")
 	}
+	ctx = log.WithValues(ctx, "repo", p.ociCfg.Repository)
 
 	log.Debug(ctx, "Creating tarball")
 	var tarBuf bytes.Buffer
@@ -184,7 +185,7 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 		return fmt.Errorf("cannot tag OCI manifest: %w", err)
 	}
 
-	log.Debug(ctx, "Copying artifact", "repo", p.ociCfg.Repository)
+	log.Debug(ctx, "Copying artifact")
 	_, err = oras.Copy(ctx, fs, version, p.repo, version, oras.DefaultCopyOptions)
 	if err != nil {
 		return fmt.Errorf("cannot upload OCI artifact to %s: %w", p.ociCfg.Repository, err)
@@ -221,4 +222,8 @@ type ociCredentials struct {
 type ociOCMConfig struct {
 	Config     string `mapstructure:"config"`
 	Repository string `mapstructure:"repository"`
+}
+
+func (p *oci) isConfigured() bool {
+	return p.repo != nil
 }
