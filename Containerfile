@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.25.2 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.25.3 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -11,7 +11,7 @@ ARG version=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o glci \
     -ldflags "-X main.version=${version}" github.com/gardenlinux/glci/cmd
 
-FROM docker.io/library/debian:forky-20250929-slim
+FROM docker.io/library/debian:forky-20251020-slim
 WORKDIR /
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
