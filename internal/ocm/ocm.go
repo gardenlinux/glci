@@ -44,7 +44,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			Provider:     componentProvider,
 			RepositoryContexts: []componentDescriptorRepositoryContext{
 				{
-					Type:    "OCIRegistry",
+					Type:    ocmTarget.OCMType(),
 					BaseURL: ocmTarget.OCMRepository(),
 				},
 			},

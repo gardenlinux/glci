@@ -48,6 +48,7 @@ type OCMTarget interface {
 	SetCredentials(credentials map[string]any) error
 	SetOCMConfig(ctx context.Context, config map[string]any) error
 	Close() error
+	OCMType() string
 	OCMRepository() string
 	PublishComponentDescriptor(ctx context.Context, version string, descriptor []byte) error
 }
