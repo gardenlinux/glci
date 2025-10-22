@@ -95,6 +95,10 @@ func (*fake) Remove(_ context.Context, _ *gl.Manifest, _ map[string]ArtifactSour
 	return nil
 }
 
+func (*fake) OCMType() string {
+	return "Fake"
+}
+
 func (*fake) OCMRepository() string {
 	return "fake"
 }

@@ -13,7 +13,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	specv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
-	"oras.land/oras-go/v2/content/file"
+	orasfile "oras.land/oras-go/v2/content/file"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
@@ -74,6 +74,10 @@ func (*oci) Close() error {
 	return nil
 }
 
+func (*oci) OCMType() string {
+	return "OCIRegistry"
+}
+
 func (p *oci) OCMRepository() string {
 	return p.ociCfg.Repository
 }
@@ -122,8 +126,8 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 	}()
 
 	log.Debug(ctx, "Creating local OCI store", "dir", tmpDir)
-	var fs *file.Store
-	fs, err = file.New(tmpDir)
+	var fs *orasfile.Store
+	fs, err = orasfile.New(tmpDir)
 	if err != nil {
 		return fmt.Errorf("cannot create local OCI store in %s: %w", tmpDir, err)
 	}

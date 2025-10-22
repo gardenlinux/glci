@@ -88,9 +88,10 @@ publishing:
     hypervisor: VMware
     regions: [ eu-nl-1 ]
   ocm:
-    type: OCI
+    type: File
     config: ar-gardenlinux-test
     repository: europe-docker.pkg.dev/sap-se-gcp-gardenlinux/tests
+    file: descriptor.yaml
 aliases:
   auditd: [ audit ]
   libc-bin: [ glibc ]
