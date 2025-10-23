@@ -36,7 +36,6 @@ func publish(ctx context.Context, cfg *viper.Viper) error {
 		return err
 	}
 
-	//nolint:wrapcheck // Directly wraps the GLCI command.
 	return glci.Publish(ctx, flavorsCfg, publishingCfg, aliasesCfg, creds, cfg.GetString("version"), cfg.GetString("commit"),
 		cfg.GetBool("omit-component-descriptor"))
 }

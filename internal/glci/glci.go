@@ -112,7 +112,6 @@ type (
 )
 
 func glciVersion(ctx context.Context) string {
-	//nolint:revive // An invalid or missing version results in an empty string.
 	ver, _ := ctx.Value(ctxkVer{}).(string)
 	return ver
 }

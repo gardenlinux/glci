@@ -36,6 +36,5 @@ func remove(ctx context.Context, cfg *viper.Viper) error {
 		return err
 	}
 
-	//nolint:wrapcheck // Directly wraps the GLCI command.
 	return glci.Remove(ctx, flavorsCfg, publishingCfg, creds, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
 }
