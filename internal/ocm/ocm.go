@@ -23,7 +23,6 @@ type ComponentDescriptor struct {
 
 // ToYAML serializes a component desctiptor to YAML.
 func (d *ComponentDescriptor) ToYAML() ([]byte, error) {
-	//nolint:wrapcheck // Directly wraps the YAML unmarshaling.
 	return yaml.Marshal(d)
 }
 

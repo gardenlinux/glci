@@ -21,8 +21,6 @@ func init() {
 	})
 }
 
-type fake struct{}
-
 func (*fake) Type() string {
 	return "Fake"
 }
@@ -110,3 +108,5 @@ func (*fake) PublishComponentDescriptor(_ context.Context, _ string, _ []byte) e
 func (*fake) Read(_ []byte) (int, error) {
 	return 0, io.EOF
 }
+
+type fake struct{}

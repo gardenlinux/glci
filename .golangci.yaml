@@ -28,6 +28,7 @@ linters:
   - nilnil
   - nlreturn
   - varnamelen
+  - wrapcheck
   - wsl
   - wsl_v5
   settings:
@@ -56,6 +57,8 @@ linters:
         disabled: true
       - name: cognitive-complexity
         disabled: true
+      - name: confusing-naming
+        disabled: true
       - name: confusing-results
         disabled: true
       - name: cyclomatic
@@ -81,8 +84,11 @@ linters:
         disabled: true
       - name: struct-tag
         arguments:
-        - mapstructure,remain
-        - yaml,remain
+        - mapstructure,omitzero,remain
+        - yaml,omitzero,remain
+      - name: unchecked-type-assertion
+        arguments:
+          - accept-ignored-assertion-result: true
       - name: var-naming
         arguments:
         - []
@@ -101,6 +107,9 @@ linters:
   exclusions:
     rules:
     - path: internal/cloudprovider/.+\.go
+      linters:
+      - gochecknoinits
+    - path: internal/task/.+\.go
       linters:
       - gochecknoinits
 

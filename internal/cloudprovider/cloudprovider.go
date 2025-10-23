@@ -31,7 +31,7 @@ type ArtifactSource interface {
 type PublishingTarget interface {
 	Type() string
 	SetCredentials(credentials map[string]any) error
-	SetTargetConfig(ctx context.Context, credentials map[string]any, sources map[string]ArtifactSource) error
+	SetTargetConfig(ctx context.Context, config map[string]any, sources map[string]ArtifactSource) error
 	Close() error
 	ImageSuffix() string
 	CanPublish(manifest *gl.Manifest) bool
@@ -87,7 +87,6 @@ func NewOCMTarget(typ string) (OCMTarget, error) {
 func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gl.Manifest, error) {
 	body, err := source.GetObject(ctx, key)
 	if err != nil {
-		//nolint:wrapcheck // Directly wraps the source.
 		return nil, err
 	}
 	defer func() {
@@ -130,7 +129,6 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	//nolint:wrapcheck // Directly wraps the source.
 	return source.PutObject(ctx, key, &buf)
 }
 
@@ -223,7 +221,6 @@ func flavor(cname string) string {
 func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]byte, error) {
 	body, err := source.GetObject(ctx, key)
 	if err != nil {
-		//nolint:wrapcheck // Directly wraps the source.
 		return nil, err
 	}
 	defer func() {

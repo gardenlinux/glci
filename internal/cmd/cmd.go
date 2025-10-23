@@ -37,7 +37,6 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 
 		cmd, args, err := rootCmd.Find(os.Args[1:])
 		if err != nil {
-			//nolint:wrapcheck // Directly wraps the Cobra error message.
 			return nil, nil, err
 		}
 
@@ -46,13 +45,11 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 
 		err = cmd.ParseFlags(args)
 		if err != nil {
-			//nolint:wrapcheck // Directly wraps the Cobra error message.
 			return nil, nil, err
 		}
 
 		err = cfg.BindPFlags(cmd.Flags())
 		if err != nil {
-			//nolint:wrapcheck // Directly wraps the Viper error message.
 			return nil, nil, err
 		}
 		cfg.SetEnvPrefix(strings.ToUpper(rootCmd.Name()))
