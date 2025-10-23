@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 func init() {
@@ -87,6 +88,14 @@ func (*fake) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutpu
 
 func (p *fake) Publish(_ context.Context, _ string, _ *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {
 	return p, nil
+}
+
+func (*fake) CanRollback() string {
+	return ""
+}
+
+func (*fake) Rollback(_ context.Context, _ map[string]task.Task) error {
+	return nil
 }
 
 func (*fake) Remove(_ context.Context, _ *gl.Manifest, _ map[string]ArtifactSource, _ bool) error {

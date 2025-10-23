@@ -65,6 +65,10 @@ publishing:
     type: OCI
     config: ar-gardenlinux-test
     repository: europe-docker.pkg.dev/sap-se-gcp-gardenlinux/tests
+  state:
+    type: AWS
+    bucket: glci-state-test
+    config: gardenlinux-integration-test
 aliases:
   auditd: [ audit ]
   libc-bin: [ glibc ]
