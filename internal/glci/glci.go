@@ -42,8 +42,8 @@ func loadCredentialsAndConfig(ctx context.Context, creds Credentials, publishing
 
 	manifestSource := sources[publishingConfig.ManifestSource]
 	manifestTarget := manifestSource
-	if publishingConfig.ManifestTarget != nil {
-		manifestTarget = sources[*publishingConfig.ManifestTarget]
+	if publishingConfig.ManifestTarget != "" {
+		manifestTarget = sources[publishingConfig.ManifestTarget]
 	}
 
 	targets := make([]cloudprovider.PublishingTarget, 0, len(publishingConfig.Targets))

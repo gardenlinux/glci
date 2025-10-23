@@ -193,10 +193,7 @@ func (p *azure) IsPublished(manifest *gl.Manifest) (bool, error) {
 
 	cld := p.cloud()
 
-	if azureOutput.Images == nil {
-		return false, nil
-	}
-	for _, img := range *azureOutput.Images {
+	for _, img := range azureOutput.Images {
 		if img.Cloud == cld {
 			return true, nil
 		}
@@ -222,25 +219,19 @@ func (p *azure) AddOwnPublishingOutput(output, own PublishingOutput) (Publishing
 
 	cld := p.cloud()
 
-	if ownOutput.Images == nil {
-		ownOutput.Images = &[]azurePublishedImage{}
-	}
-	for _, img := range *ownOutput.Images {
+	for _, img := range ownOutput.Images {
 		if img.Cloud != cld {
 			return nil, errors.New("new publishing output has extraneous entries")
 		}
 	}
 
-	if azureOutput.Images == nil {
-		return &ownOutput, nil
-	}
-	for _, img := range *azureOutput.Images {
+	for _, img := range azureOutput.Images {
 		if img.Cloud == cld {
 			return nil, errors.New("cannot add publishing output to existing publishing output")
 		}
 	}
 
-	ownOutput.Images = ptr.P(slices.Concat(*azureOutput.Images, *ownOutput.Images))
+	ownOutput.Images = slices.Concat(azureOutput.Images, ownOutput.Images)
 	return &ownOutput, nil
 }
 
@@ -257,11 +248,9 @@ func (p *azure) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOu
 	cld := p.cloud()
 
 	var otherImages []azurePublishedImage
-	if azureOutput.Images != nil {
-		for _, img := range *azureOutput.Images {
-			if img.Cloud != cld {
-				otherImages = append(otherImages, img)
-			}
+	for _, img := range azureOutput.Images {
+		if img.Cloud != cld {
+			otherImages = append(otherImages, img)
 		}
 	}
 	if len(otherImages) == 0 {
@@ -269,7 +258,7 @@ func (p *azure) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOu
 	}
 
 	return &azurePublishingOutput{
-		Images: &otherImages,
+		Images: otherImages,
 	}, nil
 }
 
@@ -323,8 +312,8 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	if err != nil {
 		return nil, fmt.Errorf("cannot list regions: %w", err)
 	}
-	if p.pubCfg.Regions != nil {
-		regions = slc.Subset(regions, *p.pubCfg.Regions)
+	if len(p.pubCfg.Regions) > 0 {
+		regions = slc.Subset(regions, p.pubCfg.Regions)
 	}
 	if len(regions) == 0 {
 		return nil, errors.New("no available regions")
@@ -382,9 +371,9 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		return nil, fmt.Errorf("cannot create image %s: %w", image, err)
 	}
 
-	err = p.deleteBlob(ctx, blob)
+	err = p.deleteBlob(ctx, blob, false)
 	if err != nil {
-		return nil, fmt.Errorf("cannot delete blob for image %s: %w", image, err)
+		return nil, fmt.Errorf("cannot delete blob %s for image %s: %w", blob, image, err)
 	}
 
 	err = p.createImageVersion(ctx, &gallery, imageDefinition, imageVersion, imageID, regions, secureBoot, pk, kek, db)
@@ -406,7 +395,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	log.Info(ctx, "Image ready")
 
 	return &azurePublishingOutput{
-		Images: &outputImages,
+		Images: outputImages,
 	}, nil
 }
 
@@ -423,7 +412,7 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
-	if pubOut.Images == nil {
+	if len(pubOut.Images) == 0 {
 		return errors.New("invalid manifest: missing published images")
 	}
 
@@ -431,14 +420,14 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "cloud", cld)
 
-	for _, img := range *pubOut.Images {
+	for _, img := range pubOut.Images {
 		if img.Cloud != cld {
 			continue
 		}
 		lctx := log.WithValues(ctx, "imageID", img.ID)
 
-		var imageResourceGroup, imageDefinition, image, imageVersion string
-		imageResourceGroup, imageDefinition, image, imageVersion, err = p.getMetadata(lctx, &gallery, img.ID)
+		var imageDefinition, image, imageVersion string
+		imageDefinition, image, imageVersion, err = p.getMetadata(lctx, &gallery, img.ID)
 		if err != nil {
 			var errr *azcore.ResponseError
 			if steamroll && errors.As(err, &errr) && errr.StatusCode == http.StatusNotFound {
@@ -447,15 +436,14 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 			}
 			return fmt.Errorf("cannot get metadata: %w", err)
 		}
-		lctx = log.WithValues(lctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion)
+		lctx = log.WithValues(lctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion, "image", image)
 
-		err = p.deleteImageVersion(lctx, &gallery, imageDefinition, imageVersion)
+		err = p.deleteImageVersion(lctx, &gallery, imageDefinition, imageVersion, steamroll)
 		if err != nil {
 			return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, err)
 		}
-		lctx = log.WithValues(lctx, "imageResourceGroup", imageResourceGroup, "image", image)
 
-		err = p.deleteImage(lctx, imageResourceGroup, image)
+		err = p.deleteImage(lctx, gallery.ResourceGroup, image, steamroll)
 		if err != nil {
 			return fmt.Errorf("cannot delete image %s: %w", image, err)
 		}
@@ -514,16 +502,16 @@ type azureGalleryCredentials struct {
 }
 
 type azurePublishingConfig struct {
-	Source                 string    `mapstructure:"source"`
-	StorageAccountConfig   string    `mapstructure:"storage_account_config"`
-	ServicePrincipalConfig string    `mapstructure:"service_principal_config"`
-	GalleryConfig          string    `mapstructure:"gallery_config"`
-	Regions                *[]string `mapstructure:"regions,omitempty"`
+	Source                 string   `mapstructure:"source"`
+	StorageAccountConfig   string   `mapstructure:"storage_account_config"`
+	ServicePrincipalConfig string   `mapstructure:"service_principal_config"`
+	GalleryConfig          string   `mapstructure:"gallery_config"`
+	Regions                []string `mapstructure:"regions,omitempty"`
 	china                  bool
 }
 
 type azurePublishingOutput struct {
-	Images *[]azurePublishedImage `yaml:"published_gallery_images,omitempty"`
+	Images []azurePublishedImage `yaml:"published_gallery_images,omitempty"`
 }
 
 type azurePublishedImage struct {
@@ -571,11 +559,9 @@ func (*azure) architecture(arch gl.Architecture) (armcompute.Architecture, error
 func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, bool, string, string, string,
 	error,
 ) {
-	requireUEFI := manifest.RequireUEFI != nil && *manifest.RequireUEFI
-	secureBoot := manifest.SecureBoot != nil && *manifest.SecureBoot
 	var pk, kek, db string
 
-	if secureBoot {
+	if manifest.SecureBoot {
 		pkFile, err := manifest.PathBySuffix(".secureboot.pk.der")
 		if err != nil {
 			return false, false, "", "", "", fmt.Errorf("missing secureboot PK: %w", err)
@@ -615,7 +601,7 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 		db = base64.StdEncoding.EncodeToString(rawDB)
 	}
 
-	return requireUEFI, secureBoot, pk, kek, db, nil
+	return manifest.RequireUEFI, manifest.SecureBoot, pk, kek, db, nil
 }
 
 func (p *azure) listRegions(ctx context.Context) ([]string, error) {
@@ -929,7 +915,7 @@ func (p *azure) getPublicID(ctx context.Context, gallery *azureGalleryCredential
 	return *givr.Identifier.UniqueID, nil
 }
 
-func (p *azure) deleteBlob(ctx context.Context, blob string) error {
+func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll bool) error {
 	container := p.storageAccountCreds[p.pubCfg.StorageAccountConfig].Container
 	ctx = log.WithValues(ctx, "container", container, "blob", blob)
 
@@ -939,16 +925,21 @@ func (p *azure) deleteBlob(ctx context.Context, blob string) error {
 		DeleteSnapshots: ptr.P(azblob.DeleteSnapshotsOptionTypeInclude),
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete blob %s: %w", blob, err)
+		var errr *azcore.ResponseError
+		if steamroll && errors.As(err, &errr) && errr.StatusCode == http.StatusNotFound {
+			log.Debug(ctx, "Blob not found but the steamroller keeps going")
+			return nil
+		}
+		return fmt.Errorf("cannot delete blob: %w", err)
 	}
 
 	return nil
 }
 
-func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredentials, imageID string) (string, string, string, string, error) {
+func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredentials, imageID string) (string, string, string, error) {
 	parts := strings.Split(imageID, "/")
 	if len(parts) != 7 {
-		return "", "", "", "", fmt.Errorf("invalid image ID %s", imageID)
+		return "", "", "", fmt.Errorf("invalid image ID %s", imageID)
 	}
 	imageGallery := parts[2]
 	imageDefinition := parts[4]
@@ -957,15 +948,15 @@ func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredential
 	log.Debug(ctx, "Getting gallery")
 	gr, err := p.galleriesClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, nil)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("cannot get gallery %s: %w", gallery.Gallery, err)
+		return "", "", "", fmt.Errorf("cannot get gallery %s: %w", gallery.Gallery, err)
 	}
 	if gr.Properties == nil || gr.Properties.SharingProfile == nil || gr.Properties.SharingProfile.CommunityGalleryInfo == nil {
-		return "", "", "", "", fmt.Errorf("cannot get gallery %s: missing public names", gallery.Gallery)
+		return "", "", "", fmt.Errorf("cannot get gallery %s: missing public names", gallery.Gallery)
 	}
 	found := false
 	for _, name := range gr.Properties.SharingProfile.CommunityGalleryInfo.PublicNames {
 		if name == nil {
-			return "", "", "", "", fmt.Errorf("cannot get gallery%s : missing public name", gallery.Gallery)
+			return "", "", "", fmt.Errorf("cannot get gallery%s : missing public name", gallery.Gallery)
 		}
 		if *name == imageGallery {
 			found = true
@@ -973,30 +964,30 @@ func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredential
 		}
 	}
 	if !found {
-		return "", "", "", "", fmt.Errorf("cannot get gallery %s: no public name matches gallery %s", gallery.Gallery, imageGallery)
+		return "", "", "", fmt.Errorf("cannot get gallery %s: no public name matches gallery %s", gallery.Gallery, imageGallery)
 	}
 
 	log.Debug(ctx, "Getting gallery image version")
 	var givr armcompute.GalleryImageVersionsClientGetResponse
 	givr, err = p.galleryImageVersionsClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("cannot get gallery image version: %w", err)
+		return "", "", "", fmt.Errorf("cannot get gallery image version: %w", err)
 	}
 	if givr.Properties == nil || givr.Properties.StorageProfile == nil || givr.Properties.StorageProfile.Source == nil ||
 		givr.Properties.StorageProfile.Source.ID == nil {
-		return "", "", "", "", errors.New("cannot get gallery image version: missing source ID")
+		return "", "", "", errors.New("cannot get gallery image version: missing source ID")
 	}
 	parts = strings.Split(*givr.Properties.StorageProfile.Source.ID, "/")
 	if len(parts) != 9 {
-		return "", "", "", "", fmt.Errorf("cannot get gallery image version: invalid source %s", *givr.Properties.StorageProfile.Source.ID)
+		return "", "", "", fmt.Errorf("cannot get gallery image version: invalid source %s", *givr.Properties.StorageProfile.Source.ID)
 	}
-	imageResourceGroup := parts[4]
 	image := parts[8]
 
-	return imageResourceGroup, imageDefinition, image, imageVersion, nil
+	return imageDefinition, image, imageVersion, nil
 }
 
-func (p *azure) deleteImageVersion(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, imageVersion string) error {
+func (p *azure) deleteImageVersion(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, imageVersion string, _ bool,
+) error {
 	log.Info(ctx, "Deleting image version")
 	poller, err := p.galleryImageVersionsClient.BeginDelete(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
 	if err != nil {
@@ -1013,7 +1004,7 @@ func (p *azure) deleteImageVersion(ctx context.Context, gallery *azureGalleryCre
 	return nil
 }
 
-func (p *azure) deleteImage(ctx context.Context, imageResourceGroup, image string) error {
+func (p *azure) deleteImage(ctx context.Context, imageResourceGroup, image string, _ bool) error {
 	log.Info(ctx, "Deleting image")
 	poller, err := p.imagesClient.BeginDelete(ctx, imageResourceGroup, image, nil)
 	if err != nil {

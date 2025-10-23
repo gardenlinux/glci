@@ -141,7 +141,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 		}
 		publication.Manifest.PublishedImageMetadata = manifestOutput
 		if glciVer != "" {
-			publication.Manifest.GLCIVersion = &glciVer
+			publication.Manifest.GLCIVersion = glciVer
 		}
 		for _, j := range pubMap[publication.Cname] {
 			publications[j].Manifest = publication.Manifest

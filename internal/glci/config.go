@@ -1,6 +1,7 @@
 package glci
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
@@ -26,7 +27,7 @@ func (c *FlavorsConfig) Validate() error {
 // PublishingConfig contains configuration for GLCI itself and for each cloud provider.
 type PublishingConfig struct {
 	ManifestSource string      `mapstructure:"manifest_source"`
-	ManifestTarget *string     `mapstructure:"manifest_target,omitempty"`
+	ManifestTarget string      `mapstructure:"manifest_target,omitzero"`
 	Sources        []cfgSource `mapstructure:"sources"`
 	Targets        []cfgTarget `mapstructure:"targets"`
 	OCM            cfgTarget   `mapstructure:"ocm"`
@@ -36,6 +37,10 @@ type PublishingConfig struct {
 func (c *PublishingConfig) Validate() error {
 	ids := make(map[string]struct{}, len(c.Sources))
 	for _, source := range c.Sources {
+		if source.Type == "" {
+			return errors.New("missing source")
+		}
+
 		_, err := cloudprovider.NewArtifactSource(source.Type)
 		if err != nil {
 			return fmt.Errorf("invalid source %s: %w", source.ID, err)
@@ -47,22 +52,36 @@ func (c *PublishingConfig) Validate() error {
 		}
 		ids[source.ID] = struct{}{}
 	}
+
+	if c.ManifestSource == "" {
+		return errors.New("missing manifest source")
+	}
+
 	_, ok := ids[c.ManifestSource]
 	if !ok {
 		return fmt.Errorf("missing manifest source %s", c.ManifestSource)
 	}
-	if c.ManifestTarget != nil {
-		_, ok = ids[*c.ManifestTarget]
+
+	if c.ManifestTarget != "" {
+		_, ok = ids[c.ManifestTarget]
 		if !ok {
-			return fmt.Errorf("missing manifest target %s", *c.ManifestTarget)
+			return fmt.Errorf("missing manifest target %s", c.ManifestTarget)
 		}
 	}
 
 	for _, target := range c.Targets {
+		if target.Type == "" {
+			return errors.New("missing target")
+		}
+
 		_, err := cloudprovider.NewPublishingTarget(target.Type)
 		if err != nil {
 			return fmt.Errorf("invalid target: %w", err)
 		}
+	}
+
+	if c.OCM.Type == "" {
+		return errors.New("missing OCM target")
 	}
 
 	_, err := cloudprovider.NewOCMTarget(c.OCM.Type)

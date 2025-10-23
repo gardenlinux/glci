@@ -13,14 +13,14 @@ const (
 type Manifest struct {
 	Version                string          `yaml:"version"`
 	BuildCommittish        string          `yaml:"build_committish"`
-	GLCIVersion            *string         `yaml:"glci_version,omitempty"`
+	GLCIVersion            string          `yaml:"glci_version,omitzero"`
 	Architecture           Architecture    `yaml:"architecture"`
 	Platform               string          `yaml:"platform"`
 	Modifiers              []string        `yaml:"modifiers"`
 	BuildTimestamp         string          `yaml:"build_timestamp"`
 	Paths                  []S3ReleaseFile `yaml:"paths"`
-	RequireUEFI            *bool           `yaml:"require_uefi,omitempty"`
-	SecureBoot             *bool           `yaml:"secureboot,omitempty"`
+	RequireUEFI            bool            `yaml:"require_uefi,omitzero"`
+	SecureBoot             bool            `yaml:"secureboot,omitzero"`
 	PublishedImageMetadata any             `yaml:"published_image_metadata"`
 	S3Bucket               string          `yaml:"s3_bucket"`
 	//nolint:revive // The inline and remain tags overrides the -, which is necessary to avoid an implicit name.
@@ -39,12 +39,12 @@ const (
 
 // S3ReleaseFile represents a file in S3 which is part of a release flavor.
 type S3ReleaseFile struct {
-	Name      string  `yaml:"name"`
-	Suffix    string  `yaml:"suffix"`
-	MD5Sum    *string `yaml:"md5sum,omitempty"`
-	SHA256Sum *string `yaml:"sha256sum,omitempty"`
-	S3Key     string  `yaml:"s3_key"`
-	S3Bucket  string  `yaml:"s3_bucket_name"`
+	Name      string `yaml:"name"`
+	Suffix    string `yaml:"suffix"`
+	MD5Sum    string `yaml:"md5sum,omitzero"`
+	SHA256Sum string `yaml:"sha256sum,omitzero"`
+	S3Key     string `yaml:"s3_key"`
+	S3Bucket  string `yaml:"s3_bucket_name"`
 }
 
 // PathBySuffix resolves the file in S3 which has a given suffix.

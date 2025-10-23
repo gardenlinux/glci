@@ -123,7 +123,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			},
 			Labels: labels,
 			Type:   "virtual_machine_image",
-			Digest: &componentDescriptorDigest{
+			Digest: componentDescriptorDigest{
 				HashAlgorithm:          "NO-DIGEST",
 				NormalisationAlgorithm: "EXCLUDE-FROM-SIGNATURE",
 				Value:                  "NO-DIGEST",
@@ -165,7 +165,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 				},
 			},
 			Type: "application/tar+vm-image-rootfs",
-			Digest: &componentDescriptorDigest{
+			Digest: componentDescriptorDigest{
 				HashAlgorithm:          "NO-DIGEST",
 				NormalisationAlgorithm: "EXCLUDE-FROM-SIGNATURE",
 				Value:                  "NO-DIGEST",
@@ -263,7 +263,7 @@ type componentDesciptorResource struct {
 	ExtraIdentity map[string]string          `yaml:"extraIdentity,omitempty"`
 	Labels        []componentDescriptorlabel `yaml:"labels,omitempty"`
 	Type          string                     `yaml:"type"`
-	Digest        *componentDescriptorDigest `yaml:"digest,omitempty"`
+	Digest        componentDescriptorDigest  `yaml:"digest,omitzero"`
 	Access        componentDescriptorS3      `yaml:"access"`
 }
 
