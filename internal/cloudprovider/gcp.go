@@ -134,7 +134,7 @@ func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
-	return gcpOutput.Project != nil && *gcpOutput.Project != "" && gcpOutput.Image != nil && *gcpOutput.Image != "", nil
+	return gcpOutput.Project != "" && gcpOutput.Image != "", nil
 }
 
 func (p *gcp) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
@@ -152,7 +152,7 @@ func (p *gcp) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOu
 		return nil, err
 	}
 
-	if (gcpOutput.Project != nil && *gcpOutput.Project != "") || (gcpOutput.Image != nil && *gcpOutput.Image != "") {
+	if gcpOutput.Project != "" || gcpOutput.Image != "" {
 		return nil, errors.New("cannot add publishing output to existing publishing output")
 	}
 
@@ -210,8 +210,7 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 	ctx = log.WithValues(ctx, "secureBoot", secureBoot)
 
-	var blob *storage.ObjectHandle
-	var blobURL string
+	var blob, blobURL string
 	blob, blobURL, err = p.uploadBlob(ctx, source, imagePath.S3Key, image)
 	if err != nil {
 		return nil, fmt.Errorf("cannot upload blob for image %s in project %s: %w", image, project, err)
@@ -219,12 +218,12 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 
 	err = p.insertImage(ctx, blobURL, image, arch, secureBoot, pk, kek, db)
 	if err != nil {
-		return nil, fmt.Errorf("cannot insert image %s from blob %s in project %s: %w", image, blob.ObjectName(), project, err)
+		return nil, fmt.Errorf("cannot insert image %s from blob %s in project %s: %w", image, blob, project, err)
 	}
 
-	err = p.deleteBlob(ctx, blob)
+	err = p.deleteBlob(ctx, blob, false)
 	if err != nil {
-		return nil, fmt.Errorf("cannot delete blob %s in project %s: %w", blob.ObjectName(), project, err)
+		return nil, fmt.Errorf("cannot delete blob %s in project %s: %w", blob, project, err)
 	}
 
 	err = p.makePublic(ctx, image)
@@ -233,8 +232,8 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 
 	return &gcpPublishingOutput{
-		Project: &project,
-		Image:   &image,
+		Project: project,
+		Image:   image,
 	}, nil
 }
 
@@ -251,14 +250,14 @@ func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
-	if pubOut.Project == nil || pubOut.Image == nil {
+	if pubOut.Project == "" || pubOut.Image == "" {
 		return errors.New("invalid manifest: missing published images")
 	}
-	ctx = log.WithValues(ctx, "image", *pubOut.Image, "project", *pubOut.Project)
+	ctx = log.WithValues(ctx, "image", pubOut.Image, "project", pubOut.Project)
 
-	err = p.deleteImage(ctx, *pubOut.Image, steamroll)
+	err = p.deleteImage(ctx, pubOut.Image, steamroll)
 	if err != nil {
-		return fmt.Errorf("cannot delete image %s in project %s: %w", *pubOut.Image, *pubOut.Project, err)
+		return fmt.Errorf("cannot delete image %s: %w", pubOut.Image, err)
 	}
 
 	return nil
@@ -284,8 +283,8 @@ type gcpPublishingConfig struct {
 }
 
 type gcpPublishingOutput struct {
-	Project *string `yaml:"gcp_project_name,omitempty"`
-	Image   *string `yaml:"gcp_image_name,omitempty"`
+	Project string `yaml:"gcp_project_name,omitzero"`
+	Image   string `yaml:"gcp_image_name,omitzero"`
 }
 
 func (p *gcp) isConfigured() bool {
@@ -310,10 +309,9 @@ func (*gcp) architecture(arch gl.Architecture) (string, error) {
 }
 
 func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, string, string, string, error) {
-	secureBoot := manifest.SecureBoot != nil && *manifest.SecureBoot
 	var pk, kek, db string
 
-	if secureBoot {
+	if manifest.SecureBoot {
 		pkFile, err := manifest.PathBySuffix(".secureboot.pk.der")
 		if err != nil {
 			return false, "", "", "", fmt.Errorf("missing secureboot PK: %w", err)
@@ -353,16 +351,16 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		db = base64.StdEncoding.EncodeToString(rawDB)
 	}
 
-	return secureBoot, pk, kek, db, nil
+	return manifest.SecureBoot, pk, kek, db, nil
 }
 
-func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image string) (*storage.ObjectHandle, string, error) {
-	blobName := image + ".tar.gz"
-	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "blob", blobName)
+func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image string) (string, string, error) {
+	blob := image + ".tar.gz"
+	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "blob", blob)
 
 	obj, err := source.GetObject(ctx, key)
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot get blob: %w", err)
+		return "", "", fmt.Errorf("cannot get blob: %w", err)
 	}
 	defer func() {
 		_ = obj.Close()
@@ -370,31 +368,30 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 
 	log.Info(ctx, "Uploading blob")
 	bucket := p.storageClient.Bucket(p.pubCfg.Bucket)
-	blob := bucket.Object(blobName)
-	w := blob.NewWriter(ctx)
+	w := bucket.Object(blob).NewWriter(ctx)
 	_, err = io.Copy(w, obj)
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot write to object writer: %w", err)
+		return "", "", fmt.Errorf("cannot write to object writer: %w", err)
 	}
 	err = w.Close()
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot close object writer: %w", err)
+		return "", "", fmt.Errorf("cannot close object writer: %w", err)
 	}
 	log.Debug(ctx, "Blob uploaded")
 
 	err = obj.Close()
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot close blob: %w", err)
+		return "", "", fmt.Errorf("cannot close blob: %w", err)
 	}
 
 	var url string
-	url, err = bucket.SignedURL(blobName, &storage.SignedURLOptions{
+	url, err = bucket.SignedURL(blob, &storage.SignedURLOptions{
 		Method:  "GET",
 		Expires: time.Now().Add(time.Hour * 7),
 		Scheme:  storage.SigningSchemeV4,
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot generate signed URL for blob %s: %w", blobName, err)
+		return "", "", fmt.Errorf("cannot generate signed URL for blob %s: %w", blob, err)
 	}
 
 	return blob, url, nil
@@ -459,11 +456,16 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 	return nil
 }
 
-func (*gcp) deleteBlob(ctx context.Context, blob *storage.ObjectHandle) error {
+func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error {
 	log.Info(ctx, "Deleting blob")
-	err := blob.Delete(ctx)
+	err := p.storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Delete(ctx)
 	if err != nil {
-		return fmt.Errorf("cannot delete blob %s: %w", blob.ObjectName(), err)
+		var errr *googleapi.Error
+		if steamroll && errors.As(err, &errr) && errr.Code == http.StatusNotFound {
+			log.Debug(ctx, "Blob not found but the steamroller keeps going")
+			return nil
+		}
+		return fmt.Errorf("cannot delete blob %s: %w", blob, err)
 	}
 
 	return nil

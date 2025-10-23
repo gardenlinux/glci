@@ -17,7 +17,6 @@ import (
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
-	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 )
 
@@ -63,8 +62,8 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 		return fmt.Errorf("missing credentials config %s", p.pubCfg.Config)
 	}
 
-	if p.pubCfg.SourceChina != nil {
-		_, ok = sources[*p.pubCfg.SourceChina]
+	if p.pubCfg.SourceChina != "" {
+		_, ok = sources[p.pubCfg.SourceChina]
 		if !ok {
 			return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 		}
@@ -78,7 +77,7 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 
 	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(creds.Projects))
 	for _, proj := range creds.Projects {
-		if p.pubCfg.Regions != nil && !slices.Contains(*p.pubCfg.Regions, proj.Region) {
+		if len(p.pubCfg.Regions) > 0 && !slices.Contains(p.pubCfg.Regions, proj.Region) {
 			continue
 		}
 
@@ -148,10 +147,7 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
-	if openstackOutput.Images == nil {
-		return false, nil
-	}
-	for _, img := range *openstackOutput.Images {
+	for _, img := range openstackOutput.Images {
 		if img.Hypervisor == string(p.pubCfg.Hypervisor) {
 			return true, nil
 		}
@@ -175,25 +171,19 @@ func (p *openstack) AddOwnPublishingOutput(output, own PublishingOutput) (Publis
 		return nil, err
 	}
 
-	if ownOutput.Images == nil {
-		ownOutput.Images = &[]openstackPublishedImage{}
-	}
-	for _, img := range *ownOutput.Images {
+	for _, img := range ownOutput.Images {
 		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
 			return nil, errors.New("new publishing output has extraneous entries")
 		}
 	}
 
-	if openstackOutput.Images == nil {
-		return &ownOutput, nil
-	}
-	for _, img := range *openstackOutput.Images {
+	for _, img := range openstackOutput.Images {
 		if img.Hypervisor == string(p.pubCfg.Hypervisor) {
 			return nil, errors.New("cannot add publishing output to existing publishing output")
 		}
 	}
 
-	ownOutput.Images = ptr.P(slices.Concat(*openstackOutput.Images, *ownOutput.Images))
+	ownOutput.Images = slices.Concat(openstackOutput.Images, ownOutput.Images)
 	return &ownOutput, nil
 }
 
@@ -208,11 +198,9 @@ func (p *openstack) RemoveOwnPublishingOutput(output PublishingOutput) (Publishi
 	}
 
 	var otherImages []openstackPublishedImage
-	if openstackOutput.Images != nil {
-		for _, img := range *openstackOutput.Images {
-			if img.Hypervisor != string(p.pubCfg.Hypervisor) {
-				otherImages = append(otherImages, img)
-			}
+	for _, img := range openstackOutput.Images {
+		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
+			otherImages = append(otherImages, img)
 		}
 	}
 	if len(otherImages) == 0 {
@@ -220,7 +208,7 @@ func (p *openstack) RemoveOwnPublishingOutput(output PublishingOutput) (Publishi
 	}
 
 	return &openstackPublishingOutput{
-		Images: &otherImages,
+		Images: otherImages,
 	}, nil
 }
 
@@ -259,19 +247,19 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 		"sourceRepo", source.Repository())
 
 	regions := p.listRegions()
-	if p.pubCfg.Regions != nil {
-		regions = slc.Subset(regions, *p.pubCfg.Regions)
+	if len(p.pubCfg.Regions) > 0 {
+		regions = slc.Subset(regions, p.pubCfg.Regions)
 	}
 	if len(regions) == 0 {
 		return nil, errors.New("no available regions")
 	}
 
 	sourceChina := source
-	if p.pubCfg.SourceChina != nil {
-		sourceChina = sources[*p.pubCfg.SourceChina]
+	if p.pubCfg.SourceChina != "" {
+		sourceChina = sources[p.pubCfg.SourceChina]
 	}
 
-	imgs := make(map[string]string, len(regions))
+	outImages := make(map[string]string, len(regions))
 	for _, region := range regions {
 		imageClient := p.imagesClients[region]
 		src := source
@@ -285,17 +273,17 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 		if err != nil {
 			return nil, fmt.Errorf("cannot create image for region %s: %w", region, err)
 		}
+		lctx = log.WithValues(lctx, "region", region)
 
-		imgs[region] = imageID
+		err = p.waitForImage(lctx, imageID, region)
+		if err != nil {
+			return nil, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, err)
+		}
+		outImages[region] = imageID
 	}
 
-	err = p.waitForImages(ctx, imgs)
-	if err != nil {
-		return nil, fmt.Errorf("cannot finalize images: %w", err)
-	}
-
-	outputImages := make([]openstackPublishedImage, 0, len(imgs))
-	for region, imageID := range imgs {
+	outputImages := make([]openstackPublishedImage, 0, len(outImages))
+	for region, imageID := range outImages {
 		outputImages = append(outputImages, openstackPublishedImage{
 			Region:     region,
 			ID:         imageID,
@@ -304,7 +292,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 		})
 	}
 	return &openstackPublishingOutput{
-		Images: &outputImages,
+		Images: outputImages,
 	}, nil
 }
 
@@ -326,21 +314,21 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
-	if pubOut == nil || pubOut.Images == nil {
+	if pubOut == nil || len(pubOut.Images) == 0 {
 		return errors.New("invalid manifest: missing published images")
 	}
 
 	ctx = log.WithValues(ctx, "hypervisor", p.pubCfg.Hypervisor)
 
 	regions := p.listRegions()
-	if p.pubCfg.Regions != nil {
-		regions = slc.Subset(regions, *p.pubCfg.Regions)
+	if len(p.pubCfg.Regions) > 0 {
+		regions = slc.Subset(regions, p.pubCfg.Regions)
 	}
 	if len(regions) == 0 {
 		return errors.New("no available regions")
 	}
 
-	for _, img := range *pubOut.Images {
+	for _, img := range pubOut.Images {
 		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
 			continue
 		}
@@ -385,10 +373,10 @@ type openstackProject struct {
 type openstackPublishingConfig struct {
 	Source      string              `mapstructure:"source"`
 	Config      string              `mapstructure:"config"`
-	SourceChina *string             `mapstructure:"source_china,omitempty"`
-	Test        *bool               `mapstructure:"test,omitempty"`
+	SourceChina string              `mapstructure:"source_china,omitzero"`
+	Test        bool                `mapstructure:"test,omitzero"`
 	Hypervisor  openstackHypervisor `mapstructure:"hypervisor"`
-	Regions     *[]string           `mapstructure:"regions,omitempty"`
+	Regions     []string            `mapstructure:"regions,omitempty"`
 }
 
 type openstackHypervisor string
@@ -399,7 +387,7 @@ const (
 )
 
 type openstackPublishingOutput struct {
-	Images *[]openstackPublishedImage `yaml:"published_openstack_images,omitempty"`
+	Images []openstackPublishedImage `yaml:"published_openstack_images,omitempty"`
 }
 
 type openstackPublishedImage struct {
@@ -438,7 +426,7 @@ func (p *openstack) imageName(cname, version, committish string) string {
 		hypervisor = "vmware"
 	default:
 	}
-	if p.pubCfg.Test != nil && *p.pubCfg.Test {
+	if p.pubCfg.Test {
 		hypervisor += "-test"
 	}
 
@@ -521,28 +509,25 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 	return img.ID, nil
 }
 
-func (p *openstack) waitForImages(ctx context.Context, imgs map[string]string) error {
-	for region, imageID := range imgs {
-		imagesClient := p.imagesClients[region]
-		var status images.ImageStatus
-		for status != images.ImageStatusActive {
-			log.Debug(ctx, "Waiting for image", "region", region, "imageID", imageID)
-			img, err := images.Get(ctx, imagesClient, imageID).Extract()
-			if err != nil {
-				return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, err)
-			}
-			status = img.Status
+func (p *openstack) waitForImage(ctx context.Context, imageID, region string) error {
+	imagesClient := p.imagesClients[region]
+	var status images.ImageStatus
+	for status != images.ImageStatusActive {
+		log.Debug(ctx, "Waiting for image")
+		img, err := images.Get(ctx, imagesClient, imageID).Extract()
+		if err != nil {
+			return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, err)
+		}
+		status = img.Status
 
-			if status != images.ImageStatusActive {
-				if status != images.ImageStatusQueued && status != images.ImageStatusSaving && status != images.ImageStatusImporting {
-					return fmt.Errorf("image %s in region %s has status %s", imageID, region, status)
-				}
-
-				time.Sleep(time.Second * 7)
+		if status != images.ImageStatusActive {
+			if status != images.ImageStatusQueued && status != images.ImageStatusSaving && status != images.ImageStatusImporting {
+				return fmt.Errorf("image %s in region %s has status %s", imageID, region, status)
 			}
+
+			time.Sleep(time.Second * 7)
 		}
 	}
-	log.Info(ctx, "Images ready", "count", len(imgs))
 
 	return nil
 }

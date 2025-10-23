@@ -97,8 +97,8 @@ func (p *aws) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 		p.pubCfg.china = true
 	}
 
-	if p.pubCfg.Regions != nil {
-		if !slices.Contains(*p.pubCfg.Regions, creds.Region) {
+	if len(p.pubCfg.Regions) > 0 {
+		if !slices.Contains(p.pubCfg.Regions, creds.Region) {
 			return fmt.Errorf("credentials region %s missing from list of regions", creds.Region)
 		}
 	}
@@ -224,7 +224,7 @@ func (p *aws) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	chinaAndSecureBoot := p.pubCfg.china && manifest.SecureBoot != nil && *manifest.SecureBoot
+	chinaAndSecureBoot := p.pubCfg.china && manifest.SecureBoot
 	return !chinaAndSecureBoot
 }
 
@@ -240,11 +240,7 @@ func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
 
 	cld := p.cloud()
 
-	if awsOutput.Images == nil {
-		return false, nil
-	}
-
-	for _, img := range *awsOutput.Images {
+	for _, img := range awsOutput.Images {
 		if img.Cloud == cld {
 			return true, nil
 		}
@@ -270,25 +266,19 @@ func (p *aws) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOu
 
 	cld := p.cloud()
 
-	if ownOutput.Images == nil {
-		ownOutput.Images = &[]awsPublishedImage{}
-	}
-	for _, img := range *ownOutput.Images {
+	for _, img := range ownOutput.Images {
 		if img.Cloud != cld {
 			return nil, errors.New("new publishing output has extraneous entries")
 		}
 	}
 
-	if awsOutput.Images == nil {
-		return &ownOutput, nil
-	}
-	for _, img := range *awsOutput.Images {
+	for _, img := range awsOutput.Images {
 		if img.Cloud == cld {
 			return nil, errors.New("cannot add publishing output to existing publishing output")
 		}
 	}
 
-	ownOutput.Images = ptr.P(slices.Concat(*awsOutput.Images, *ownOutput.Images))
+	ownOutput.Images = slices.Concat(awsOutput.Images, ownOutput.Images)
 	return &ownOutput, nil
 }
 
@@ -305,11 +295,9 @@ func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutp
 	cld := p.cloud()
 
 	var otherImages []awsPublishedImage
-	if awsOutput.Images != nil {
-		for _, img := range *awsOutput.Images {
-			if img.Cloud != cld {
-				otherImages = append(otherImages, img)
-			}
+	for _, img := range awsOutput.Images {
+		if img.Cloud != cld {
+			otherImages = append(otherImages, img)
 		}
 	}
 	if len(otherImages) == 0 {
@@ -317,7 +305,7 @@ func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutp
 	}
 
 	return &awsPublishingOutput{
-		Images: &otherImages,
+		Images: otherImages,
 	}, nil
 }
 
@@ -365,8 +353,8 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if err != nil {
 		return nil, fmt.Errorf("cannot list regions: %w", err)
 	}
-	if p.pubCfg.Regions != nil {
-		regions = slc.Subset(regions, *p.pubCfg.Regions)
+	if len(p.pubCfg.Regions) > 0 {
+		regions = slc.Subset(regions, p.pubCfg.Regions)
 	}
 	if len(regions) == 0 {
 		return nil, errors.New("no available regions")
@@ -389,23 +377,34 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if err != nil {
 		return nil, fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err)
 	}
-	ctx = log.WithValues(ctx, "imageID", imageID)
 
-	var images map[string]string
-	images, err = p.copyImage(ctx, image, imageID, region, regions)
-	if err != nil {
-		return nil, fmt.Errorf("cannot copy image %s: %w", image, err)
-	}
+	images := make(map[string]string, len(regions))
+	for _, toRegion := range regions {
+		lctx := log.WithValues(ctx, "region", toRegion)
+		localID := imageID
 
-	err = p.waitForImages(ctx, images)
-	if err != nil {
-		return nil, fmt.Errorf("cannot finalize images: %w", err)
-	}
+		if toRegion != region {
+			localID, err = p.copyImage(lctx, image, imageID, region, toRegion)
+			if err != nil {
+				return nil, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion,
+					err)
+			}
+		}
+		lctx = log.WithValues(lctx, "imageID", localID)
 
-	err = p.makePublic(ctx, images)
-	if err != nil {
-		return nil, fmt.Errorf("cannot make images public: %w", err)
+		err = p.waitForImage(lctx, localID, toRegion)
+		if err != nil {
+			return nil, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, err)
+		}
+
+		err = p.makePublic(lctx, localID, toRegion)
+		if err != nil {
+			return nil, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, err)
+		}
+
+		images[toRegion] = localID
 	}
+	log.Info(ctx, "Images ready", "count", len(images))
 
 	outputImages := make([]awsPublishedImage, 0, len(images))
 	for region, imageID = range images {
@@ -418,7 +417,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 
 	return &awsPublishingOutput{
-		Images: &outputImages,
+		Images: outputImages,
 	}, nil
 }
 
@@ -435,14 +434,14 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
-	if pubOut.Images == nil {
+	if len(pubOut.Images) == 0 {
 		return errors.New("invalid manifest: missing published images")
 	}
 
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "cloud", cld)
 
-	for _, img := range *pubOut.Images {
+	for _, img := range pubOut.Images {
 		if img.Cloud != cld {
 			continue
 		}
@@ -477,21 +476,21 @@ type awsSourceConfig struct {
 }
 
 type awsPublishingConfig struct {
-	Source    string        `mapstructure:"source"`
-	Config    string        `mapstructure:"config"`
-	Regions   *[]string     `mapstructure:"regions,omitempty"`
-	ImageTags *awsImageTags `mapstructure:"image_tags,omitempty"`
+	Source    string       `mapstructure:"source"`
+	Config    string       `mapstructure:"config"`
+	Regions   []string     `mapstructure:"regions,omitempty"`
+	ImageTags awsImageTags `mapstructure:"image_tags,omitzero"`
 	china     bool
 }
 
 type awsImageTags struct {
-	IncludeGardenLinuxVersion    *bool              `mapstructure:"include_gardenlinux_version,omitempty"`
-	IncludeGardenLinuxCommittish *bool              `mapstructure:"include_gardenlinux_committish,omitempty"`
-	StaticTags                   *map[string]string `mapstructure:"static_tags,omitempty"`
+	IncludeGardenLinuxVersion    bool              `mapstructure:"include_gardenlinux_version,omitzero"`
+	IncludeGardenLinuxCommittish bool              `mapstructure:"include_gardenlinux_committish,omitzero"`
+	StaticTags                   map[string]string `mapstructure:"static_tags,omitempty"`
 }
 
 type awsPublishingOutput struct {
-	Images *[]awsPublishedImage `yaml:"published_aws_images,omitempty"`
+	Images []awsPublishedImage `yaml:"published_aws_images,omitempty"`
 }
 
 type awsPublishedImage struct {
@@ -529,48 +528,36 @@ func (*aws) architecture(arch gl.Architecture) (ec2types.ArchitectureValues, err
 }
 
 func (p *aws) prepareTags(manifest *gl.Manifest) []ec2types.Tag {
-	var tags []ec2types.Tag
+	tags := make([]ec2types.Tag, 0, 2+len(p.pubCfg.ImageTags.StaticTags))
 
-	tagsLen := 2
-	if p.pubCfg.ImageTags != nil && p.pubCfg.ImageTags.StaticTags != nil {
-		tagsLen += len(*p.pubCfg.ImageTags.StaticTags)
+	for k, v := range p.pubCfg.ImageTags.StaticTags {
+		tags = append(tags, ec2types.Tag{
+			Key:   &k,
+			Value: &v,
+		})
 	}
 
-	if p.pubCfg.ImageTags != nil {
-		tags = make([]ec2types.Tag, 0, tagsLen)
-		if p.pubCfg.ImageTags.StaticTags != nil {
-			for k, v := range *p.pubCfg.ImageTags.StaticTags {
-				tags = append(tags, ec2types.Tag{
-					Key:   &k,
-					Value: &v,
-				})
-			}
-		}
+	if p.pubCfg.ImageTags.IncludeGardenLinuxVersion {
+		tags = append(tags, ec2types.Tag{
+			Key:   ptr.P("gardenlinux-version"),
+			Value: &manifest.Version,
+		})
+	}
 
-		if p.pubCfg.ImageTags.IncludeGardenLinuxVersion != nil && *p.pubCfg.ImageTags.IncludeGardenLinuxVersion {
-			tags = append(tags, ec2types.Tag{
-				Key:   ptr.P("gardenlinux-version"),
-				Value: &manifest.Version,
-			})
-		}
-
-		if p.pubCfg.ImageTags.IncludeGardenLinuxCommittish != nil && *p.pubCfg.ImageTags.IncludeGardenLinuxCommittish {
-			tags = append(tags, ec2types.Tag{
-				Key:   ptr.P("gardenlinux-committish"),
-				Value: &manifest.BuildCommittish,
-			})
-		}
+	if p.pubCfg.ImageTags.IncludeGardenLinuxCommittish {
+		tags = append(tags, ec2types.Tag{
+			Key:   ptr.P("gardenlinux-committish"),
+			Value: &manifest.BuildCommittish,
+		})
 	}
 
 	return tags
 }
 
 func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, bool, *string, error) {
-	requireUEFI := manifest.RequireUEFI != nil && *manifest.RequireUEFI
-	secureBoot := manifest.SecureBoot != nil && *manifest.SecureBoot
 	var uefiData *string
 
-	if secureBoot {
+	if manifest.SecureBoot {
 		efivarsFile, err := manifest.PathBySuffix(".secureboot.aws-efivars")
 		if err != nil {
 			return false, false, nil, fmt.Errorf("missing efivars: %w", err)
@@ -585,7 +572,7 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		uefiData = ptr.P(string(efivars))
 	}
 
-	return requireUEFI, secureBoot, uefiData, nil
+	return manifest.RequireUEFI, manifest.SecureBoot, uefiData, nil
 }
 
 func (p *aws) listRegions(ctx context.Context) ([]string, error) {
@@ -628,7 +615,8 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 	if r.ImportTaskId == nil {
 		return "", fmt.Errorf("cannot import snapshot in bucket %s: missing import task ID", bucket)
 	}
-	ctx = log.WithValues(ctx, "taskId", *r.ImportTaskId)
+	importTaskID := *r.ImportTaskId
+	ctx = log.WithValues(ctx, "taskId", importTaskID)
 
 	var snapshot string
 	status := "active"
@@ -639,18 +627,18 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 			ImportTaskIds: []string{*r.ImportTaskId},
 		})
 		if err != nil {
-			return "", fmt.Errorf("cannot describe import snapshot tasks with id %s: %w", *r.ImportTaskId, err)
+			return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: %w", *r.ImportTaskId, err)
 		}
 		if len(s.ImportSnapshotTasks) != 1 || s.NextToken != nil {
-			return "", fmt.Errorf("cannot describe import snapshot tasks with id %s: missing import snapshot tasks", *r.ImportTaskId)
+			return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: missing import snapshot tasks", *r.ImportTaskId)
 		}
-		task := s.ImportSnapshotTasks[0]
-		if task.SnapshotTaskDetail == nil || task.SnapshotTaskDetail.Status == nil {
-			return "", fmt.Errorf("cannot describe import snapshot tasks with id %s: missing import snapshot task detail", *r.ImportTaskId)
+		importTask := s.ImportSnapshotTasks[0]
+		if importTask.SnapshotTaskDetail == nil || importTask.SnapshotTaskDetail.Status == nil {
+			return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: missing import snapshot task detail", *r.ImportTaskId)
 		}
-		status = *task.SnapshotTaskDetail.Status
-		if task.SnapshotTaskDetail.SnapshotId != nil {
-			snapshot = *task.SnapshotTaskDetail.SnapshotId
+		status = *importTask.SnapshotTaskDetail.Status
+		if importTask.SnapshotTaskDetail.SnapshotId != nil {
+			snapshot = *importTask.SnapshotTaskDetail.SnapshotId
 		}
 
 		if status == "active" {
@@ -661,7 +649,7 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 		return "", fmt.Errorf("unknown import task status %s in bucket %s", status, bucket)
 	}
 	if snapshot == "" {
-		return "", fmt.Errorf("cannot describe import snapshot tasks with id %s: missing snapshot ID", *r.ImportTaskId)
+		return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: missing snapshot ID", *r.ImportTaskId)
 	}
 	log.Debug(ctx, "Snapshot imported")
 
@@ -718,85 +706,72 @@ func (p *aws) registerImage(ctx context.Context, snapshot, image string, arch ec
 	if r.ImageId == nil {
 		return "", errors.New("cannot register image: missing image ID")
 	}
+	imageID := *r.ImageId
 
-	return *r.ImageId, nil
+	return imageID, nil
 }
 
-func (p *aws) copyImage(ctx context.Context, image, imageID, fromRegion string, toRegions []string) (map[string]string, error) {
-	images := make(map[string]string, len(toRegions))
+func (p *aws) copyImage(ctx context.Context, image, imageID, region, toRegion string) (string, error) {
+	log.Info(ctx, "Copying image", "toRegion", toRegion)
+	r, err := p.tgtEC2Client.CopyImage(ctx, &ec2.CopyImageInput{
+		Name:          &image,
+		SourceImageId: &imageID,
+		SourceRegion:  &region,
+		CopyImageTags: ptr.P(true),
+	}, overrideRegion(toRegion))
+	if err != nil {
+		return "", fmt.Errorf("cannot copy image: %w", err)
+	}
+	if r.ImageId == nil {
+		return "", errors.New("cannot copy image: missing image ID")
+	}
+	toImageID := *r.ImageId
 
-	for _, region := range toRegions {
-		if region == fromRegion {
-			images[region] = imageID
-			continue
-		}
+	return toImageID, nil
+}
 
-		log.Info(ctx, "Copying image", "toRegion", region)
-		r, err := p.tgtEC2Client.CopyImage(ctx, &ec2.CopyImageInput{
-			Name:          &image,
-			SourceImageId: &imageID,
-			SourceRegion:  &fromRegion,
-			CopyImageTags: ptr.P(true),
+func (p *aws) waitForImage(ctx context.Context, imageID, region string) error {
+	var state ec2types.ImageState
+	for state != ec2types.ImageStateAvailable {
+		log.Debug(ctx, "Waiting for image")
+		r, err := p.tgtEC2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
+			ImageIds: []string{imageID},
 		}, overrideRegion(region))
 		if err != nil {
-			return nil, fmt.Errorf("cannot copy image %s to region %s: %w", imageID, region, err)
+			return fmt.Errorf("cannot describe image: %w", err)
 		}
-		if r.ImageId == nil {
-			return nil, fmt.Errorf("cannot copy image %s to region %s: missing image ID", imageID, region)
+		if len(r.Images) != 1 || r.NextToken != nil {
+			return errors.New("ccannot describe image: missing images")
 		}
-		images[region] = *r.ImageId
-	}
+		state = r.Images[0].State
 
-	return images, nil
-}
-
-func (p *aws) waitForImages(ctx context.Context, images map[string]string) error {
-	for region, imageID := range images {
-		var state ec2types.ImageState
-		for state != ec2types.ImageStateAvailable {
-			log.Debug(ctx, "Waiting for image", "toRegion", region, "toImageID", imageID)
-			r, err := p.tgtEC2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
-				ImageIds: []string{imageID},
-			}, overrideRegion(region))
-			if err != nil {
-				return fmt.Errorf("cannot get status of image %s in region %s: %w", imageID, region, err)
+		if state != ec2types.ImageStateAvailable {
+			if state != ec2types.ImageStatePending {
+				return fmt.Errorf("image has state %s", state)
 			}
-			if len(r.Images) != 1 || r.NextToken != nil {
-				return fmt.Errorf("cannot get status of image %s in region %s: missing images", imageID, region)
-			}
-			state = r.Images[0].State
 
-			if state != ec2types.ImageStateAvailable {
-				if state != ec2types.ImageStatePending {
-					return fmt.Errorf("image %s in region %s has state %s", imageID, region, state)
-				}
-
-				time.Sleep(time.Second * 7)
-			}
+			time.Sleep(time.Second * 7)
 		}
 	}
-	log.Info(ctx, "Images ready", "count", len(images))
 
 	return nil
 }
 
-func (p *aws) makePublic(ctx context.Context, images map[string]string) error {
-	for region, imageID := range images {
-		log.Debug(ctx, "Adding launch permission to image", "toRegion", region, "toImageID", imageID)
-		_, err := p.tgtEC2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
-			ImageId:   &imageID,
-			Attribute: ptr.P("launchPermission"),
-			LaunchPermission: &ec2types.LaunchPermissionModifications{
-				Add: []ec2types.LaunchPermission{
-					{
-						Group: ec2types.PermissionGroupAll,
-					},
+func (p *aws) makePublic(ctx context.Context, imageID, region string) error {
+	log.Debug(ctx, "Adding launch permission to image")
+	_, err := p.tgtEC2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
+		ImageId:   &imageID,
+		Attribute: ptr.P("launchPermission"),
+		LaunchPermission: &ec2types.LaunchPermissionModifications{
+			Add: []ec2types.LaunchPermission{
+				{
+					Group: ec2types.PermissionGroupAll,
 				},
 			},
-		}, overrideRegion(region))
-		if err != nil {
-			return fmt.Errorf("cannot modify attribute of image %s in region %s: %w", imageID, region, err)
-		}
+		},
+	}, overrideRegion(region))
+	if err != nil {
+		return fmt.Errorf("cannot modify attribute: %w", err)
 	}
 
 	return nil
