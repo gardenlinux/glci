@@ -8,6 +8,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 // Remove removes a release from all cloud providers specified in the flavors and publishing configurations.
@@ -17,13 +18,30 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
 
 	log.Debug(ctx, "Loading credentials and configuration")
-	manifestSource, manifestTarget, sources, targets, ocmTarget, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
+	manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
 	if err != nil {
 		return fmt.Errorf("invalid credentials or configuration: %w", err)
 	}
 	defer func() {
-		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
+		_ = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
 	}()
+	ctx = task.WithStatePersistor(ctx, state, id(version, commit))
+
+	rollbackHandlers := make([]task.RollbackHandler, 0, len(targets))
+	for _, target := range targets {
+		rollbackHandlers = append(rollbackHandlers, target)
+	}
+	err = task.Rollback(ctx, rollbackHandlers)
+	if err != nil {
+		return fmt.Errorf("cannot roll back: %w", err)
+	}
+
+	task.Clear(ctx)
+	err = task.PersistorError(ctx)
+	if err != nil {
+		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
+		return fmt.Errorf("cannot maintain state: %w", err)
+	}
 
 	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
@@ -89,7 +107,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
 		}
 		if !isPublished {
-			log.Debug(lctx, "Already removed, skipping")
+			log.Info(lctx, "Already removed, skipping")
 			continue
 		}
 
@@ -121,7 +139,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	}
 
 	log.Debug(ctx, "Closing sources and targets")
-	err = closeSourcesAndTargets(sources, targets, ocmTarget)
+	err = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
 	if err != nil {
 		return fmt.Errorf("cannot close sources and targets: %w", err)
 	}

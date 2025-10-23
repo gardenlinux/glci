@@ -24,6 +24,7 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 func init() {
@@ -65,7 +66,7 @@ func (p *aws) SetSourceConfig(ctx context.Context, cfg map[string]any) error {
 	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(creds.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
 	if err != nil {
-		return fmt.Errorf("cannot load default aws config: %w", err)
+		return fmt.Errorf("cannot load default config: %w", err)
 	}
 	p.srcS3Client = s3.NewFromConfig(awsCfg)
 
@@ -360,22 +361,25 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		return nil, errors.New("no available regions")
 	}
 
+	ctx = task.Begin(ctx, "publish/"+image+"/"+region, &awsTaskState{
+		Region: region,
+	})
 	var snapshot string
 	snapshot, err = p.importSnapshot(ctx, source, imagePath.S3Key, image)
 	if err != nil {
-		return nil, fmt.Errorf("cannot import snapshot from %s for image %s: %w", imagePath.S3Key, image, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot import snapshot from %s for image %s: %w", imagePath.S3Key, image, err))
 	}
 	ctx = log.WithValues(ctx, "snapshot", snapshot)
 
 	err = p.attachTags(ctx, snapshot, tags)
 	if err != nil {
-		return nil, fmt.Errorf("cannot attach tags to snapshot %s: %w", snapshot, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot attach tags to snapshot %s: %w", snapshot, err))
 	}
 
 	var imageID string
 	imageID, err = p.registerImage(ctx, snapshot, image, arch, requireUEFI, uefiData)
 	if err != nil {
-		return nil, fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err))
 	}
 
 	images := make(map[string]string, len(regions))
@@ -384,23 +388,27 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		localID := imageID
 
 		if toRegion != region {
+			lctx = task.Begin(lctx, "publish/"+image+"/"+toRegion, &awsTaskState{
+				Region: toRegion,
+			})
 			localID, err = p.copyImage(lctx, image, imageID, region, toRegion)
 			if err != nil {
-				return nil, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion,
-					err)
+				return nil, task.Fail(lctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion,
+					err))
 			}
 		}
 		lctx = log.WithValues(lctx, "imageID", localID)
 
 		err = p.waitForImage(lctx, localID, toRegion)
 		if err != nil {
-			return nil, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, err)
+			return nil, task.Fail(lctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, err))
 		}
 
 		err = p.makePublic(lctx, localID, toRegion)
 		if err != nil {
-			return nil, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, err)
+			return nil, task.Fail(lctx, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, err))
 		}
+		task.Complete(lctx)
 
 		images[toRegion] = localID
 	}
@@ -456,6 +464,58 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	return nil
 }
 
+func (p *aws) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "aws/" + strings.ReplaceAll(p.cloud(), " ", "_")
+}
+
+func (p *aws) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	for _, t := range tasks {
+		state, err := task.ParseState[*awsTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		if state.Region == "" {
+			continue
+		}
+		lctx := log.WithValues(ctx, "region", state.Region)
+
+		if state.Import != "" {
+			lctx = log.WithValues(lctx, "importTask", state.Import)
+			err = p.deleteSnapshotFromImportTask(lctx, state.Import, state.Region, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete snapshot from task ID %s in region %s: %w", state.Import, state.Region, err)
+			}
+		}
+
+		if state.Snapshot != "" {
+			lctx = log.WithValues(lctx, "snapshot", state.Snapshot)
+			err = p.deleteSnapshot(lctx, state.Snapshot, state.Region, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete snapshot %s in region %s: %w", state.Snapshot, state.Region, err)
+			}
+		}
+
+		if state.Image != "" {
+			lctx = log.WithValues(lctx, "image", state.Image)
+			err = p.deregisterImage(lctx, state.Image, state.Region, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 type aws struct {
 	creds        map[string]awsCredentials
 	srcCfg       awsSourceConfig
@@ -487,6 +547,13 @@ type awsImageTags struct {
 	IncludeGardenLinuxVersion    bool              `mapstructure:"include_gardenlinux_version,omitzero"`
 	IncludeGardenLinuxCommittish bool              `mapstructure:"include_gardenlinux_committish,omitzero"`
 	StaticTags                   map[string]string `mapstructure:"static_tags,omitempty"`
+}
+
+type awsTaskState struct {
+	Region   string `json:"region,omitzero"`
+	Import   string `json:"import,omitzero"`
+	Snapshot string `json:"snapshot,omitzero"`
+	Image    string `json:"image,omitzero"`
 }
 
 type awsPublishingOutput struct {
@@ -616,6 +683,10 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 		return "", fmt.Errorf("cannot import snapshot in bucket %s: missing import task ID", bucket)
 	}
 	importTaskID := *r.ImportTaskId
+	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+		s.Import = importTaskID
+		return s
+	})
 	ctx = log.WithValues(ctx, "taskId", importTaskID)
 
 	var snapshot string
@@ -651,6 +722,11 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 	if snapshot == "" {
 		return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: missing snapshot ID", *r.ImportTaskId)
 	}
+	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+		s.Import = ""
+		s.Snapshot = snapshot
+		return s
+	})
 	log.Debug(ctx, "Snapshot imported")
 
 	return snapshot, nil
@@ -707,12 +783,17 @@ func (p *aws) registerImage(ctx context.Context, snapshot, image string, arch ec
 		return "", errors.New("cannot register image: missing image ID")
 	}
 	imageID := *r.ImageId
+	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+		s.Snapshot = ""
+		s.Image = imageID
+		return s
+	})
 
 	return imageID, nil
 }
 
 func (p *aws) copyImage(ctx context.Context, image, imageID, region, toRegion string) (string, error) {
-	log.Info(ctx, "Copying image", "toRegion", toRegion)
+	log.Info(ctx, "Copying image")
 	r, err := p.tgtEC2Client.CopyImage(ctx, &ec2.CopyImageInput{
 		Name:          &image,
 		SourceImageId: &imageID,
@@ -726,6 +807,10 @@ func (p *aws) copyImage(ctx context.Context, image, imageID, region, toRegion st
 		return "", errors.New("cannot copy image: missing image ID")
 	}
 	toImageID := *r.ImageId
+	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+		s.Image = toImageID
+		return s
+	})
 
 	return toImageID, nil
 }
@@ -809,6 +894,71 @@ func (p *aws) deregisterImage(ctx context.Context, imageID, region string, steam
 	err = errors.Join(errs...)
 	if err != nil {
 		return fmt.Errorf("cannot deregister image: %w", err)
+	}
+
+	return nil
+}
+
+func (p *aws) deleteSnapshotFromImportTask(ctx context.Context, importTaskID, region string, steamroll bool) error {
+	log.Debug(ctx, "Determining snapshot")
+
+	var snapshot string
+	status := "active"
+	for status == "active" {
+		log.Debug(ctx, "Waiting for snapshot")
+		s, err := p.tgtEC2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
+			ImportTaskIds: []string{importTaskID},
+		}, overrideRegion(region))
+		if err != nil {
+			return fmt.Errorf("cannot describe import snapshot tasks: %w", err)
+		}
+		if len(s.ImportSnapshotTasks) == 0 && steamroll {
+			log.Debug(ctx, "Import task not found but the steamroller keeps going")
+			return nil
+		}
+		if len(s.ImportSnapshotTasks) != 1 || s.NextToken != nil {
+			return errors.New("cannot describe import snapshot tasks: missing import snapshot tasks")
+		}
+		importTask := s.ImportSnapshotTasks[0]
+		if importTask.SnapshotTaskDetail == nil || importTask.SnapshotTaskDetail.Status == nil {
+			return errors.New("cannot describe import snapshot tasks: missing import snapshot task detail")
+		}
+		status = *importTask.SnapshotTaskDetail.Status
+		if importTask.SnapshotTaskDetail.SnapshotId != nil {
+			snapshot = *importTask.SnapshotTaskDetail.SnapshotId
+			if snapshot != "" {
+				break
+			}
+		}
+
+		if status == "active" {
+			time.Sleep(time.Second * 7)
+		}
+	}
+	if snapshot == "" {
+		if steamroll {
+			log.Debug(ctx, "Snapshot not determinable but the steamroller keeps going")
+			return nil
+		}
+		return errors.New("cannot describe import snapshot tasks: missing snapshot ID")
+	}
+	ctx = log.WithValues(ctx, "snapshot", snapshot)
+
+	return p.deleteSnapshot(ctx, snapshot, region, steamroll)
+}
+
+func (p *aws) deleteSnapshot(ctx context.Context, snapshot, region string, steamroll bool) error {
+	log.Info(ctx, "Deleting snapshot")
+	_, err := p.tgtEC2Client.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
+		SnapshotId: &snapshot,
+	}, overrideRegion(region))
+	if err != nil {
+		var errr *smithy.GenericAPIError
+		if steamroll && errors.As(err, &errr) && errr.Code == "InvalidSnapshot.NotFound" {
+			log.Debug(ctx, "Snapshot not found but the steamroller keeps going")
+			return nil
+		}
+		return fmt.Errorf("cannot delete snapshot: %w", err)
 	}
 
 	return nil

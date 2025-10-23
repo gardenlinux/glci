@@ -9,6 +9,7 @@ import (
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ocm"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 // Publish publishes a release to all cloud providers specified in the flavors and publishing configurations.
@@ -18,13 +19,43 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
 	log.Debug(ctx, "Loading credentials and configuration")
-	manifestSource, manifestTarget, sources, targets, ocmTarget, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
+	manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
 	if err != nil {
 		return fmt.Errorf("invalid credentials or configuration: %w", err)
 	}
 	defer func() {
-		_ = closeSourcesAndTargets(sources, targets, ocmTarget)
+		_ = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
 	}()
+	ctx = task.WithStatePersistor(ctx, state, id(version, commit))
+
+	err = publish(ctx, flavorsConfig, aliasesConfig, manifestSource, manifestTarget, sources, targets, ocmTarget, state, version, commit,
+		omitComponentDescritpr)
+	perr := task.PersistorError(ctx)
+	if perr != nil {
+		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
+		if err == nil {
+			err = perr
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig AliasesConfig, manifestSource,
+	manifestTarget cloudprovider.ArtifactSource, sources map[string]cloudprovider.ArtifactSource, targets []cloudprovider.PublishingTarget,
+	ocmTarget cloudprovider.OCMTarget, state task.StatePersistor, version, commit string, omitComponentDescritpr bool,
+) error {
+	rollbackHandlers := make([]task.RollbackHandler, 0, len(targets))
+	for _, target := range targets {
+		rollbackHandlers = append(rollbackHandlers, target)
+	}
+	err := task.Rollback(ctx, rollbackHandlers)
+	if err != nil {
+		return fmt.Errorf("cannot roll back: %w", err)
+	}
 
 	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
@@ -126,6 +157,9 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 			log.Info(lctx, "Already published, skipping")
 			continue
 		}
+		lctx = task.WithDomain(lctx, publication.Target.CanRollback())
+		lctx = task.WithBatch(lctx, publication.Cname)
+		lctx = task.WithUndeadMode(lctx, true)
 
 		log.Info(lctx, "Publishing image")
 		var output cloudprovider.PublishingOutput
@@ -149,10 +183,17 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 
 		log.Info(lctx, "Updating manifest")
 		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
+		task.RemoveCompleted(lctx, publication.Cname)
 		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publication.Manifest)
 		if err != nil {
 			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
 		}
+	}
+
+	task.Clear(ctx)
+	perr := task.PersistorError(ctx)
+	if perr != nil {
+		return fmt.Errorf("cannot maintain state: %w", perr)
 	}
 
 	if !omitComponentDescritpr {
@@ -172,6 +213,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 			return fmt.Errorf("invalid component descriptor: %w", err)
 		}
 
+		ctx = log.WithValues(ctx, "ocmRepo", ocmTarget.OCMRepository())
 		log.Info(ctx, "Publishing component descriptor")
 		err = ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
 		if err != nil {
@@ -180,7 +222,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	}
 
 	log.Debug(ctx, "Closing sources and targets")
-	err = closeSourcesAndTargets(sources, targets, ocmTarget)
+	err = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
 	if err != nil {
 		return fmt.Errorf("cannot close sources and targets: %w", err)
 	}

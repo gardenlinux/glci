@@ -23,6 +23,7 @@ import (
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ptr"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 func init() {
@@ -210,26 +211,28 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 	ctx = log.WithValues(ctx, "secureBoot", secureBoot)
 
+	ctx = task.Begin(ctx, "publish/"+image, &gcpTaskState{})
 	var blob, blobURL string
 	blob, blobURL, err = p.uploadBlob(ctx, source, imagePath.S3Key, image)
 	if err != nil {
-		return nil, fmt.Errorf("cannot upload blob for image %s in project %s: %w", image, project, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
 	}
 
 	err = p.insertImage(ctx, blobURL, image, arch, secureBoot, pk, kek, db)
 	if err != nil {
-		return nil, fmt.Errorf("cannot insert image %s from blob %s in project %s: %w", image, blob, project, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot insert image %s from blob %s: %w", image, blob, err))
 	}
 
 	err = p.deleteBlob(ctx, blob, false)
 	if err != nil {
-		return nil, fmt.Errorf("cannot delete blob %s in project %s: %w", blob, project, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot delete blob %s: %w", blob, err))
 	}
 
 	err = p.makePublic(ctx, image)
 	if err != nil {
-		return nil, fmt.Errorf("cannot make image %s public in project %s: %w", image, project, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot make image %s public: %w", image, err))
 	}
+	task.Complete(ctx)
 
 	return &gcpPublishingOutput{
 		Project: project,
@@ -263,6 +266,47 @@ func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	return nil
 }
 
+func (p *gcp) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "gcp"
+}
+
+func (p *gcp) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	for _, t := range tasks {
+		state, err := task.ParseState[*gcpTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		lctx := ctx
+
+		if state.Blob != "" {
+			lctx = log.WithValues(lctx, "blob", state.Blob)
+			err = p.deleteBlob(lctx, state.Blob, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete blob %s: %w", state.Blob, err)
+			}
+		}
+
+		if state.Image != "" {
+			lctx = log.WithValues(lctx, "image", state.Image)
+			err = p.deleteImage(lctx, state.Image, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete image %s: %w", state.Image, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 type gcp struct {
 	creds         map[string]gcpCredentials
 	pubCfg        gcpPublishingConfig
@@ -280,6 +324,11 @@ type gcpPublishingConfig struct {
 	Source string `mapstructure:"source"`
 	Config string `mapstructure:"config"`
 	Bucket string `mapstructure:"bucket"`
+}
+
+type gcpTaskState struct {
+	Blob  string `json:"blob,omitzero"`
+	Image string `json:"image,omitzero"`
 }
 
 type gcpPublishingOutput struct {
@@ -377,6 +426,10 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	if err != nil {
 		return "", "", fmt.Errorf("cannot close object writer: %w", err)
 	}
+	task.Update(ctx, func(s *gcpTaskState) *gcpTaskState {
+		s.Blob = blob
+		return s
+	})
 	log.Debug(ctx, "Blob uploaded")
 
 	err = obj.Close()
@@ -446,6 +499,10 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 	if err != nil {
 		return fmt.Errorf("cannot insert image: %w", err)
 	}
+	task.Update(ctx, func(s *gcpTaskState) *gcpTaskState {
+		s.Image = image
+		return s
+	})
 
 	err = op.Wait(ctx)
 	if err != nil {
@@ -467,6 +524,10 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 		}
 		return fmt.Errorf("cannot delete blob %s: %w", blob, err)
 	}
+	task.Update(ctx, func(s *gcpTaskState) *gcpTaskState {
+		s.Blob = ""
+		return s
+	})
 
 	return nil
 }

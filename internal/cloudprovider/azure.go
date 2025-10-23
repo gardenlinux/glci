@@ -26,6 +26,7 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 func init() {
@@ -322,15 +323,18 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	imageDefinition := p.sku(gallery.Image, cname, false)
 	var imageDefinitionBIOS, imageID, publicID string
 
+	bctx := ctx
 	if bios {
 		imageDefinitionBIOS = p.sku(gallery.Image, cname, true)
 
-		err = p.createImageDefinition(ctx, &gallery, imageDefinitionBIOS, cname, arch, true, false)
+		bctx = task.Begin(ctx, "publish/"+image+"/bios", &azureTaskState{})
+		err = p.createImageDefinition(bctx, &gallery, imageDefinitionBIOS, cname, arch, true, false)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinitionBIOS, image, err)
 		}
 	}
 
+	ctx = task.Begin(ctx, "publish/"+image, &azureTaskState{})
 	err = p.createImageDefinition(ctx, &gallery, imageDefinition, cname, arch, false, secureBoot)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinition, image, err)
@@ -344,20 +348,21 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 
 	outputImages := make([]azurePublishedImage, 0, 2)
 	if bios {
-		imageID, err = p.createImage(ctx, &gallery, blobURL, image, true)
+		imageID, err = p.createImage(bctx, &gallery, blobURL, image, true)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create image: %w", err)
 		}
 
-		err = p.createImageVersion(ctx, &gallery, imageDefinitionBIOS, imageVersion, imageID, regions, false, "", "", "")
+		err = p.createImageVersion(bctx, &gallery, imageDefinitionBIOS, imageVersion, imageID, regions, false, "", "", "")
 		if err != nil {
 			return nil, fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, err)
 		}
 
-		publicID, err = p.getPublicID(ctx, &gallery, imageDefinitionBIOS, imageVersion)
+		publicID, err = p.getPublicID(bctx, &gallery, imageDefinitionBIOS, imageVersion)
 		if err != nil {
 			return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, err)
 		}
+		task.Complete(bctx)
 
 		outputImages = append(outputImages, azurePublishedImage{
 			Cloud: p.cloud(),
@@ -385,6 +390,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	if err != nil {
 		return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, err)
 	}
+	task.Complete(ctx)
 
 	outputImages = append(outputImages, azurePublishedImage{
 		Cloud: p.cloud(),
@@ -457,6 +463,57 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 	return nil
 }
 
+func (p *azure) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "azure/" + strings.ReplaceAll(p.cloud(), " ", "_")
+}
+
+func (p *azure) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
+
+	for _, t := range tasks {
+		state, err := task.ParseState[*azureTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		lctx := ctx
+
+		if state.Blob != "" {
+			lctx = log.WithValues(lctx, "blob", state.Blob)
+			err = p.deleteBlob(lctx, state.Blob, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete blob %s: %w", state.Blob, err)
+			}
+		}
+
+		if state.Image != "" {
+			lctx = log.WithValues(lctx, "image", state.Image)
+			err = p.deleteImage(lctx, gallery.ResourceGroup, state.Image, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete image %s: %w", state.Image, err)
+			}
+		}
+
+		if state.Version.Version != "" {
+			lctx = log.WithValues(lctx, "imageDefinition", state.Version.Definition, "imageVersion", state.Version.Version)
+			err = p.deleteImageVersion(lctx, &gallery, state.Version.Definition, state.Version.Version, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete image version %s for image definition %s: %w", state.Version,
+					state.Version.Definition, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 type azure struct {
 	storageAccountCreds                 map[string]azureStorageAccountCredentials
 	servicePrincipalCreds               map[string]azureServicePrincipalCredentials
@@ -508,6 +565,17 @@ type azurePublishingConfig struct {
 	GalleryConfig          string   `mapstructure:"gallery_config"`
 	Regions                []string `mapstructure:"regions,omitempty"`
 	china                  bool
+}
+
+type azureTaskState struct {
+	Blob    string                `json:"blob,omitzero"`
+	Image   string                `json:"image,omitzero"`
+	Version azureTaskStateVersion `json:"version,omitzero"`
+}
+
+type azureTaskStateVersion struct {
+	Version    string `json:"version,omitzero"`
+	Definition string `json:"definition,omitzero"`
 }
 
 type azurePublishingOutput struct {
@@ -751,6 +819,10 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 	if err != nil {
 		return "", "", fmt.Errorf("cannot create blob: %w", err)
 	}
+	task.Update(ctx, func(s *azureTaskState) *azureTaskState {
+		s.Blob = blob
+		return s
+	})
 	var offset int64
 	for offset < size {
 		block := min(size-offset, 4*1024*1024)
@@ -793,6 +865,10 @@ func (p *azure) createImage(ctx context.Context, gallery *azureGalleryCredential
 	if err != nil {
 		return "", fmt.Errorf("cannot create or update image %s: %w", imageName, err)
 	}
+	task.Update(ctx, func(s *azureTaskState) *azureTaskState {
+		s.Image = imageName
+		return s
+	})
 
 	var r armcompute.ImagesClientCreateOrUpdateResponse
 	r, err = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
@@ -878,6 +954,11 @@ func (p *azure) createImageVersion(ctx context.Context, gallery *azureGalleryCre
 	if err != nil {
 		return fmt.Errorf("cannot create or update image version: %w", err)
 	}
+	task.Update(ctx, func(s *azureTaskState) *azureTaskState {
+		s.Version.Version = imageVersion
+		s.Version.Definition = imageDefinition
+		return s
+	})
 
 	_, err = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 		Frequency: time.Second * 7,
@@ -932,6 +1013,10 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll bool) err
 		}
 		return fmt.Errorf("cannot delete blob: %w", err)
 	}
+	task.Update(ctx, func(s *azureTaskState) *azureTaskState {
+		s.Blob = ""
+		return s
+	})
 
 	return nil
 }
