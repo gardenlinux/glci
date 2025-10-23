@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 // FlavorsConfig specifies what flavors of Garden Linux are to be worked on.
@@ -31,6 +32,7 @@ type PublishingConfig struct {
 	Sources        []cfgSource `mapstructure:"sources"`
 	Targets        []cfgTarget `mapstructure:"targets"`
 	OCM            cfgTarget   `mapstructure:"ocm"`
+	State          cfgState    `mapstructure:"state"`
 }
 
 // Validate ensures that the publishing configuration is valid.
@@ -89,6 +91,15 @@ func (c *PublishingConfig) Validate() error {
 		return fmt.Errorf("invalid OCM target: %w", err)
 	}
 
+	if c.State.Type == "" {
+		return errors.New("missing state")
+	}
+
+	_, err = task.NewStatePersistor(c.State.Type)
+	if err != nil {
+		return fmt.Errorf("invalid state: %w", err)
+	}
+
 	return nil
 }
 
@@ -105,6 +116,12 @@ type cfgSource struct {
 }
 
 type cfgTarget struct {
+	Type string `mapstructure:"type"`
+	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
+	Config map[string]any `mapstructure:"-,remain"`
+}
+
+type cfgState struct {
 	Type string `mapstructure:"type"`
 	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
 	Config map[string]any `mapstructure:"-,remain"`

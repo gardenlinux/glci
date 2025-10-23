@@ -86,8 +86,6 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "repo", p.ociCfg.Repository)
-
 	log.Debug(ctx, "Creating tarball")
 	var tarBuf bytes.Buffer
 	tarball := tar.NewWriter(&tarBuf)

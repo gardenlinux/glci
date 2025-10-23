@@ -20,6 +20,7 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 func init() {
@@ -185,21 +186,24 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 		return nil, errors.New("no available regions")
 	}
 
+	ctx = task.Begin(ctx, "publish/"+image+"/"+region, &aliyunTaskState{
+		Region: region,
+	})
 	var blob string
 	blob, err = p.uploadBlob(ctx, source, imagePath.S3Key, image)
 	if err != nil {
-		return nil, fmt.Errorf("cannot upload blob for image %s: %w", image, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
 	}
 
 	var imageID string
 	imageID, err = p.importImage(ctx, blob, image)
 	if err != nil {
-		return nil, fmt.Errorf("cannot import image %s from blob %s: %w", image, blob, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot import image %s from blob %s: %w", image, blob, err))
 	}
 
 	err = p.deleteBlob(ctx, image+p.ImageSuffix(), false)
 	if err != nil {
-		return nil, fmt.Errorf("cannot delete blob %s: %w", image, err)
+		return nil, task.Fail(ctx, fmt.Errorf("cannot delete blob %s: %w", image, err))
 	}
 
 	images := make(map[string]string, len(regions))
@@ -210,22 +214,26 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 		if toRegion == region {
 			lctx = log.WithValues(lctx, "imageID", localID)
 		} else {
+			lctx = task.Begin(lctx, "publish/"+image+"/"+toRegion, &aliyunTaskState{
+				Region: toRegion,
+			})
 			localID, err = p.copyImage(lctx, image, imageID, region, toRegion)
 			if err != nil {
-				return nil, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, err)
+				return nil, task.Fail(lctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, err))
 			}
 			lctx = log.WithValues(lctx, "imageID", localID)
 
 			err = p.waitForImage(lctx, localID, toRegion)
 			if err != nil {
-				return nil, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, err)
+				return nil, task.Fail(lctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, err))
 			}
 		}
 
 		err = p.makePublic(lctx, localID, toRegion, true, false)
 		if err != nil {
-			return nil, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion, err)
+			return nil, task.Fail(lctx, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion, err))
 		}
+		task.Complete(lctx)
 
 		images[toRegion] = localID
 	}
@@ -273,6 +281,57 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 	return nil
 }
 
+func (p *aliyun) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "aliyun"
+}
+
+func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	for _, t := range tasks {
+		state, err := task.ParseState[*aliyunTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		if state.Region == "" {
+			continue
+		}
+		lctx := log.WithValues(ctx, "region", state.Region)
+
+		if state.Blob != "" {
+			lctx = log.WithValues(lctx, "blob", state.Blob)
+			err = p.deleteBlob(lctx, state.Blob, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete blob %s: %w", state.Blob, err)
+			}
+		}
+
+		if state.Image != "" {
+			lctx = log.WithValues(lctx, "image", state.Image)
+			if state.Public {
+				err = p.makePublic(ctx, state.Image, state.Region, false, true)
+				if err != nil {
+					return fmt.Errorf("cannot make image %s in region %s not public: %w", state.Image, state.Region, err)
+				}
+			}
+
+			err = p.deleteImage(lctx, state.Image, state.Region, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 type aliyun struct {
 	creds           map[string]aliyunCredentials
 	pubCfg          aliyunPublishingConfig
@@ -292,6 +351,13 @@ type aliyunPublishingConfig struct {
 	Config  string   `mapstructure:"config"`
 	Bucket  string   `mapstructure:"bucket"`
 	Regions []string `mapstructure:"regions,omitempty"`
+}
+
+type aliyunTaskState struct {
+	Region string `json:"region,omitzero"`
+	Blob   string `json:"blob,omitzero"`
+	Image  string `json:"image,omitzero"`
+	Public bool   `json:"public,omitzero"`
 }
 
 type aliyunPublishingOutput struct {
@@ -369,6 +435,10 @@ func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, ima
 	if err != nil {
 		return "", fmt.Errorf("cannot put object %s in bucket %s: %w", ossKey, p.pubCfg.Bucket, err)
 	}
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Blob = ossKey
+		return s
+	})
 	log.Debug(ctx, "Blob uploaded")
 
 	err = obj.Close()
@@ -418,6 +488,10 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 		return "", errors.New("cannot import image: missing image ID")
 	}
 	imageID := *r.Body.ImageId
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Image = imageID
+		return s
+	})
 	ctx = log.WithValues(ctx, "imageID", imageID)
 
 	err = p.waitForImage(ctx, imageID, region)
@@ -440,12 +514,16 @@ func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
 	if err != nil {
 		return fmt.Errorf("cannot delete object %s in bucket %s: %w", blob, p.pubCfg.Bucket, err)
 	}
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Blob = ""
+		return s
+	})
 
 	return nil
 }
 
 func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion string) (string, error) {
-	log.Info(ctx, "Copying image", "toRegion", toRegion)
+	log.Info(ctx, "Copying image")
 	c, err := p.ecsClient("")
 	if err != nil {
 		return "", err
@@ -471,6 +549,10 @@ func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion
 		return "", errors.New("cannot copy image: missing image ID")
 	}
 	toImageID := *r.Body.ImageId
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Image = toImageID
+		return s
+	})
 
 	return toImageID, nil
 }
@@ -557,6 +639,10 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 		}
 		return fmt.Errorf("cannot modify share permission: %w", err)
 	}
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Public = public
+		return s
+	})
 
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 // ArtifactSource is a source of artifacts which can retrieve arbitrary objects as well as retrieve and publish manifests.
@@ -40,6 +41,7 @@ type PublishingTarget interface {
 	RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error)
 	Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
 	Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource, steamroll bool) error
+	task.RollbackHandler
 }
 
 // OCMTarget is a target onto which GLCI can publish an OCM component descriptor.

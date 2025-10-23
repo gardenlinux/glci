@@ -100,6 +100,10 @@ publishing:
     type: OCI
     config: gcr-readwrite
     repository: europe-docker.pkg.dev/gardener-project/releases
+  state:
+    type: AWS
+    bucket: glci-state
+    config: gardenlinux
 aliases:
   auditd: [ audit ]
   libc-bin: [ glibc ]

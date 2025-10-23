@@ -18,6 +18,7 @@ import (
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/slc"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 func init() {
@@ -268,19 +269,25 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 		}
 		lctx := log.WithValues(ctx, "region", region)
 
+		lctx = task.Begin(lctx, "publish/"+image+"/"+region, &openstackTaskState{
+			Region: region,
+		})
 		var imageID string
 		imageID, err = p.createImage(lctx, imageClient, src, imagePath.S3Key, image)
 		if err != nil {
-			return nil, fmt.Errorf("cannot create image for region %s: %w", region, err)
+			return nil, task.Fail(lctx, fmt.Errorf("cannot create image for region %s: %w", region, err))
 		}
 		lctx = log.WithValues(lctx, "region", region)
 
 		err = p.waitForImage(lctx, imageID, region)
 		if err != nil {
-			return nil, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, err)
+			return nil, task.Fail(lctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, err))
 		}
+		task.Complete(lctx)
+
 		outImages[region] = imageID
 	}
+	log.Info(ctx, "Images ready", "count", len(outImages))
 
 	outputImages := make([]openstackPublishedImage, 0, len(outImages))
 	for region, imageID := range outImages {
@@ -347,6 +354,42 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 	return nil
 }
 
+func (p *openstack) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "openstack/" + strings.ReplaceAll(string(p.pubCfg.Hypervisor), " ", "_")
+}
+
+func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	for _, t := range tasks {
+		state, err := task.ParseState[*openstackTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		if state.Region == "" {
+			continue
+		}
+		lctx := log.WithValues(ctx, "region", state.Region)
+
+		if state.Image != "" {
+			lctx = log.WithValues(lctx, "image", state.Image)
+			err = p.deleteImage(lctx, state.Image, state.Region, true)
+			if err != nil {
+				return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 type openstack struct {
 	creds         map[string]openstackCredentials
 	pubCfg        openstackPublishingConfig
@@ -385,6 +428,11 @@ const (
 	openstackHypervisorBareMetal openstackHypervisor = "Bare Metal"
 	openstackHypervisorVMware    openstackHypervisor = "VMware"
 )
+
+type openstackTaskState struct {
+	Region string `json:"region,omitzero"`
+	Image  string `json:"image,omitzero"`
+}
 
 type openstackPublishingOutput struct {
 	Images []openstackPublishedImage `yaml:"published_openstack_images,omitempty"`
@@ -496,6 +544,10 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 	if err != nil {
 		return "", fmt.Errorf("cannot create image: %w", err)
 	}
+	task.Update(ctx, func(s *openstackTaskState) *openstackTaskState {
+		s.Image = img.ID
+		return s
+	})
 
 	log.Debug(ctx, "Importing image")
 	err = imageimport.Create(ctx, imageClient, img.ID, imageimport.CreateOpts{

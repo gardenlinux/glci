@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
+	"github.com/gardenlinux/glci/internal/task"
 )
 
 // WithVersion stores the GLCI version string into the context.
@@ -21,21 +22,21 @@ func WithStart(ctx context.Context, start time.Time) context.Context {
 
 func loadCredentialsAndConfig(ctx context.Context, creds Credentials, publishingConfig PublishingConfig) (cloudprovider.ArtifactSource,
 	cloudprovider.ArtifactSource, map[string]cloudprovider.ArtifactSource, []cloudprovider.PublishingTarget, cloudprovider.OCMTarget,
-	error,
+	task.StatePersistor, error,
 ) {
 	sources := make(map[string]cloudprovider.ArtifactSource, len(publishingConfig.Sources))
 	for _, s := range publishingConfig.Sources {
 		source, err := cloudprovider.NewArtifactSource(s.Type)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("invalid artifact source %s: %w", s.ID, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("invalid artifact source %s: %w", s.ID, err)
 		}
 		err = source.SetCredentials(creds)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", s.ID, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", s.ID, err)
 		}
 		err = source.SetSourceConfig(ctx, s.Config)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set source configuration for %s: %w", s.ID, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set source configuration for %s: %w", s.ID, err)
 		}
 		sources[s.ID] = source
 	}
@@ -47,40 +48,62 @@ func loadCredentialsAndConfig(ctx context.Context, creds Credentials, publishing
 	}
 
 	targets := make([]cloudprovider.PublishingTarget, 0, len(publishingConfig.Targets))
+	rollbackHandlers := make(map[string]struct{}, len(targets))
 	for _, t := range publishingConfig.Targets {
 		target, err := cloudprovider.NewPublishingTarget(t.Type)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("invalid publishing target %s: %w", t.Type, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("invalid publishing target %s: %w", t.Type, err)
 		}
 		err = target.SetCredentials(creds)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", t.Type, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", t.Type, err)
 		}
 		err = target.SetTargetConfig(ctx, t.Config, sources)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("cannot set source configuration for %s: %w", t.Type, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set source configuration for %s: %w", t.Type, err)
 		}
+		domain := target.CanRollback()
+		_, ok := rollbackHandlers[domain]
+		if ok {
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("duplicate rollback handler %s for domain %s", t.Type, domain)
+		}
+		rollbackHandlers[domain] = struct{}{}
+
 		targets = append(targets, target)
 	}
 
 	ocmTarget, err := cloudprovider.NewOCMTarget(publishingConfig.OCM.Type)
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("invalid OCM target %s: %w", publishingConfig.OCM.Type, err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("invalid OCM target %s: %w", publishingConfig.OCM.Type, err)
 	}
 	err = ocmTarget.SetCredentials(creds)
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", publishingConfig.OCM.Type, err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", publishingConfig.OCM.Type, err)
 	}
 	err = ocmTarget.SetOCMConfig(ctx, publishingConfig.OCM.Config)
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("cannot set target configuration for %s: %w", publishingConfig.OCM.Type, err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set target configuration for %s: %w", publishingConfig.OCM.Type, err)
 	}
 
-	return manifestSource, manifestTarget, sources, targets, ocmTarget, nil
+	var statePersistor task.StatePersistor
+	statePersistor, err = task.NewStatePersistor(publishingConfig.State.Type)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("invalid state persistor %s: %w", publishingConfig.State.Type, err)
+	}
+	err = statePersistor.SetCredentials(creds)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set credentials for %s: %w", publishingConfig.State.Type, err)
+	}
+	err = statePersistor.SetStateConfig(ctx, publishingConfig.State.Config)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set target configuration for %s: %w", publishingConfig.State.Type, err)
+	}
+
+	return manifestSource, manifestTarget, sources, targets, ocmTarget, statePersistor, nil
 }
 
-func closeSourcesAndTargets(sources map[string]cloudprovider.ArtifactSource, targets []cloudprovider.PublishingTarget,
-	ocmTarget cloudprovider.OCMTarget,
+func closeSourcesAndTargetsAndPersistors(sources map[string]cloudprovider.ArtifactSource, targets []cloudprovider.PublishingTarget,
+	ocmTarget cloudprovider.OCMTarget, state task.StatePersistor,
 ) error {
 	errs := make([]error, 0, len(sources)+len(targets)+1)
 
@@ -103,6 +126,11 @@ func closeSourcesAndTargets(sources map[string]cloudprovider.ArtifactSource, tar
 		errs = append(errs, fmt.Errorf("cannot close OCM target %s: %w", ocmTarget.Type(), err))
 	}
 
+	err = state.Close()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("cannot close state persistor %s: %w", state.Type(), err))
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -122,4 +150,8 @@ func execTime(ctx context.Context) time.Duration {
 		return time.Duration(0)
 	}
 	return time.Since(start)
+}
+
+func id(version, commit string) string {
+	return fmt.Sprintf("%s-%.8s", version, commit)
 }
