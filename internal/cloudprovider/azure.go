@@ -527,7 +527,7 @@ func (p *azure) isConfigured() bool {
 
 func (p *azure) cloud() string {
 	if p.pubCfg.china {
-		return "China"
+		return "china"
 	}
 
 	return "public"
