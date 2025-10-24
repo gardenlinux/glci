@@ -37,7 +37,9 @@ func main() {
 		syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 	defer stop()
 
-	err = mainCmd.ExecuteContext(glci.WithVersion(glci.WithStart(ctx, cmd.StartTime()), version))
+	ctx = glci.WithVersion(ctx, version)
+	ctx = glci.WithStart(ctx, cmd.StartTime())
+	err = mainCmd.ExecuteContext(ctx)
 	if err != nil {
 		log.Error(ctx, err)
 		exitCode = 1

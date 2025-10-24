@@ -41,9 +41,14 @@ func Debug(ctx context.Context, msg string, keysAndValues ...any) {
 	logr.FromContextOrDiscard(ctx).V(1).Info(msg, keysAndValues...)
 }
 
-// Error logs an error message.
+// Error logs an error.
 func Error(ctx context.Context, err error, keysAndValues ...any) {
 	logr.FromContextOrDiscard(ctx).Error(err, "", keysAndValues...)
+}
+
+// ErrorMsg logs a message with the severity of an error.
+func ErrorMsg(ctx context.Context, msg string, keysAndValues ...any) {
+	logr.FromContextOrDiscard(ctx).Error(nil, msg, keysAndValues...)
 }
 
 // WithValues appends arbitrary key-value pairs to an existing logger and returns a new context.
