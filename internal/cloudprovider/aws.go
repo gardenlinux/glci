@@ -506,7 +506,7 @@ func (p *aws) isConfigured() bool {
 
 func (p *aws) cloud() string {
 	if p.pubCfg.china {
-		return "China"
+		return "china"
 	}
 
 	return "public"
