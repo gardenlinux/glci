@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
-	"cuelang.org/go/pkg/strings"
 	"github.com/opencontainers/go-digest"
 	specv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
