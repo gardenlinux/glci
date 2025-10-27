@@ -25,8 +25,8 @@ cloud.google.com/go/trace v1.11.6 h1:2O2zjPzqPYAHrn3OKl029qlqG6W8ZdYaOWRyr8NgMT4
 cloud.google.com/go/trace v1.11.6/go.mod h1:GA855OeDEBiBMzcckLPE2kDunIpC72N+Pq8WFieFjnI=
 cuelabs.dev/go/oci/ociregistry v0.0.0-20250715075730-49cab49c8e9d h1:lX0EawyoAu4kgMJJfy7MmNkIHioBcdBGFRSKDZ+CWo0=
 cuelabs.dev/go/oci/ociregistry v0.0.0-20250715075730-49cab49c8e9d/go.mod h1:4WWeZNxUO1vRoZWAHIG0KZOd6dA25ypyWuwD3ti0Tdc=
-cuelang.org/go v0.14.1 h1:kxFAHr7bvrCikbtVps2chPIARazVdnRmlz65dAzKyWg=
-cuelang.org/go v0.14.1/go.mod h1:aSP9UZUM5m2izHAHUvqtq0wTlWn5oLjuv2iBMQZBLLs=
+cuelang.org/go v0.14.2 h1:LDlMXbfp0/AHjNbmuDYSGBbHDekaXei/RhAOCihpSgg=
+cuelang.org/go v0.14.2/go.mod h1:53oOiowh5oAlniD+ynbHPaHxHFO5qc3QkzlUiB/9kps=
 github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1 h1:5YTBM8QDVIBN3sxBil89WfdAAqDZbyJTgh688DSxX5w=
 github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1/go.mod h1:YD5h/ldMsG0XiIw7PdyNhLxaM317eFh5yNLccNfGdyw=
 github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.11.0 h1:MhRfI58HblXzCtWEZCO0feHs8LweePB3s90r7WaR1KU=
