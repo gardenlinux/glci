@@ -23,7 +23,7 @@ func main() {
 		c.Use = "glci"
 		c.Short = "GLCI - Garden Linux continuous integration"
 		c.Version = version
-		c.PersistentFlags().Bool("dev", false, "run in development mode")
+		c.PersistentFlags().Bool("debug", false, "log at debug level")
 		c.PersistentFlags().String("config-file", "", "path to configuration file")
 		c.AddCommand(publishCmd(), removeCmd())
 	})
@@ -33,7 +33,7 @@ func main() {
 		return
 	}
 
-	ctx, stop := signal.NotifyContext(log.Setup(mainCmd.Context(), cfg.GetBool("dev"), false, os.Stderr), syscall.SIGTERM,
+	ctx, stop := signal.NotifyContext(log.Setup(mainCmd.Context(), cfg.GetBool("debug"), false, os.Stderr), syscall.SIGTERM,
 		syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 	defer stop()
 

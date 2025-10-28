@@ -10,7 +10,7 @@ import (
 )
 
 // Setup attaches a new logger to an existing context. The new logger logs to the given writer.
-func Setup(ctx context.Context, dev, silent bool, writer io.Writer) context.Context {
+func Setup(ctx context.Context, debug, silent bool, writer io.Writer) context.Context {
 	var zeroLog zerolog.Logger
 
 	if silent {
@@ -18,7 +18,7 @@ func Setup(ctx context.Context, dev, silent bool, writer io.Writer) context.Cont
 	}
 
 	level := zerolog.InfoLevel
-	if dev {
+	if debug {
 		level = zerolog.DebugLevel
 	}
 	cw := zerolog.ConsoleWriter{
