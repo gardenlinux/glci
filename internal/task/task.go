@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/go-viper/mapstructure/v2"
 
@@ -83,11 +84,16 @@ func WithDomain(ctx context.Context, domain string) context.Context {
 		return ctx
 	}
 
-	if tset.domains[domain].Tasks == nil {
-		tset.domains[domain] = taskDomain{
-			Tasks: make(map[string]Task),
+	func() {
+		tset.mtx.Lock()
+		defer tset.mtx.Unlock()
+
+		if tset.domains[domain].Tasks == nil {
+			tset.domains[domain] = taskDomain{
+				Tasks: make(map[string]Task),
+			}
 		}
-	}
+	}()
 
 	return context.WithValue(ctx, ctxkDomain{}, domain)
 }
@@ -111,12 +117,17 @@ func Begin[STATE any](ctx context.Context, id string, state STATE) context.Conte
 
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
 	batch, _ := ctx.Value(ctxkBatch{}).(string)
-	tset.domains[domain].Tasks[id] = Task{
-		State: state,
-		batch: batch,
-	}
+	func() {
+		tset.mtx.Lock()
+		defer tset.mtx.Unlock()
 
-	saveState(ctx, tset)
+		tset.domains[domain].Tasks[id] = Task{
+			State: state,
+			batch: batch,
+		}
+
+		saveState(ctx, tset)
+	}()
 
 	return context.WithValue(ctx, ctxkTask{}, id)
 }
@@ -134,6 +145,10 @@ func Update[STATE any](ctx context.Context, update func(STATE) STATE) {
 	}
 
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
+
+	tset.mtx.Lock()
+	defer tset.mtx.Unlock()
+
 	task, ok := tset.domains[domain].Tasks[id]
 	if !ok {
 		return
@@ -166,6 +181,9 @@ func Complete(ctx context.Context) {
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
 	undead, _ := ctx.Value(ctxkUndead{}).(bool)
 
+	tset.mtx.Lock()
+	defer tset.mtx.Unlock()
+
 	if undead {
 		task, ok := tset.domains[domain].Tasks[id]
 		if !ok {
@@ -196,6 +214,7 @@ func Fail(ctx context.Context, err error) error {
 	}
 
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
+
 	task, ok := tset.domains[domain].Tasks[id]
 	if !ok {
 		return err
@@ -216,6 +235,10 @@ func RemoveCompleted(ctx context.Context, batch string) {
 	}
 
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
+
+	tset.mtx.Lock()
+	defer tset.mtx.Unlock()
+
 	for id, task := range tset.domains[domain].Tasks {
 		if task.batch == batch && task.completed {
 			delete(tset.domains[domain].Tasks, id)
@@ -235,6 +258,9 @@ func Clear(ctx context.Context) {
 		return
 	}
 
+	tset.mtx.Lock()
+	defer tset.mtx.Unlock()
+
 	tset.domains = nil
 	log.Debug(ctx, "Clearing state", "persistor", tset.persistor.Type())
 	err := tset.persistor.Clear()
@@ -249,6 +275,9 @@ func PersistorError(ctx context.Context) error {
 	if tset == nil {
 		return errors.New("missing state")
 	}
+
+	tset.mtx.Lock()
+	defer tset.mtx.Unlock()
 
 	return tset.persistorErr
 }
@@ -269,6 +298,9 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 		}
 		domainHandlers[domain] = handler
 	}
+
+	tset.mtx.Lock()
+	defer tset.mtx.Unlock()
 
 	if tset.persistorErr != nil {
 		return fmt.Errorf("invalid state due to persistor error: %w", tset.persistorErr)
@@ -292,8 +324,8 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 		}
 
 		delete(tset.domains, domain)
-		saveState(lctx, tset)
 	}
+	saveState(ctx, tset)
 
 	if cnt > 0 {
 		log.Info(ctx, "Rollback completed successfully", "count", cnt)
@@ -335,6 +367,7 @@ type (
 
 type taskSet struct {
 	domains      map[string]taskDomain
+	mtx          sync.Mutex
 	persistor    StatePersistor
 	persistorErr error
 }
