@@ -333,11 +333,11 @@ func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error
 }
 
 type aliyun struct {
-	creds           map[string]aliyunCredentials
-	pubCfg          aliyunPublishingConfig
-	ossClient       *oss.Client
-	ecsClients      map[string]*client.Client
-	ecsClientsMutex sync.RWMutex
+	creds         map[string]aliyunCredentials
+	pubCfg        aliyunPublishingConfig
+	ossClient     *oss.Client
+	ecsClients    map[string]*client.Client
+	ecsClientsMtx sync.RWMutex
 }
 
 type aliyunCredentials struct {
@@ -656,13 +656,13 @@ func (p *aliyun) ecsClient(region string) (*client.Client, error) {
 	var c *client.Client
 	var ok bool
 	func() {
-		p.ecsClientsMutex.RLock()
-		defer p.ecsClientsMutex.RUnlock()
+		p.ecsClientsMtx.RLock()
+		defer p.ecsClientsMtx.RUnlock()
 		c, ok = p.ecsClients[region]
 	}()
 	if !ok {
-		p.ecsClientsMutex.Lock()
-		defer p.ecsClientsMutex.Unlock()
+		p.ecsClientsMtx.Lock()
+		defer p.ecsClientsMtx.Unlock()
 		c, ok = p.ecsClients[region]
 		if ok {
 			return c, nil

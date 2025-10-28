@@ -72,7 +72,7 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 	return rootCmd, cfg, nil
 }
 
-// RunFunc adds a run function to a Cobra command in a way that it support Viper.
+// RunFunc adds a run function to a Cobra command in a way that it supports integration with Viper.
 func RunFunc(run func(context.Context, *viper.Viper) error) func(*cobra.Command, []string) error {
 	return func(c *cobra.Command, _ []string) error {
 		c.SilenceErrors = true
