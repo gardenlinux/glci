@@ -24,6 +24,7 @@ func main() {
 		c.Short = "GLCI - Garden Linux continuous integration"
 		c.Version = version
 		c.PersistentFlags().Bool("debug", false, "log at debug level")
+		c.PersistentFlags().Bool("glacial", false, "disable all parallelism")
 		c.PersistentFlags().String("config-file", "", "path to configuration file")
 		c.AddCommand(publishCmd(), removeCmd())
 	})
