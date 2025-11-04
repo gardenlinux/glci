@@ -435,8 +435,8 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 		var imageDefinition, image, imageVersion string
 		imageDefinition, image, imageVersion, err = p.getMetadata(lctx, &gallery, img.ID)
 		if err != nil {
-			var errr *azcore.ResponseError
-			if steamroll && errors.As(err, &errr) && errr.StatusCode == http.StatusNotFound {
+			var terr *azcore.ResponseError
+			if steamroll && errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
 				log.Debug(ctx, "Image not found but the steamroller keeps going")
 				continue
 			}
@@ -1006,8 +1006,8 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll bool) err
 		DeleteSnapshots: ptr.P(azblob.DeleteSnapshotsOptionTypeInclude),
 	})
 	if err != nil {
-		var errr *azcore.ResponseError
-		if steamroll && errors.As(err, &errr) && errr.StatusCode == http.StatusNotFound {
+		var terr *azcore.ResponseError
+		if steamroll && errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}

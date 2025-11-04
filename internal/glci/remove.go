@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
-	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -46,8 +47,18 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
+	fetchManifests := parallel.NewActivity(ctx, func(_ context.Context, publication *cloudprovider.Publication) error {
+		if publication == nil {
+			return nil
+		}
+
+		publications = append(publications, *publication)
+		pubMap[publication.Cname] = append(pubMap[publication.Cname], len(publications)-1)
+
+		return nil
+	})
+	expandCommit := sync.Once{}
 	for _, flavor := range flavorsConfig.Flavors {
-		flavorPubs := pubMap[flavor.Cname]
 		found := false
 
 		for _, target := range targets {
@@ -55,41 +66,50 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 				continue
 			}
 			found = true
-			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
-			lctx := log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
+			origCommit := commit
 
-			log.Info(lctx, "Retrieving manifest")
-			var manifest *gl.Manifest
-			manifest, err = cloudprovider.GetManifest(lctx, manifestTarget, manifestKey)
-			if err != nil {
-				if errors.As(err, &cloudprovider.KeyNotFoundError{}) && manifestTarget != manifestSource {
-					log.Debug(lctx, "Manifest not found, skipping")
-					continue
+			fetchManifests.Go(func(ctx context.Context) (*cloudprovider.Publication, error) {
+				manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, origCommit)
+				ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
+
+				log.Info(ctx, "Retrieving manifest")
+				manifest, er := cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
+				if er != nil {
+					if errors.As(er, &cloudprovider.KeyNotFoundError{}) && manifestTarget != manifestSource {
+						log.Debug(ctx, "Manifest not found, skipping")
+						return nil, nil
+					}
+					return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, er)
 				}
-				return fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, err)
-			}
-			if manifest.Version != version {
-				return fmt.Errorf("manifest for %s has incorrect version %s", flavor.Cname, manifest.Version)
-			}
-			if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
-				return fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
-			}
-			commit = manifest.BuildCommittish
+				if manifest.Version != version {
+					return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavor.Cname, manifest.Version)
+				}
+				if manifest.BuildCommittish != origCommit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != origCommit {
+					return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
+				}
+				expandCommit.Do(func() {
+					commit = manifest.BuildCommittish
+				})
 
-			if !target.CanPublish(manifest) {
-				continue
-			}
+				if !target.CanPublish(manifest) {
+					return nil, nil
+				}
 
-			publications = append(publications, cloudprovider.Publication{
-				Cname:    flavor.Cname,
-				Manifest: manifest,
-				Target:   target,
+				return &cloudprovider.Publication{
+					Cname:    flavor.Cname,
+					Manifest: manifest,
+					Target:   target,
+				}, nil
 			})
-			pubMap[flavor.Cname] = append(flavorPubs, len(publications)-1)
 		}
+
 		if !found {
 			return fmt.Errorf("no publishing target for %s", flavor.Cname)
 		}
+	}
+	err = fetchManifests.Wait()
+	if err != nil {
+		return fmt.Errorf("cannot fetch manifests: %w", err)
 	}
 
 	if len(publications) > 0 {
