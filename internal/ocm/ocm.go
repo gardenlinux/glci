@@ -13,6 +13,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 // ComponentDescriptor is an OCM data structure that Gardener consumes.
@@ -72,12 +73,35 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		},
 	}
 
-	for _, publication := range publications {
-		packages, err := getPackages(ctx, source, publication.Manifest)
-		if err != nil {
-			return nil, fmt.Errorf("cannot list packages for %s: %w", publication.Cname, err)
-		}
+	packages := make([][]nameVersion, len(publications))
+	type iPackages struct {
+		i        int
+		packages []nameVersion
+	}
+	fetchPackages := parallel.NewActivity(ctx, func(_ context.Context, ip iPackages) error {
+		packages[ip.i] = ip.packages
 
+		return nil
+	})
+	for i, publication := range publications {
+		fetchPackages.Go(func(ctx context.Context) (iPackages, error) {
+			pkgs, err := getPackages(ctx, source, publication.Manifest)
+			if err != nil {
+				return iPackages{}, fmt.Errorf("cannot list packages for %s: %w", publication.Cname, err)
+			}
+
+			return iPackages{
+				i:        i,
+				packages: pkgs,
+			}, nil
+		})
+	}
+	err := fetchPackages.Wait()
+	if err != nil {
+		return nil, fmt.Errorf("cannot fetch packages: %w", err)
+	}
+
+	for i, publication := range publications {
 		var imagePath gl.S3ReleaseFile
 		imagePath, err = publication.Manifest.PathBySuffix(publication.Target.ImageSuffix())
 		if err != nil {
@@ -105,7 +129,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			})
 		}
 
-		packageVersions := getPackageVersions(packages, aliases)
+		packageVersions := getPackageVersions(packages[i], aliases)
 		if len(packageVersions) > 0 {
 			labels = append(labels, componentDescriptorlabel{
 				Name:  "cloud.cnudie/dso/scanning-hints/package-versions",
@@ -147,7 +171,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 					Value: map[string]any{
 						"modifiers":      publication.Manifest.Modifiers,
 						"buildTimestamp": publication.Manifest.BuildTimestamp,
-						"debianPackages": getPackageList(packages),
+						"debianPackages": getPackageList(packages[i]),
 					},
 				},
 				{
