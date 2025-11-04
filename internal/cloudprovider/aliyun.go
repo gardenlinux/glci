@@ -626,13 +626,13 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 		RegionId: &region,
 	})
 	if err != nil {
-		var errr *tea.SDKError
-		if steamroll && errors.As(err, &errr) {
-			if errr.StatusCode != nil && *errr.StatusCode == http.StatusNotFound {
+		var terr *tea.SDKError
+		if steamroll && errors.As(err, &terr) {
+			if terr.StatusCode != nil && *terr.StatusCode == http.StatusNotFound {
 				log.Debug(ctx, "Image not found but the steamroller keeps going")
 				return nil
 			}
-			if errr.Code != nil && *errr.Code == "Image.NotPublic" {
+			if terr.Code != nil && *terr.Code == "Image.NotPublic" {
 				log.Debug(ctx, "Image not public but the steamroller keeps going")
 				return nil
 			}

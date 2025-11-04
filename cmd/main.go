@@ -11,6 +11,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cmd"
 	"github.com/gardenlinux/glci/internal/glci"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 func main() {
@@ -37,6 +38,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(log.Setup(mainCmd.Context(), cfg.GetBool("debug"), false, os.Stderr), syscall.SIGTERM,
 		syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 	defer stop()
+
+	if cfg.GetBool("glacial") {
+		ctx = parallel.WithInlineMode(ctx, true)
+	}
 
 	ctx = glci.WithVersion(ctx, version)
 	ctx = glci.WithStart(ctx, cmd.StartTime())

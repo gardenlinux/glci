@@ -96,6 +96,7 @@ publishing:
     type: AWS
     bucket: glci-state-test
     config: gardenlinux-integration-test
+    file: state.json
 aliases:
   auditd: [ audit ]
   libc-bin: [ glibc ]
@@ -105,4 +106,4 @@ aliases:
   python3-markupsafe: [ MarkupSafe ]
 omit-component-descriptor: true
 steamroll: true
-glacial: true
+glacial: false

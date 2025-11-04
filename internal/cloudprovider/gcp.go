@@ -517,8 +517,8 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 	log.Info(ctx, "Deleting blob")
 	err := p.storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Delete(ctx)
 	if err != nil {
-		var errr *googleapi.Error
-		if steamroll && errors.As(err, &errr) && errr.Code == http.StatusNotFound {
+		var terr *googleapi.Error
+		if steamroll && errors.As(err, &terr) && terr.Code == http.StatusNotFound {
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}
@@ -570,8 +570,8 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 		Project: project,
 	})
 	if err != nil {
-		var errr *googleapi.Error
-		if steamroll && errors.As(err, &errr) && errr.Code == http.StatusNotFound {
+		var terr *googleapi.Error
+		if steamroll && errors.As(err, &terr) && terr.Code == http.StatusNotFound {
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}

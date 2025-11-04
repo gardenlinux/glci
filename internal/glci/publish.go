@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ocm"
+	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -59,8 +61,19 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 
 	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
-	cdPublications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
+	fetchManifests := parallel.NewActivity(ctx, func(_ context.Context, publication *cloudprovider.Publication) error {
+		if publication == nil {
+			return nil
+		}
+
+		publications = append(publications, *publication)
+		pubMap[publication.Cname] = append(pubMap[publication.Cname], len(publications)-1)
+
+		return nil
+	})
+
+	expandCommit := sync.Once{}
 	for _, flavor := range flavorsConfig.Flavors {
 		found := false
 
@@ -69,61 +82,71 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 				continue
 			}
 			found = true
-			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
-			lctx := log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
+			origCommit := commit
 
-			log.Info(lctx, "Retrieving manifest")
-			var manifest *gl.Manifest
-			manifest, err = cloudprovider.GetManifest(lctx, manifestSource, manifestKey)
-			if err != nil {
-				return fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, err)
-			}
-			if manifest.Version != version {
-				return fmt.Errorf("manifest for %s has incorrect version %s", flavor.Cname, manifest.Version)
-			}
-			if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
-				return fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
-			}
-			commit = manifest.BuildCommittish
+			fetchManifests.Go(func(ctx context.Context) (*cloudprovider.Publication, error) {
+				manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, origCommit)
+				ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
-			if !target.CanPublish(manifest) {
-				continue
-			}
-
-			log.Debug(lctx, "Retrieving target manifest")
-			var targetManifest *gl.Manifest
-			targetManifest, err = cloudprovider.GetManifest(lctx, manifestTarget, manifestKey)
-			if err != nil && !errors.As(err, &cloudprovider.KeyNotFoundError{}) {
-				return fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, err)
-			}
-			if targetManifest != nil {
-				if targetManifest.Version != version {
-					return fmt.Errorf("target manifest for %s has incorrect version %s", flavor.Cname, targetManifest.Version)
+				log.Info(ctx, "Retrieving manifest")
+				manifest, er := cloudprovider.GetManifest(ctx, manifestSource, manifestKey)
+				if er != nil {
+					return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, er)
 				}
-				if targetManifest.BuildCommittish != commit {
-					return fmt.Errorf("target manifest for %s has incorrect commit %s", flavor.Cname, targetManifest.BuildCommittish)
+				if manifest.Version != version {
+					return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavor.Cname, manifest.Version)
+				}
+				if manifest.BuildCommittish != origCommit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != origCommit {
+					return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
+				}
+				expandCommit.Do(func() {
+					commit = manifest.BuildCommittish
+				})
+
+				if !target.CanPublish(manifest) {
+					return nil, nil
 				}
 
-				if !target.CanPublish(targetManifest) {
-					return errors.New("target manifest does not correspond to source manifest")
+				log.Debug(ctx, "Retrieving target manifest")
+				var targetManifest *gl.Manifest
+				targetManifest, er = cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
+				if er != nil && !errors.As(er, &cloudprovider.KeyNotFoundError{}) {
+					return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, er)
+				}
+				if targetManifest != nil {
+					if targetManifest.Version != version {
+						return nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavor.Cname, targetManifest.Version)
+					}
+					if targetManifest.BuildCommittish != commit {
+						return nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavor.Cname,
+							targetManifest.BuildCommittish)
+					}
+
+					if !target.CanPublish(targetManifest) {
+						return nil, errors.New("target manifest does not correspond to source manifest")
+					}
+
+					manifest = targetManifest
 				}
 
-				manifest = targetManifest
-			}
-
-			publication := cloudprovider.Publication{
-				Cname:    flavor.Cname,
-				Manifest: manifest,
-				Target:   target,
-			}
-			publications = append(publications, publication)
-			pubMap[flavor.Cname] = append(pubMap[flavor.Cname], len(publications)-1)
+				return &cloudprovider.Publication{
+					Cname:    flavor.Cname,
+					Manifest: manifest,
+					Target:   target,
+				}, nil
+			})
 		}
 
 		if !found {
 			return fmt.Errorf("no publishing target for %s", flavor.Cname)
 		}
 	}
+	err = fetchManifests.Wait()
+	if err != nil {
+		return fmt.Errorf("cannot fetch manifests: %w", err)
+	}
+
+	cdPublications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
 	for _, j := range pubMap {
 		cdPublications = append(cdPublications, publications[j[0]])
 	}

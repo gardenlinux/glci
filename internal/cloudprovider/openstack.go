@@ -588,8 +588,8 @@ func (p *openstack) deleteImage(ctx context.Context, id, region string, steamrol
 	log.Info(ctx, "Deleting image")
 	err := images.Delete(ctx, p.imagesClients[region], id).ExtractErr()
 	if err != nil {
-		var errr gophercloud.ErrUnexpectedResponseCode
-		if steamroll && errors.As(err, &errr) && errr.Actual == http.StatusNotFound {
+		var terr gophercloud.ErrUnexpectedResponseCode
+		if steamroll && errors.As(err, &terr) && terr.Actual == http.StatusNotFound {
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}
