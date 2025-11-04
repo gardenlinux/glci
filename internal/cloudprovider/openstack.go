@@ -17,6 +17,7 @@ import (
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -77,32 +78,52 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 	}
 
 	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(creds.Projects))
+	type regionClient struct {
+		region string
+		client *gophercloud.ServiceClient
+	}
+	initClients := parallel.NewActivity(ctx, func(_ context.Context, rc regionClient) error {
+		p.imagesClients[rc.region] = rc.client
+
+		return nil
+	})
 	for _, proj := range creds.Projects {
 		if len(p.pubCfg.Regions) > 0 && !slices.Contains(p.pubCfg.Regions, proj.Region) {
 			continue
 		}
 
-		var providerClient *gophercloud.ProviderClient
-		providerClient, err = openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
-			IdentityEndpoint: proj.AuthURL,
-			Username:         creds.Credentials.Username,
-			Password:         creds.Credentials.Password,
-			DomainName:       proj.Domain,
-			Scope: &gophercloud.AuthScope{
-				ProjectName: proj.Project,
-				DomainName:  proj.Domain,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("cannot create provider client for region %s: %w", proj.Region, err)
-		}
+		initClients.Go(func(ctx context.Context) (regionClient, error) {
+			providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
+				IdentityEndpoint: proj.AuthURL,
+				Username:         creds.Credentials.Username,
+				Password:         creds.Credentials.Password,
+				DomainName:       proj.Domain,
+				Scope: &gophercloud.AuthScope{
+					ProjectName: proj.Project,
+					DomainName:  proj.Domain,
+				},
+			})
+			if er != nil {
+				return regionClient{}, fmt.Errorf("cannot create provider client for region %s: %w", proj.Region, er)
+			}
 
-		p.imagesClients[proj.Region], err = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
-			Region: proj.Region,
+			var client *gophercloud.ServiceClient
+			client, er = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
+				Region: proj.Region,
+			})
+			if er != nil {
+				return regionClient{}, fmt.Errorf("cannot create image client for region %s: %w", proj.Region, er)
+			}
+
+			return regionClient{
+				region: proj.Region,
+				client: client,
+			}, nil
 		})
-		if err != nil {
-			return fmt.Errorf("cannot create image client for region %s: %w", proj.Region, err)
-		}
+	}
+	err = initClients.Wait()
+	if err != nil {
+		return fmt.Errorf("cannot initiaalize clients: %w", err)
 	}
 	if len(p.imagesClients) == 0 {
 		return errors.New("no available regions")
