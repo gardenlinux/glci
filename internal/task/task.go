@@ -10,6 +10,7 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 // StatePersistor is anything that can load and save task state.
@@ -307,24 +308,38 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 	}
 
 	cnt := 0
+	rollbackTasks := parallel.NewActivity(ctx, func(_ context.Context, domain string) error {
+		cnt += len(tset.domains[domain].Tasks)
+		delete(tset.domains, domain)
+
+		return nil
+	})
 	for domain, tasks := range tset.domains {
 		handler, ok := domainHandlers[domain]
 		if !ok {
 			return fmt.Errorf("invalid task domain %s", domain)
 		}
-		lctx := log.WithValues(ctx, "domain", domain)
 
-		if len(tasks.Tasks) > 0 {
-			cnt += len(tasks.Tasks)
-			log.Info(lctx, "Rolling back incomplete tasks", "tasks", len(tasks.Tasks))
-			err := handler.Rollback(lctx, tasks.Tasks)
-			if err != nil {
-				return fmt.Errorf("cannot roll back tasks for domain %s: %w", domain, err)
+		rollbackTasks.Go(func(ctx context.Context) (string, error) {
+			if len(tasks.Tasks) == 0 {
+				return domain, nil
 			}
-		}
+			ctx = log.WithValues(ctx, "domain", domain)
 
-		delete(tset.domains, domain)
+			log.Info(ctx, "Rolling back incomplete tasks", "tasks", len(tasks.Tasks))
+			err := handler.Rollback(ctx, tasks.Tasks)
+			if err != nil {
+				return "", fmt.Errorf("cannot roll back tasks for domain %s: %w", domain, err)
+			}
+
+			return domain, nil
+		})
 	}
+	err := rollbackTasks.Wait()
+	if err != nil {
+		return fmt.Errorf("cannot roll back tasks: %w", err)
+	}
+
 	saveState(ctx, tset)
 
 	if cnt > 0 {
