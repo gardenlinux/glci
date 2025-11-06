@@ -44,7 +44,7 @@ func (*file) OCMType() string {
 	return t.OCMType()
 }
 
-func (p *file) OCMRepository() string {
+func (p *file) OCMRepositoryBase() string {
 	return p.fileCfg.Repository
 }
 

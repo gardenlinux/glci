@@ -51,7 +51,7 @@ type OCMTarget interface {
 	SetOCMConfig(ctx context.Context, config map[string]any) error
 	Close() error
 	OCMType() string
-	OCMRepository() string
+	OCMRepositoryBase() string
 	PublishComponentDescriptor(ctx context.Context, version string, descriptor []byte) error
 }
 

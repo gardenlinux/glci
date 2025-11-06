@@ -106,7 +106,7 @@ func (*fake) OCMType() string {
 	return "Fake"
 }
 
-func (*fake) OCMRepository() string {
+func (*fake) OCMRepositoryBase() string {
 	return "fake"
 }
 
