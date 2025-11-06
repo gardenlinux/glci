@@ -236,7 +236,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			return fmt.Errorf("invalid component descriptor: %w", err)
 		}
 
-		ctx = log.WithValues(ctx, "ocmRepo", ocmTarget.OCMRepository())
+		ctx = log.WithValues(ctx, "ocmRepoBase", ocmTarget.OCMRepositoryBase())
 		log.Info(ctx, "Publishing component descriptor")
 		err = ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
 		if err != nil {

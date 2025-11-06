@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/opencontainers/go-digest"
 	specv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -50,12 +49,10 @@ func (p *oci) SetOCMConfig(_ context.Context, cfg map[string]any) error {
 		return fmt.Errorf("missing credentials config %s", p.ociCfg.Config)
 	}
 
-	if !strings.HasSuffix(p.ociCfg.Repository, repoSuffix) {
-		p.ociCfg.Repository += repoSuffix
-	}
-	p.repo, err = remote.NewRepository(p.ociCfg.Repository)
+	fullRepositoryPath := p.ociCfg.Repository + repoSuffix
+	p.repo, err = remote.NewRepository(fullRepositoryPath)
 	if err != nil {
-		return fmt.Errorf("invalid OCI repository %s: %w", p.ociCfg.Repository, err)
+		return fmt.Errorf("invalid OCI repository %s: %w", fullRepositoryPath, err)
 	}
 
 	p.repo.Client = &auth.Client{
@@ -78,7 +75,7 @@ func (*oci) OCMType() string {
 	return "OCIRegistry"
 }
 
-func (p *oci) OCMRepository() string {
+func (p *oci) OCMRepositoryBase() string {
 	return p.ociCfg.Repository
 }
 
@@ -190,7 +187,7 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 	log.Debug(ctx, "Copying artifact")
 	_, err = oras.Copy(ctx, fs, version, p.repo, version, oras.DefaultCopyOptions)
 	if err != nil {
-		return fmt.Errorf("cannot upload OCI artifact to %s: %w", p.ociCfg.Repository, err)
+		return fmt.Errorf("cannot upload OCI artifact: %w", err)
 	}
 
 	err = fs.Close()
