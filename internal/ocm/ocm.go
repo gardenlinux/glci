@@ -74,31 +74,24 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	}
 
 	packages := make([][]nameVersion, len(publications))
-	type iPackages struct {
-		i        int
-		packages []nameVersion
-	}
-	fetchPackages := parallel.NewActivity(ctx, func(_ context.Context, ip iPackages) error {
-		packages[ip.i] = ip.packages
-
-		return nil
-	})
+	fetchPackages := parallel.NewActivity(ctx)
 	for i, publication := range publications {
-		fetchPackages.Go(func(ctx context.Context) (iPackages, error) {
+		fetchPackages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			pkgs, err := getPackages(ctx, source, publication.Manifest)
 			if err != nil {
-				return iPackages{}, fmt.Errorf("cannot list packages for %s: %w", publication.Cname, err)
+				return nil, fmt.Errorf("cannot list packages for %s: %w", publication.Cname, err)
 			}
 
-			return iPackages{
-				i:        i,
-				packages: pkgs,
+			return func() error {
+				packages[i] = pkgs
+
+				return nil
 			}, nil
 		})
 	}
 	err := fetchPackages.Wait()
 	if err != nil {
-		return nil, fmt.Errorf("cannot fetch packages: %w", err)
+		return nil, err
 	}
 
 	for i, publication := range publications {

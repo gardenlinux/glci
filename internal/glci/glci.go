@@ -60,7 +60,7 @@ func loadCredentialsAndConfig(ctx context.Context, creds Credentials, publishing
 		}
 		err = target.SetTargetConfig(ctx, t.Config, sources)
 		if err != nil {
-			return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set source configuration for %s: %w", t.Type, err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot set target configuration for %s: %w", t.Type, err)
 		}
 		domain := target.CanRollback()
 		_, ok := rollbackHandlers[domain]

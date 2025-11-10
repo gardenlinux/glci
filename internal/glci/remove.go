@@ -47,16 +47,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
-	fetchManifests := parallel.NewActivity(ctx, func(_ context.Context, publication *cloudprovider.Publication) error {
-		if publication == nil {
-			return nil
-		}
-
-		publications = append(publications, *publication)
-		pubMap[publication.Cname] = append(pubMap[publication.Cname], len(publications)-1)
-
-		return nil
-	})
+	fetchManifests := parallel.NewActivity(ctx)
 	expandCommit := sync.Once{}
 	for _, flavor := range flavorsConfig.Flavors {
 		found := false
@@ -68,7 +59,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			found = true
 			origCommit := commit
 
-			fetchManifests.Go(func(ctx context.Context) (*cloudprovider.Publication, error) {
+			fetchManifests.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 				manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, origCommit)
 				ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
@@ -95,10 +86,17 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 					return nil, nil
 				}
 
-				return &cloudprovider.Publication{
+				publication := cloudprovider.Publication{
 					Cname:    flavor.Cname,
 					Manifest: manifest,
 					Target:   target,
+				}
+
+				return func() error {
+					publications = append(publications, publication)
+					pubMap[publication.Cname] = append(pubMap[publication.Cname], len(publications)-1)
+
+					return nil
 				}, nil
 			})
 		}
@@ -109,7 +107,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	}
 	err = fetchManifests.Wait()
 	if err != nil {
-		return fmt.Errorf("cannot fetch manifests: %w", err)
+		return err
 	}
 
 	if len(publications) > 0 {

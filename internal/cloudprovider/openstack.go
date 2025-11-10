@@ -78,21 +78,13 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 	}
 
 	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(creds.Projects))
-	type regionClient struct {
-		region string
-		client *gophercloud.ServiceClient
-	}
-	initClients := parallel.NewActivity(ctx, func(_ context.Context, rc regionClient) error {
-		p.imagesClients[rc.region] = rc.client
-
-		return nil
-	})
+	initClients := parallel.NewActivity(ctx)
 	for _, proj := range creds.Projects {
 		if len(p.pubCfg.Regions) > 0 && !slices.Contains(p.pubCfg.Regions, proj.Region) {
 			continue
 		}
 
-		initClients.Go(func(ctx context.Context) (regionClient, error) {
+		initClients.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
 				IdentityEndpoint: proj.AuthURL,
 				Username:         creds.Credentials.Username,
@@ -104,7 +96,7 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 				},
 			})
 			if er != nil {
-				return regionClient{}, fmt.Errorf("cannot create provider client for region %s: %w", proj.Region, er)
+				return nil, fmt.Errorf("cannot create provider client for region %s: %w", proj.Region, er)
 			}
 
 			var client *gophercloud.ServiceClient
@@ -112,18 +104,19 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 				Region: proj.Region,
 			})
 			if er != nil {
-				return regionClient{}, fmt.Errorf("cannot create image client for region %s: %w", proj.Region, er)
+				return nil, fmt.Errorf("cannot create image client for region %s: %w", proj.Region, er)
 			}
 
-			return regionClient{
-				region: proj.Region,
-				client: client,
+			return func() error {
+				p.imagesClients[proj.Region] = client
+
+				return nil
 			}, nil
 		})
 	}
 	err = initClients.Wait()
 	if err != nil {
-		return fmt.Errorf("cannot initiaalize clients: %w", err)
+		return err
 	}
 	if len(p.imagesClients) == 0 {
 		return errors.New("no available regions")
