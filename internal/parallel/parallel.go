@@ -15,63 +15,61 @@ func WithInlineMode(ctx context.Context, inline bool) context.Context {
 }
 
 // Activity is a parallel activity that can swawn goroutines and wait for them.
-type Activity[T any] interface {
-	Go(f ActivityFunc[T])
+type Activity interface {
+	Go(f ActivityFunc)
 	Wait() error
 }
 
-// ActivityFunc is a function that runs in a goroutine and produces a value.
-type ActivityFunc[T any] func(context.Context) (T, error)
+// ActivityFunc is a function that runs in a goroutine.
+type ActivityFunc func(context.Context) (ResultFunc, error)
 
-// ResultFunc is a function that runs synchronized and processes a produced value.
-type ResultFunc[T any] func(context.Context, T) error
-
-// NoResult is an empty result.
-type NoResult struct{}
+// ResultFunc is a function that runs synchronized to process a result.
+type ResultFunc func() error
 
 // NewActivity creates a new activity, either parallel or inline, with a given result function.
-func NewActivity[T any](ctx context.Context, rf ResultFunc[T]) Activity[T] {
+func NewActivity(ctx context.Context) Activity {
 	inline, _ := ctx.Value(ctxkInline{}).(bool)
 	if inline {
-		return &inlineActivity[T]{
-			ctx:        ctx,
-			resultFunc: rf,
+		return &inlineActivity{
+			ctx: ctx,
 		}
 	}
 
-	if rf == nil {
-		rf = func(_ context.Context, _ T) error {
-			return nil
-		}
-	}
+	return &parallelActivity{
+		ctx: ctx,
+		exec: parallel.FeedWithErrs(parallel.Unlimited(ctx), func(_ context.Context, rf ResultFunc) error {
+			if rf == nil {
+				return nil
+			}
 
-	return &parallelActivity[T]{
-		ctx:  ctx,
-		exec: parallel.FeedWithErrs[T](parallel.Unlimited(ctx), rf),
+			return rf()
+		}),
 	}
 }
 
-func (a *parallelActivity[T]) Go(f ActivityFunc[T]) {
+func (a *parallelActivity) Go(f ActivityFunc) {
 	a.exec.Go(f)
 }
 
-func (a *parallelActivity[T]) Wait() error {
+func (a *parallelActivity) Wait() error {
 	return printErrs(a.ctx, a.exec.Wait())
 }
 
-func (a *inlineActivity[T]) Go(f ActivityFunc[T]) {
-	r, err := f(a.ctx)
+func (a *inlineActivity) Go(f ActivityFunc) {
+	rf, err := f(a.ctx)
 	if err != nil {
 		a.errs = append(a.errs, err)
-	} else if a.resultFunc != nil {
-		err = a.resultFunc(a.ctx, r)
+		return
+	}
+	if rf != nil {
+		err = rf()
 		if err != nil {
 			a.errs = append(a.errs, err)
 		}
 	}
 }
 
-func (a *inlineActivity[T]) Wait() error {
+func (a *inlineActivity) Wait() error {
 	return printErrs(a.ctx, parallel.CombineErrors(a.errs...))
 }
 
@@ -79,15 +77,14 @@ type (
 	ctxkInline struct{}
 )
 
-type parallelActivity[T any] struct {
+type parallelActivity struct {
 	ctx  context.Context
-	exec parallel.FeedingAllErrsExecutor[T]
+	exec parallel.FeedingAllErrsExecutor[ResultFunc]
 }
 
-type inlineActivity[T any] struct {
-	ctx        context.Context
-	resultFunc ResultFunc[T]
-	errs       []error
+type inlineActivity struct {
+	ctx  context.Context
+	errs []error
 }
 
 func printErrs(ctx context.Context, err error) error {

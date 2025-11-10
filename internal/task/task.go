@@ -308,36 +308,38 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 	}
 
 	cnt := 0
-	rollbackTasks := parallel.NewActivity(ctx, func(_ context.Context, domain string) error {
-		cnt += len(tset.domains[domain].Tasks)
-		delete(tset.domains, domain)
-
-		return nil
-	})
+	rollbackTasks := parallel.NewActivity(ctx)
 	for domain, tasks := range tset.domains {
 		handler, ok := domainHandlers[domain]
 		if !ok {
 			return fmt.Errorf("invalid task domain %s", domain)
 		}
 
-		rollbackTasks.Go(func(ctx context.Context) (string, error) {
+		rollbackTasks.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			rf := func() error {
+				cnt += len(tset.domains[domain].Tasks)
+				delete(tset.domains, domain)
+
+				return nil
+			}
+
 			if len(tasks.Tasks) == 0 {
-				return domain, nil
+				return rf, nil
 			}
 			ctx = log.WithValues(ctx, "domain", domain)
 
 			log.Info(ctx, "Rolling back incomplete tasks", "tasks", len(tasks.Tasks))
 			err := handler.Rollback(ctx, tasks.Tasks)
 			if err != nil {
-				return "", fmt.Errorf("cannot roll back tasks for domain %s: %w", domain, err)
+				return nil, fmt.Errorf("cannot roll back tasks for domain %s: %w", domain, err)
 			}
 
-			return domain, nil
+			return rf, nil
 		})
 	}
 	err := rollbackTasks.Wait()
 	if err != nil {
-		return fmt.Errorf("cannot roll back tasks: %w", err)
+		return err
 	}
 
 	saveState(ctx, tset)
