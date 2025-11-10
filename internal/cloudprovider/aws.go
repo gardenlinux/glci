@@ -22,6 +22,7 @@ import (
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
@@ -383,34 +384,46 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 
 	images := make(map[string]string, len(regions))
+	publishImages := parallel.NewActivitySync(ctx)
 	for _, toRegion := range regions {
-		lctx := log.WithValues(ctx, "region", toRegion)
-		localID := imageID
+		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			ctx = log.WithValues(ctx, "region", toRegion)
+			localID := imageID
+			var er error
 
-		if toRegion != region {
-			lctx = task.Begin(lctx, "publish/"+image+"/"+toRegion, &awsTaskState{
-				Region: toRegion,
-			})
-			localID, err = p.copyImage(lctx, image, imageID, region, toRegion)
-			if err != nil {
-				return nil, task.Fail(lctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion,
-					err))
+			if toRegion != region {
+				ctx = task.Begin(ctx, "publish/"+image+"/"+toRegion, &awsTaskState{
+					Region: toRegion,
+				})
+				localID, er = p.copyImage(ctx, image, imageID, region, toRegion)
+				if er != nil {
+					return nil, task.Fail(ctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion,
+						er))
+				}
 			}
-		}
-		lctx = log.WithValues(lctx, "imageID", localID)
+			ctx = log.WithValues(ctx, "imageID", localID)
 
-		err = p.waitForImage(lctx, localID, toRegion)
-		if err != nil {
-			return nil, task.Fail(lctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, err))
-		}
+			er = p.waitForImage(ctx, localID, toRegion)
+			if er != nil {
+				return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
+			}
 
-		err = p.makePublic(lctx, localID, toRegion)
-		if err != nil {
-			return nil, task.Fail(lctx, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, err))
-		}
-		task.Complete(lctx)
+			er = p.makePublic(ctx, localID, toRegion)
+			if er != nil {
+				return nil, task.Fail(ctx, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, er))
+			}
+			task.Complete(ctx)
 
-		images[toRegion] = localID
+			return func() error {
+				images[toRegion] = localID
+
+				return nil
+			}, nil
+		})
+	}
+	err = publishImages.Wait()
+	if err != nil {
+		return nil, err
 	}
 	log.Info(ctx, "Images ready", "count", len(images))
 
@@ -449,19 +462,24 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "cloud", cld)
 
+	removeImages := parallel.NewActivity(ctx)
 	for _, img := range pubOut.Images {
 		if img.Cloud != cld {
 			continue
 		}
-		lctx := log.WithValues(ctx, "region", img.Region, "imageID", img.ID, "image", img.Image)
 
-		err = p.deregisterImage(lctx, img.ID, img.Region, steamroll)
-		if err != nil {
-			return fmt.Errorf("cannot deregister image %s in region %s: %w", img.ID, img.Region, err)
-		}
+		removeImages.Go(func(ctx context.Context) error {
+			lctx := log.WithValues(ctx, "region", img.Region, "imageID", img.ID, "image", img.Image)
+
+			er := p.deregisterImage(lctx, img.ID, img.Region, steamroll)
+			if er != nil {
+				return fmt.Errorf("cannot deregister image %s in region %s: %w", img.ID, img.Region, er)
+			}
+
+			return nil
+		})
 	}
-
-	return nil
+	return removeImages.Wait()
 }
 
 func (p *aws) CanRollback() string {
@@ -477,6 +495,7 @@ func (p *aws) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 		return errors.New("config not set")
 	}
 
+	rollbackTasks := parallel.NewActivity(ctx)
 	for _, t := range tasks {
 		state, err := task.ParseState[*awsTaskState](t.State)
 		if err != nil {
@@ -486,34 +505,47 @@ func (p *aws) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 		if state.Region == "" {
 			continue
 		}
-		lctx := log.WithValues(ctx, "region", state.Region)
 
 		if state.Import != "" {
-			lctx = log.WithValues(lctx, "importTask", state.Import)
-			err = p.deleteSnapshotFromImportTask(lctx, state.Import, state.Region, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete snapshot from task ID %s in region %s: %w", state.Import, state.Region, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "region", state.Region, "importTask", state.Import)
+
+				er := p.deleteSnapshotFromImportTask(ctx, state.Import, state.Region, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete snapshot from task ID %s in region %s: %w", state.Import, state.Region, er)
+				}
+
+				return nil
+			})
 		}
 
 		if state.Snapshot != "" {
-			lctx = log.WithValues(lctx, "snapshot", state.Snapshot)
-			err = p.deleteSnapshot(lctx, state.Snapshot, state.Region, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete snapshot %s in region %s: %w", state.Snapshot, state.Region, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "region", state.Region, "snapshot", state.Snapshot)
+
+				er := p.deleteSnapshot(ctx, state.Snapshot, state.Region, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete snapshot %s in region %s: %w", state.Snapshot, state.Region, er)
+				}
+
+				return nil
+			})
 		}
 
 		if state.Image != "" {
-			lctx = log.WithValues(lctx, "image", state.Image)
-			err = p.deregisterImage(lctx, state.Image, state.Region, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
+
+				er := p.deregisterImage(ctx, state.Image, state.Region, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
+				}
+
+				return nil
+			})
 		}
 	}
-
-	return nil
+	return rollbackTasks.Wait()
 }
 
 type aws struct {
@@ -625,18 +657,28 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 	var uefiData *string
 
 	if manifest.SecureBoot {
-		efivarsFile, err := manifest.PathBySuffix(".secureboot.aws-efivars")
-		if err != nil {
-			return false, false, nil, fmt.Errorf("missing efivars: %w", err)
-		}
+		fetchCertificates := parallel.NewActivity(ctx)
 
-		var efivars []byte
-		efivars, err = getObjectBytes(ctx, source, efivarsFile.S3Key)
-		if err != nil {
-			return false, false, nil, fmt.Errorf("cannot get efivars: %w", err)
-		}
+		fetchCertificates.Go(func(ctx context.Context) error {
+			efivarsFile, er := manifest.PathBySuffix(".secureboot.aws-efivars")
+			if er != nil {
+				return fmt.Errorf("missing efivars: %w", er)
+			}
 
-		uefiData = ptr.P(string(efivars))
+			var efivars []byte
+			efivars, er = getObjectBytes(ctx, source, efivarsFile.S3Key)
+			if er != nil {
+				return fmt.Errorf("cannot get efivars: %w", er)
+			}
+			uefiData = ptr.P(string(efivars))
+
+			return nil
+		})
+
+		err := fetchCertificates.Wait()
+		if err != nil {
+			return false, false, nil, err
+		}
 	}
 
 	return manifest.RequireUEFI, manifest.SecureBoot, uefiData, nil
@@ -692,7 +734,6 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 	var snapshot string
 	status := "active"
 	for status == "active" {
-		log.Debug(ctx, "Waiting for snapshot")
 		var s *ec2.DescribeImportSnapshotTasksOutput
 		s, err = p.tgtEC2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 			ImportTaskIds: []string{*r.ImportTaskId},
@@ -818,7 +859,6 @@ func (p *aws) copyImage(ctx context.Context, image, imageID, region, toRegion st
 func (p *aws) waitForImage(ctx context.Context, imageID, region string) error {
 	var state ec2types.ImageState
 	for state != ec2types.ImageStateAvailable {
-		log.Debug(ctx, "Waiting for image")
 		r, err := p.tgtEC2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 			ImageIds: []string{imageID},
 		}, overrideRegion(region))
@@ -905,7 +945,6 @@ func (p *aws) deleteSnapshotFromImportTask(ctx context.Context, importTaskID, re
 	var snapshot string
 	status := "active"
 	for status == "active" {
-		log.Debug(ctx, "Waiting for snapshot")
 		s, err := p.tgtEC2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 			ImportTaskIds: []string{importTaskID},
 		}, overrideRegion(region))
