@@ -161,54 +161,64 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 		log.Info(ctx, "Nothing to publish")
 	}
 
-	for i, publication := range publications {
-		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
+	publishPublications := parallel.NewActivitySync(ctx)
+	for _, publication := range publications {
+		publishPublications.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			ctx = log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
-		uptime := execTime(lctx)
-		if uptime != 0 && uptime.Hours() > 5 {
-			return errors.New("publishing taking too long, restart GLCI to resume")
-		}
+			uptime := execTime(ctx)
+			if uptime != 0 && uptime.Hours() > 5 {
+				return nil, errors.New("publishing taking too long, restart GLCI to resume")
+			}
 
-		var isPublished bool
-		isPublished, err = publication.Target.IsPublished(publication.Manifest)
-		if err != nil {
-			return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
-		}
-		if isPublished {
-			log.Info(lctx, "Already published, skipping")
-			continue
-		}
-		lctx = task.WithDomain(lctx, publication.Target.CanRollback())
-		lctx = task.WithBatch(lctx, publication.Cname)
-		lctx = task.WithUndeadMode(lctx, true)
+			isPublished, er := publication.Target.IsPublished(publication.Manifest)
+			if er != nil {
+				return nil, fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
+			}
+			if isPublished {
+				log.Info(ctx, "Already published, skipping")
+				return nil, nil
+			}
+			ctx = task.WithDomain(ctx, publication.Target.CanRollback())
+			ctx = task.WithBatch(ctx, publication.Cname)
+			ctx = task.WithUndeadMode(ctx, true)
 
-		log.Info(lctx, "Publishing image")
-		var output cloudprovider.PublishingOutput
-		output, err = publication.Target.Publish(lctx, publication.Cname, publication.Manifest, sources)
-		if err != nil {
-			return fmt.Errorf("cannot publish %s to %s: %w", publication.Cname, publication.Target.Type(), err)
-		}
+			log.Info(ctx, "Publishing image")
+			var output cloudprovider.PublishingOutput
+			output, er = publication.Target.Publish(ctx, publication.Cname, publication.Manifest, sources)
+			if er != nil {
+				return nil, fmt.Errorf("cannot publish %s to %s: %w", publication.Cname, publication.Target.Type(), er)
+			}
 
-		manifestOutput := publication.Manifest.PublishedImageMetadata
-		manifestOutput, err = publications[i].Target.AddOwnPublishingOutput(manifestOutput, output)
-		if err != nil {
-			return fmt.Errorf("cannot add publishing output for %s: %w", publication.Cname, err)
-		}
-		publication.Manifest.PublishedImageMetadata = manifestOutput
-		if glciVer != "" {
-			publication.Manifest.GLCIVersion = glciVer
-		}
-		for _, j := range pubMap[publication.Cname] {
-			publications[j].Manifest = publication.Manifest
-		}
+			return func() error {
+				publication.Manifest = publications[pubMap[publication.Cname][0]].Manifest
+				output, er = publication.Target.AddOwnPublishingOutput(publication.Manifest.PublishedImageMetadata, output)
+				if er != nil {
+					return fmt.Errorf("cannot add publishing output for %s: %w", publication.Cname, er)
+				}
+				publication.Manifest.PublishedImageMetadata = output
+				if glciVer != "" {
+					publication.Manifest.GLCIVersion = glciVer
+				}
+				for _, i := range pubMap[publication.Cname] {
+					publications[i].Manifest = publication.Manifest
+				}
 
-		log.Info(lctx, "Updating manifest")
-		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
-		task.RemoveCompleted(lctx, publication.Cname)
-		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publication.Manifest)
-		if err != nil {
-			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
-		}
+				log.Info(ctx, "Updating manifest")
+				manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
+				task.RemoveCompleted(ctx, publication.Cname)
+				er = cloudprovider.PutManifest(ctx, manifestTarget, manifestKey, publication.Manifest)
+				if er != nil {
+					return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, er)
+				}
+
+				return nil
+			}, nil
+		})
+	}
+	err = publishPublications.Wait()
+	if err != nil {
+		return err
 	}
 
 	task.Clear(ctx)
