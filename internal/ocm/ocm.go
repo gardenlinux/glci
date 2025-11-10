@@ -74,7 +74,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	}
 
 	packages := make([][]nameVersion, len(publications))
-	fetchPackages := parallel.NewActivity(ctx)
+	fetchPackages := parallel.NewActivitySync(ctx)
 	for i, publication := range publications {
 		fetchPackages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			pkgs, err := getPackages(ctx, source, publication.Manifest)

@@ -308,7 +308,7 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 	}
 
 	cnt := 0
-	rollbackTasks := parallel.NewActivity(ctx)
+	rollbackTasks := parallel.NewActivitySync(ctx)
 	for domain, tasks := range tset.domains {
 		handler, ok := domainHandlers[domain]
 		if !ok {

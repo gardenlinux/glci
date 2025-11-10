@@ -78,7 +78,7 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 	}
 
 	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(creds.Projects))
-	initClients := parallel.NewActivity(ctx)
+	initClients := parallel.NewActivitySync(ctx)
 	for _, proj := range creds.Projects {
 		if len(p.pubCfg.Regions) > 0 && !slices.Contains(p.pubCfg.Regions, proj.Region) {
 			continue
