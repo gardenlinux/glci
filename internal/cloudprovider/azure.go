@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -24,6 +25,7 @@ import (
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
@@ -321,83 +323,140 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	}
 
 	imageDefinition := p.sku(gallery.Image, cname, false)
-	var imageDefinitionBIOS, imageID, publicID string
+	var imageDefinitionBIOS string
 
 	bctx := ctx
 	if bios {
-		imageDefinitionBIOS = p.sku(gallery.Image, cname, true)
-
-		bctx = task.Begin(ctx, "publish/"+image+"/bios", &azureTaskState{})
-		err = p.createImageDefinition(bctx, &gallery, imageDefinitionBIOS, cname, arch, true, false)
-		if err != nil {
-			return nil, fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinitionBIOS, image, err)
-		}
+		bctx = task.Begin(bctx, "publish/"+image+"/bios", &azureTaskState{})
 	}
-
 	ctx = task.Begin(ctx, "publish/"+image, &azureTaskState{})
-	err = p.createImageDefinition(ctx, &gallery, imageDefinition, cname, arch, false, secureBoot)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinition, image, err)
-	}
+	createBlobAndImage := parallel.NewActivity(ctx)
 
-	var blob, blobURL string
-	blob, blobURL, err = p.importBlob(ctx, source, imagePath.S3Key, image)
-	if err != nil {
-		return nil, fmt.Errorf("cannot upload blob for image %s: %w", image, err)
-	}
-
-	outputImages := make([]azurePublishedImage, 0, 2)
 	if bios {
-		imageID, err = p.createImage(bctx, &gallery, blobURL, image, true)
-		if err != nil {
-			return nil, fmt.Errorf("cannot create image: %w", err)
-		}
+		createBlobAndImage.Go(func(_ context.Context) error {
+			imageDefinitionBIOS = p.sku(gallery.Image, cname, true)
 
-		err = p.createImageVersion(bctx, &gallery, imageDefinitionBIOS, imageVersion, imageID, regions, false, "", "", "")
-		if err != nil {
-			return nil, fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, err)
-		}
+			er := p.createImageDefinition(bctx, &gallery, imageDefinitionBIOS, cname, arch, true, false)
+			if er != nil {
+				return fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinitionBIOS, image, er)
+			}
 
-		publicID, err = p.getPublicID(bctx, &gallery, imageDefinitionBIOS, imageVersion)
-		if err != nil {
-			return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, err)
-		}
-		task.Complete(bctx)
-
-		outputImages = append(outputImages, azurePublishedImage{
-			Cloud: p.cloud(),
-			ID:    publicID,
-			Gen:   "V1",
+			return nil
 		})
 	}
 
-	imageID, err = p.createImage(ctx, &gallery, blobURL, image, false)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create image %s: %w", image, err)
-	}
+	createBlobAndImage.Go(func(ctx context.Context) error {
+		er := p.createImageDefinition(ctx, &gallery, imageDefinition, cname, arch, false, secureBoot)
+		if er != nil {
+			return fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinition, image, er)
+		}
 
-	err = p.deleteBlob(ctx, blob, false)
-	if err != nil {
-		return nil, fmt.Errorf("cannot delete blob %s for image %s: %w", blob, image, err)
-	}
-
-	err = p.createImageVersion(ctx, &gallery, imageDefinition, imageVersion, imageID, regions, secureBoot, pk, kek, db)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, err)
-	}
-
-	publicID, err = p.getPublicID(ctx, &gallery, imageDefinition, imageVersion)
-	if err != nil {
-		return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, err)
-	}
-	task.Complete(ctx)
-
-	outputImages = append(outputImages, azurePublishedImage{
-		Cloud: p.cloud(),
-		ID:    publicID,
-		Gen:   "V2",
+		return nil
 	})
 
+	var blob, blobURL string
+	createBlobAndImage.Go(func(ctx context.Context) error {
+		var er error
+		blob, blobURL, er = p.importBlob(ctx, source, imagePath.S3Key, image)
+		if er != nil {
+			return fmt.Errorf("cannot upload blob for image %s: %w", image, er)
+		}
+
+		return nil
+	})
+
+	err = createBlobAndImage.Wait()
+	if err != nil {
+		return nil, err
+	}
+
+	outputImages := make([]azurePublishedImage, 0, 2)
+	createImageVersion := parallel.NewActivitySync(ctx)
+	var blobUsed sync.WaitGroup
+	blobUsed.Add(1)
+
+	if bios {
+		blobUsed.Add(1)
+		createImageVersion.Go(func(_ context.Context) (parallel.ResultFunc, error) {
+			imageID, er := func() (string, error) {
+				defer blobUsed.Done()
+				return p.createImage(bctx, &gallery, blobURL, image, true)
+			}()
+			if er != nil {
+				return nil, fmt.Errorf("cannot create image %s: %w", image, er)
+			}
+
+			er = p.createImageVersion(bctx, &gallery, imageDefinitionBIOS, imageVersion, imageID, regions, false, "", "", "")
+			if er != nil {
+				return nil, fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, er)
+			}
+
+			var publicID string
+			publicID, er = p.getPublicID(bctx, &gallery, imageDefinitionBIOS, imageVersion)
+			if er != nil {
+				return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, er)
+			}
+			task.Complete(bctx)
+
+			return func() error {
+				outputImages = append(outputImages, azurePublishedImage{
+					Cloud: p.cloud(),
+					ID:    publicID,
+					Gen:   "V1",
+				})
+
+				return nil
+			}, nil
+		})
+	}
+
+	createImageVersion.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		imageID, er := func() (string, error) {
+			defer blobUsed.Done()
+			return p.createImage(ctx, &gallery, blobURL, image, false)
+		}()
+		if er != nil {
+			return nil, fmt.Errorf("cannot create image %s: %w", image, er)
+		}
+
+		er = p.createImageVersion(ctx, &gallery, imageDefinition, imageVersion, imageID, regions, secureBoot, pk, kek, db)
+		if er != nil {
+			return nil, fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, er)
+		}
+
+		var publicID string
+		publicID, er = p.getPublicID(ctx, &gallery, imageDefinition, imageVersion)
+		if er != nil {
+			return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, er)
+		}
+		task.Complete(ctx)
+
+		return func() error {
+			outputImages = append(outputImages, azurePublishedImage{
+				Cloud: p.cloud(),
+				ID:    publicID,
+				Gen:   "V2",
+			})
+
+			return nil
+		}, nil
+	})
+
+	createImageVersion.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		blobUsed.Wait()
+
+		er := p.deleteBlob(ctx, blob, false)
+		if er != nil {
+			return nil, fmt.Errorf("cannot delete blob %s for image %s: %w", blob, image, er)
+		}
+
+		return nil, nil
+	})
+
+	err = createImageVersion.Wait()
+	if err != nil {
+		return nil, err
+	}
 	log.Info(ctx, "Image ready")
 
 	return &azurePublishingOutput{
@@ -426,41 +485,45 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "cloud", cld)
 
+	deleteImage := parallel.NewActivity(ctx)
 	for _, img := range pubOut.Images {
 		if img.Cloud != cld {
 			continue
 		}
-		lctx := log.WithValues(ctx, "imageID", img.ID)
 
-		var imageDefinition, image, imageVersion string
-		imageDefinition, image, imageVersion, err = p.getMetadata(lctx, &gallery, img.ID)
-		if err != nil {
-			var terr *azcore.ResponseError
-			if steamroll && errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
-				log.Debug(ctx, "Image not found but the steamroller keeps going")
-				continue
+		deleteImage.Go(func(ctx context.Context) error {
+			ctx = log.WithValues(ctx, "imageID", img.ID)
+
+			imageDefinition, image, imageVersion, er := p.getMetadata(ctx, &gallery, img.ID)
+			if er != nil {
+				var ter *azcore.ResponseError
+				if steamroll && errors.As(er, &ter) && ter.StatusCode == http.StatusNotFound {
+					log.Debug(ctx, "Image not found but the steamroller keeps going")
+					return nil
+				}
+				return fmt.Errorf("cannot get metadata: %w", er)
 			}
-			return fmt.Errorf("cannot get metadata: %w", err)
-		}
-		lctx = log.WithValues(lctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion, "image", image)
+			ctx = log.WithValues(ctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion, "image", image)
 
-		err = p.deleteImageVersion(lctx, &gallery, imageDefinition, imageVersion, steamroll)
-		if err != nil {
-			return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, err)
-		}
+			er = p.deleteImageVersion(ctx, &gallery, imageDefinition, imageVersion, steamroll)
+			if er != nil {
+				return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, er)
+			}
 
-		err = p.deleteImage(lctx, gallery.ResourceGroup, image, steamroll)
-		if err != nil {
-			return fmt.Errorf("cannot delete image %s: %w", image, err)
-		}
+			er = p.deleteImage(ctx, gallery.ResourceGroup, image, steamroll)
+			if er != nil {
+				return fmt.Errorf("cannot delete image %s: %w", image, er)
+			}
 
-		err = p.deleteEmptyImageDefinition(ctx, &gallery, imageDefinition)
-		if err != nil {
-			return fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, err)
-		}
+			er = p.deleteEmptyImageDefinition(ctx, &gallery, imageDefinition)
+			if er != nil {
+				return fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, er)
+			}
+
+			return nil
+		})
 	}
-
-	return nil
+	return deleteImage.Wait()
 }
 
 func (p *azure) CanRollback() string {
@@ -477,41 +540,54 @@ func (p *azure) Rollback(ctx context.Context, tasks map[string]task.Task) error 
 	}
 	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
 
+	rollbackTasks := parallel.NewActivity(ctx)
 	for _, t := range tasks {
 		state, err := task.ParseState[*azureTaskState](t.State)
 		if err != nil {
 			return err
 		}
 
-		lctx := ctx
-
 		if state.Blob != "" {
-			lctx = log.WithValues(lctx, "blob", state.Blob)
-			err = p.deleteBlob(lctx, state.Blob, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete blob %s: %w", state.Blob, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "blob", state.Blob)
+
+				er := p.deleteBlob(ctx, state.Blob, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				}
+
+				return nil
+			})
 		}
 
 		if state.Image != "" {
-			lctx = log.WithValues(lctx, "image", state.Image)
-			err = p.deleteImage(lctx, gallery.ResourceGroup, state.Image, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete image %s: %w", state.Image, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "image", state.Image)
+
+				er := p.deleteImage(ctx, gallery.ResourceGroup, state.Image, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
+				}
+
+				return nil
+			})
 		}
 
 		if state.Version.Version != "" {
-			lctx = log.WithValues(lctx, "imageDefinition", state.Version.Definition, "imageVersion", state.Version.Version)
-			err = p.deleteImageVersion(lctx, &gallery, state.Version.Definition, state.Version.Version, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete image version %s for image definition %s: %w", state.Version,
-					state.Version.Definition, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "imageDefinition", state.Version.Definition, "imageVersion", state.Version.Version)
+
+				er := p.deleteImageVersion(ctx, &gallery, state.Version.Definition, state.Version.Version, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image version %s for image definition %s: %w", state.Version, state.Version.Definition,
+						er)
+				}
+
+				return nil
+			})
 		}
 	}
-
-	return nil
+	return rollbackTasks.Wait()
 }
 
 type azure struct {
@@ -630,43 +706,60 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 	var pk, kek, db string
 
 	if manifest.SecureBoot {
-		pkFile, err := manifest.PathBySuffix(".secureboot.pk.der")
-		if err != nil {
-			return false, false, "", "", "", fmt.Errorf("missing secureboot PK: %w", err)
-		}
+		fetchCertificates := parallel.NewActivity(ctx)
 
-		var rawPK []byte
-		rawPK, err = getObjectBytes(ctx, source, pkFile.S3Key)
-		if err != nil {
-			return false, false, "", "", "", fmt.Errorf("cannot get PK: %w", err)
-		}
-		pk = base64.StdEncoding.EncodeToString(rawPK)
+		fetchCertificates.Go(func(ctx context.Context) error {
+			pkFile, er := manifest.PathBySuffix(".secureboot.pk.der")
+			if er != nil {
+				return fmt.Errorf("missing secureboot PK: %w", er)
+			}
 
-		var kekFile gl.S3ReleaseFile
-		kekFile, err = manifest.PathBySuffix(".secureboot.kek.der")
-		if err != nil {
-			return false, false, "", "", "", fmt.Errorf("missing KEK: %w", err)
-		}
+			var rawPK []byte
+			rawPK, er = getObjectBytes(ctx, source, pkFile.S3Key)
+			if er != nil {
+				return fmt.Errorf("cannot get PK: %w", er)
+			}
+			pk = base64.StdEncoding.EncodeToString(rawPK)
 
-		var rawKEK []byte
-		rawKEK, err = getObjectBytes(ctx, source, kekFile.S3Key)
-		if err != nil {
-			return false, false, "", "", "", fmt.Errorf("cannot get KEK: %w", err)
-		}
-		kek = base64.StdEncoding.EncodeToString(rawKEK)
+			return nil
+		})
 
-		var dbFile gl.S3ReleaseFile
-		dbFile, err = manifest.PathBySuffix(".secureboot.db.der")
-		if err != nil {
-			return false, false, "", "", "", fmt.Errorf("missing DB: %w", err)
-		}
+		fetchCertificates.Go(func(ctx context.Context) error {
+			kekFile, er := manifest.PathBySuffix(".secureboot.kek.der")
+			if er != nil {
+				return fmt.Errorf("missing KEK: %w", er)
+			}
 
-		var rawDB []byte
-		rawDB, err = getObjectBytes(ctx, source, dbFile.S3Key)
+			var rawKEK []byte
+			rawKEK, er = getObjectBytes(ctx, source, kekFile.S3Key)
+			if er != nil {
+				return fmt.Errorf("cannot get KEK: %w", er)
+			}
+			kek = base64.StdEncoding.EncodeToString(rawKEK)
+
+			return nil
+		})
+
+		fetchCertificates.Go(func(ctx context.Context) error {
+			dbFile, er := manifest.PathBySuffix(".secureboot.db.der")
+			if er != nil {
+				return fmt.Errorf("missing DB: %w", er)
+			}
+
+			var rawDB []byte
+			rawDB, er = getObjectBytes(ctx, source, dbFile.S3Key)
+			if er != nil {
+				return fmt.Errorf("cannot get DB: %w", er)
+			}
+			db = base64.StdEncoding.EncodeToString(rawDB)
+
+			return nil
+		})
+
+		err := fetchCertificates.Wait()
 		if err != nil {
-			return false, false, "", "", "", fmt.Errorf("cannot get DB: %w", err)
+			return false, false, "", "", "", err
 		}
-		db = base64.StdEncoding.EncodeToString(rawDB)
 	}
 
 	return manifest.RequireUEFI, manifest.SecureBoot, pk, kek, db, nil
