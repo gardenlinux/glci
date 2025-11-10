@@ -18,6 +18,7 @@ import (
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
@@ -207,35 +208,47 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	}
 
 	images := make(map[string]string, len(regions))
+	publishImages := parallel.NewActivitySync(ctx)
 	for _, toRegion := range regions {
-		lctx := log.WithValues(ctx, "region", toRegion)
-		localID := imageID
+		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			ctx = log.WithValues(ctx, "region", toRegion)
+			localID := imageID
+			var er error
 
-		if toRegion == region {
-			lctx = log.WithValues(lctx, "imageID", localID)
-		} else {
-			lctx = task.Begin(lctx, "publish/"+image+"/"+toRegion, &aliyunTaskState{
-				Region: toRegion,
-			})
-			localID, err = p.copyImage(lctx, image, imageID, region, toRegion)
-			if err != nil {
-				return nil, task.Fail(lctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, err))
+			if toRegion == region {
+				ctx = log.WithValues(ctx, "imageID", localID)
+			} else {
+				ctx = task.Begin(ctx, "publish/"+image+"/"+toRegion, &aliyunTaskState{
+					Region: toRegion,
+				})
+				localID, er = p.copyImage(ctx, image, imageID, region, toRegion)
+				if er != nil {
+					return nil, task.Fail(ctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, er))
+				}
+				ctx = log.WithValues(ctx, "imageID", localID)
+
+				er = p.waitForImage(ctx, localID, toRegion)
+				if er != nil {
+					return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
+				}
 			}
-			lctx = log.WithValues(lctx, "imageID", localID)
 
-			err = p.waitForImage(lctx, localID, toRegion)
-			if err != nil {
-				return nil, task.Fail(lctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, err))
+			er = p.makePublic(ctx, localID, toRegion, true, false)
+			if er != nil {
+				return nil, task.Fail(ctx, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion, er))
 			}
-		}
+			task.Complete(ctx)
 
-		err = p.makePublic(lctx, localID, toRegion, true, false)
-		if err != nil {
-			return nil, task.Fail(lctx, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion, err))
-		}
-		task.Complete(lctx)
+			return func() error {
+				images[toRegion] = localID
 
-		images[toRegion] = localID
+				return nil
+			}, nil
+		})
+	}
+	err = publishImages.Wait()
+	if err != nil {
+		return nil, err
 	}
 	log.Info(ctx, "Images ready", "count", len(images))
 
@@ -269,16 +282,20 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 		return errors.New("invalid manifest: missing published images")
 	}
 
+	removeImages := parallel.NewActivity(ctx)
 	for _, img := range pubOut.Images {
-		lctx := log.WithValues(ctx, "image", img.ID, "fromRegion", img.Region)
+		removeImages.Go(func(ctx context.Context) error {
+			ctx = log.WithValues(ctx, "image", img.ID, "region", img.Region)
 
-		err = p.unpublishAndDeleteImage(lctx, img.ID, img.Region, steamroll)
-		if err != nil {
-			return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, err)
-		}
+			er := p.unpublishAndDeleteImage(ctx, img.ID, img.Region, steamroll)
+			if er != nil {
+				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, er)
+			}
+
+			return nil
+		})
 	}
-
-	return nil
+	return removeImages.Wait()
 }
 
 func (p *aliyun) CanRollback() string {
@@ -294,6 +311,7 @@ func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error
 		return errors.New("config not set")
 	}
 
+	rollbackTasks := parallel.NewActivity(ctx)
 	for _, t := range tasks {
 		state, err := task.ParseState[*aliyunTaskState](t.State)
 		if err != nil {
@@ -303,33 +321,41 @@ func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error
 		if state.Region == "" {
 			continue
 		}
-		lctx := log.WithValues(ctx, "region", state.Region)
 
 		if state.Blob != "" {
-			lctx = log.WithValues(lctx, "blob", state.Blob)
-			err = p.deleteBlob(lctx, state.Blob, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete blob %s: %w", state.Blob, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "region", state.Region, "blob", state.Blob)
+
+				er := p.deleteBlob(ctx, state.Blob, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				}
+
+				return nil
+			})
 		}
 
 		if state.Image != "" {
-			lctx = log.WithValues(lctx, "image", state.Image)
-			if state.Public {
-				err = p.makePublic(ctx, state.Image, state.Region, false, true)
-				if err != nil {
-					return fmt.Errorf("cannot make image %s in region %s not public: %w", state.Image, state.Region, err)
-				}
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
 
-			err = p.deleteImage(lctx, state.Image, state.Region, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, err)
-			}
+				if state.Public {
+					er := p.makePublic(ctx, state.Image, state.Region, false, true)
+					if er != nil {
+						return fmt.Errorf("cannot make image %s in region %s not public: %w", state.Image, state.Region, er)
+					}
+				}
+
+				er := p.deleteImage(ctx, state.Image, state.Region, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
+				}
+
+				return nil
+			})
 		}
 	}
-
-	return nil
+	return rollbackTasks.Wait()
 }
 
 type aliyun struct {
@@ -565,7 +591,6 @@ func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error
 	}
 
 	for status != "Available" {
-		log.Debug(ctx, "Waiting for image")
 		err = ctx.Err()
 		if err != nil {
 			return fmt.Errorf("cannot describe image: %w", err)
