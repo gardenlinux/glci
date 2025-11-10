@@ -116,44 +116,55 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		log.Info(ctx, "Nothing to remove")
 	}
 
-	for i, publication := range publications {
-		lctx := log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
+	removePublications := parallel.NewActivitySync(ctx)
+	for _, publication := range publications {
+		removePublications.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			ctx = log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
-		var isPublished bool
-		isPublished, err = publication.Target.IsPublished(publication.Manifest)
-		if err != nil {
-			return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
-		}
-		if !isPublished {
-			log.Info(lctx, "Already removed, skipping")
-			continue
-		}
+			isPublished, er := publication.Target.IsPublished(publication.Manifest)
+			if er != nil {
+				return nil, fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, er)
+			}
+			if !isPublished {
+				log.Info(ctx, "Already removed, skipping")
+				return nil, nil
+			}
 
-		log.Info(lctx, "Removing image")
-		err = publication.Target.Remove(lctx, publication.Manifest, sources, steamroll)
-		if err != nil {
-			return fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), err)
-		}
+			log.Info(ctx, "Removing image")
+			er = publication.Target.Remove(ctx, publication.Manifest, sources, steamroll)
+			if er != nil {
+				return nil, fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), er)
+			}
 
-		manifestOutput := publication.Manifest.PublishedImageMetadata
-		manifestOutput, err = publications[i].Target.RemoveOwnPublishingOutput(manifestOutput)
-		if err != nil {
-			return fmt.Errorf("cannot remove publishing output for %s: %w", publication.Cname, err)
-		}
-		publication.Manifest.PublishedImageMetadata = manifestOutput
-		if glciVer != "" {
-			publication.Manifest.GLCIVersion = glciVer
-		}
-		for _, j := range pubMap[publication.Cname] {
-			publications[j].Manifest = publication.Manifest
-		}
+			return func() error {
+				publication.Manifest = publications[pubMap[publication.Cname][0]].Manifest
+				var output cloudprovider.PublishingOutput
+				output, er = publication.Target.RemoveOwnPublishingOutput(publication.Manifest.PublishedImageMetadata)
+				if err != nil {
+					return fmt.Errorf("cannot remove publishing output for %s: %w", publication.Cname, er)
+				}
+				publication.Manifest.PublishedImageMetadata = output
+				if glciVer != "" {
+					publication.Manifest.GLCIVersion = glciVer
+				}
+				for _, i := range pubMap[publication.Cname] {
+					publications[i].Manifest = publication.Manifest
+				}
 
-		log.Info(lctx, "Updating manifest")
-		manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
-		err = cloudprovider.PutManifest(lctx, manifestTarget, manifestKey, publication.Manifest)
-		if err != nil {
-			return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, err)
-		}
+				log.Info(ctx, "Updating manifest")
+				manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
+				er = cloudprovider.PutManifest(ctx, manifestTarget, manifestKey, publication.Manifest)
+				if er != nil {
+					return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, er)
+				}
+
+				return nil
+			}, nil
+		})
+	}
+	err = removePublications.Wait()
+	if err != nil {
+		return err
 	}
 
 	log.Debug(ctx, "Closing sources and targets")
