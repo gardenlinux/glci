@@ -22,6 +22,7 @@ import (
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -279,32 +280,40 @@ func (p *gcp) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 		return errors.New("config not set")
 	}
 
+	rollbackTasks := parallel.NewActivity(ctx)
 	for _, t := range tasks {
 		state, err := task.ParseState[*gcpTaskState](t.State)
 		if err != nil {
 			return err
 		}
 
-		lctx := ctx
-
 		if state.Blob != "" {
-			lctx = log.WithValues(lctx, "blob", state.Blob)
-			err = p.deleteBlob(lctx, state.Blob, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete blob %s: %w", state.Blob, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "blob", state.Blob)
+
+				er := p.deleteBlob(ctx, state.Blob, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				}
+
+				return nil
+			})
 		}
 
 		if state.Image != "" {
-			lctx = log.WithValues(lctx, "image", state.Image)
-			err = p.deleteImage(lctx, state.Image, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete image %s: %w", state.Image, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "image", state.Image)
+
+				er := p.deleteImage(ctx, state.Image, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
+				}
+
+				return nil
+			})
 		}
 	}
-
-	return nil
+	return rollbackTasks.Wait()
 }
 
 type gcp struct {
@@ -361,43 +370,60 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 	var pk, kek, db string
 
 	if manifest.SecureBoot {
-		pkFile, err := manifest.PathBySuffix(".secureboot.pk.der")
-		if err != nil {
-			return false, "", "", "", fmt.Errorf("missing secureboot PK: %w", err)
-		}
+		fetchCertificates := parallel.NewActivity(ctx)
 
-		var rawPK []byte
-		rawPK, err = getObjectBytes(ctx, source, pkFile.S3Key)
-		if err != nil {
-			return false, "", "", "", fmt.Errorf("cannot get PK: %w", err)
-		}
-		pk = base64.StdEncoding.EncodeToString(rawPK)
+		fetchCertificates.Go(func(ctx context.Context) error {
+			pkFile, er := manifest.PathBySuffix(".secureboot.pk.der")
+			if er != nil {
+				return fmt.Errorf("missing secureboot PK: %w", er)
+			}
 
-		var kekFile gl.S3ReleaseFile
-		kekFile, err = manifest.PathBySuffix(".secureboot.kek.der")
-		if err != nil {
-			return false, "", "", "", fmt.Errorf("missing KEK: %w", err)
-		}
+			var rawPK []byte
+			rawPK, er = getObjectBytes(ctx, source, pkFile.S3Key)
+			if er != nil {
+				return fmt.Errorf("cannot get PK: %w", er)
+			}
+			pk = base64.StdEncoding.EncodeToString(rawPK)
 
-		var rawKEK []byte
-		rawKEK, err = getObjectBytes(ctx, source, kekFile.S3Key)
-		if err != nil {
-			return false, "", "", "", fmt.Errorf("cannot get KEK: %w", err)
-		}
-		kek = base64.StdEncoding.EncodeToString(rawKEK)
+			return nil
+		})
 
-		var dbFile gl.S3ReleaseFile
-		dbFile, err = manifest.PathBySuffix(".secureboot.db.der")
-		if err != nil {
-			return false, "", "", "", fmt.Errorf("missing DB: %w", err)
-		}
+		fetchCertificates.Go(func(ctx context.Context) error {
+			kekFile, er := manifest.PathBySuffix(".secureboot.kek.der")
+			if er != nil {
+				return fmt.Errorf("missing KEK: %w", er)
+			}
 
-		var rawDB []byte
-		rawDB, err = getObjectBytes(ctx, source, dbFile.S3Key)
+			var rawKEK []byte
+			rawKEK, er = getObjectBytes(ctx, source, kekFile.S3Key)
+			if er != nil {
+				return fmt.Errorf("cannot get KEK: %w", er)
+			}
+			kek = base64.StdEncoding.EncodeToString(rawKEK)
+
+			return nil
+		})
+
+		fetchCertificates.Go(func(ctx context.Context) error {
+			dbFile, er := manifest.PathBySuffix(".secureboot.db.der")
+			if er != nil {
+				return fmt.Errorf("missing DB: %w", er)
+			}
+
+			var rawDB []byte
+			rawDB, er = getObjectBytes(ctx, source, dbFile.S3Key)
+			if er != nil {
+				return fmt.Errorf("cannot get DB: %w", er)
+			}
+			db = base64.StdEncoding.EncodeToString(rawDB)
+
+			return nil
+		})
+
+		err := fetchCertificates.Wait()
 		if err != nil {
-			return false, "", "", "", fmt.Errorf("cannot get DB: %w", err)
+			return false, "", "", "", err
 		}
-		db = base64.StdEncoding.EncodeToString(rawDB)
 	}
 
 	return manifest.SecureBoot, pk, kek, db, nil
