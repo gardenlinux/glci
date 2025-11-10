@@ -275,31 +275,42 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	}
 
 	outImages := make(map[string]string, len(regions))
+	publishImages := parallel.NewActivitySync(ctx)
 	for _, region := range regions {
 		imageClient := p.imagesClients[region]
 		src := source
 		if strings.HasPrefix(region, "ap-cn-") {
 			src = sourceChina
 		}
-		lctx := log.WithValues(ctx, "region", region)
 
-		lctx = task.Begin(lctx, "publish/"+image+"/"+region, &openstackTaskState{
-			Region: region,
+		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			ctx = log.WithValues(ctx, "region", region)
+
+			ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{
+				Region: region,
+			})
+			imageID, er := p.createImage(ctx, imageClient, src, imagePath.S3Key, image)
+			if er != nil {
+				return nil, task.Fail(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
+			}
+			ctx = log.WithValues(ctx, "region", region)
+
+			er = p.waitForImage(ctx, imageID, region)
+			if er != nil {
+				return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, er))
+			}
+			task.Complete(ctx)
+
+			return func() error {
+				outImages[region] = imageID
+
+				return nil
+			}, nil
 		})
-		var imageID string
-		imageID, err = p.createImage(lctx, imageClient, src, imagePath.S3Key, image)
-		if err != nil {
-			return nil, task.Fail(lctx, fmt.Errorf("cannot create image for region %s: %w", region, err))
-		}
-		lctx = log.WithValues(lctx, "region", region)
-
-		err = p.waitForImage(lctx, imageID, region)
-		if err != nil {
-			return nil, task.Fail(lctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, err))
-		}
-		task.Complete(lctx)
-
-		outImages[region] = imageID
+	}
+	err = publishImages.Wait()
+	if err != nil {
+		return nil, err
 	}
 	log.Info(ctx, "Images ready", "count", len(outImages))
 
@@ -349,23 +360,28 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 		return errors.New("no available regions")
 	}
 
+	removeImages := parallel.NewActivity(ctx)
 	for _, img := range pubOut.Images {
 		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
 			continue
 		}
-		lctx := log.WithValues(ctx, "region", img.Region, "imageID", img.ID)
 
 		if !slices.Contains(regions, img.Region) {
 			return fmt.Errorf("image %s is in unknown region %s", img.ID, img.Region)
 		}
 
-		err = p.deleteImage(lctx, img.ID, img.Region, steamroll)
-		if err != nil {
-			return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, err)
-		}
-	}
+		removeImages.Go(func(ctx context.Context) error {
+			ctx = log.WithValues(ctx, "region", img.Region, "imageID", img.ID)
 
-	return nil
+			er := p.deleteImage(ctx, img.ID, img.Region, steamroll)
+			if err != nil {
+				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, er)
+			}
+
+			return nil
+		})
+	}
+	return removeImages.Wait()
 }
 
 func (p *openstack) CanRollback() string {
@@ -381,6 +397,7 @@ func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) er
 		return errors.New("config not set")
 	}
 
+	rollbackTasks := parallel.NewActivity(ctx)
 	for _, t := range tasks {
 		state, err := task.ParseState[*openstackTaskState](t.State)
 		if err != nil {
@@ -390,18 +407,21 @@ func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) er
 		if state.Region == "" {
 			continue
 		}
-		lctx := log.WithValues(ctx, "region", state.Region)
 
 		if state.Image != "" {
-			lctx = log.WithValues(lctx, "image", state.Image)
-			err = p.deleteImage(lctx, state.Image, state.Region, true)
-			if err != nil {
-				return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, err)
-			}
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
+
+				er := p.deleteImage(ctx, state.Image, state.Region, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
+				}
+
+				return nil
+			})
 		}
 	}
-
-	return nil
+	return rollbackTasks.Wait()
 }
 
 type openstack struct {
@@ -579,7 +599,6 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	imagesClient := p.imagesClients[region]
 	var status images.ImageStatus
 	for status != images.ImageStatusActive {
-		log.Debug(ctx, "Waiting for image")
 		img, err := images.Get(ctx, imagesClient, imageID).Extract()
 		if err != nil {
 			return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, err)
