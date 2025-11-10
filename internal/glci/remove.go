@@ -47,7 +47,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	glciVer := glciVersion(ctx)
 	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
 	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
-	fetchManifests := parallel.NewActivity(ctx)
+	fetchManifests := parallel.NewActivitySync(ctx)
 	expandCommit := sync.Once{}
 	for _, flavor := range flavorsConfig.Flavors {
 		found := false
