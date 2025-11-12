@@ -34,7 +34,7 @@ require (
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/viper v1.21.0
 	github.com/wandb/parallel v0.2.3
-	google.golang.org/api v0.255.0
+	google.golang.org/api v0.256.0
 	oras.land/oras-go/v2 v2.6.0
 )
 
