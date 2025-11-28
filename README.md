@@ -1,3 +1,6 @@
+# GLCI
+
+![GLCI](glci.png)
 
 ## Licensing
 
