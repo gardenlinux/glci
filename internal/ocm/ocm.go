@@ -174,10 +174,6 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 							"type":  "emailAddress",
 							"email": "andre.russ@sap.com",
 						},
-						{
-							"type":  "emailAddress",
-							"email": "v.riesop@sap.com",
-						},
 					},
 				},
 			},
