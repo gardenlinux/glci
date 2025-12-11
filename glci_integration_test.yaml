@@ -57,7 +57,7 @@ publishing:
     bucket: gardenlinux-test-images
   - type: OpenStack
     source: S3
-    config: gardenlinux
+    configs: [ gardenlinux ]
     test: true
     hypervisor: VMware
     regions: [ eu-nl-1 ]
