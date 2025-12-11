@@ -58,10 +58,14 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	var creds openstackCredentials
-	creds, ok = p.creds[p.pubCfg.Config]
-	if !ok {
-		return fmt.Errorf("missing credentials config %s", p.pubCfg.Config)
+	creds := make([]openstackCredentials, len(p.pubCfg.Configs))
+	cnt := 0
+	for i, c := range p.pubCfg.Configs {
+		creds[i], ok = p.creds[c]
+		if !ok {
+			return fmt.Errorf("missing credentials config %s", cfg)
+		}
+		cnt += len(creds[i].Projects)
 	}
 
 	if p.pubCfg.SourceChina != "" {
@@ -77,42 +81,49 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 		return fmt.Errorf("unknown hypervisor %s", p.pubCfg.Hypervisor)
 	}
 
-	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(creds.Projects))
+	p.imagesClients = make(map[string]*gophercloud.ServiceClient, cnt)
 	initClients := parallel.NewActivitySync(ctx)
-	for _, proj := range creds.Projects {
-		if len(p.pubCfg.Regions) > 0 && !slices.Contains(p.pubCfg.Regions, proj.Region) {
-			continue
+	for i := range creds {
+		for _, proj := range creds[i].Projects {
+			if len(p.pubCfg.Regions) > 0 && !slices.Contains(p.pubCfg.Regions, proj.Region) {
+				continue
+			}
+
+			_, ok = p.imagesClients[proj.Region]
+			if ok {
+				return fmt.Errorf("duplicate region %s", proj.Region)
+			}
+
+			initClients.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+				providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
+					IdentityEndpoint: proj.AuthURL,
+					Username:         creds[i].Credentials.Username,
+					Password:         creds[i].Credentials.Password,
+					DomainName:       proj.Domain,
+					Scope: &gophercloud.AuthScope{
+						ProjectName: proj.Project,
+						DomainName:  proj.Domain,
+					},
+				})
+				if er != nil {
+					return nil, fmt.Errorf("cannot create provider client for region %s: %w", proj.Region, er)
+				}
+
+				var client *gophercloud.ServiceClient
+				client, er = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
+					Region: proj.Region,
+				})
+				if er != nil {
+					return nil, fmt.Errorf("cannot create image client for region %s: %w", proj.Region, er)
+				}
+
+				return func() error {
+					p.imagesClients[proj.Region] = client
+
+					return nil
+				}, nil
+			})
 		}
-
-		initClients.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
-			providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
-				IdentityEndpoint: proj.AuthURL,
-				Username:         creds.Credentials.Username,
-				Password:         creds.Credentials.Password,
-				DomainName:       proj.Domain,
-				Scope: &gophercloud.AuthScope{
-					ProjectName: proj.Project,
-					DomainName:  proj.Domain,
-				},
-			})
-			if er != nil {
-				return nil, fmt.Errorf("cannot create provider client for region %s: %w", proj.Region, er)
-			}
-
-			var client *gophercloud.ServiceClient
-			client, er = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
-				Region: proj.Region,
-			})
-			if er != nil {
-				return nil, fmt.Errorf("cannot create image client for region %s: %w", proj.Region, er)
-			}
-
-			return func() error {
-				p.imagesClients[proj.Region] = client
-
-				return nil
-			}, nil
-		})
 	}
 	err = initClients.Wait()
 	if err != nil {
@@ -449,7 +460,7 @@ type openstackProject struct {
 
 type openstackPublishingConfig struct {
 	Source      string              `mapstructure:"source"`
-	Config      string              `mapstructure:"config"`
+	Configs     []string            `mapstructure:"configs"`
 	SourceChina string              `mapstructure:"source_china,omitzero"`
 	Test        bool                `mapstructure:"test,omitzero"`
 	Hypervisor  openstackHypervisor `mapstructure:"hypervisor"`
@@ -527,11 +538,16 @@ func (*openstack) architecture(arch gl.Architecture) (string, error) {
 }
 
 func (p *openstack) listRegions() []string {
-	projects := p.creds[p.pubCfg.Config].Projects
+	cnt := 0
+	for _, c := range p.pubCfg.Configs {
+		cnt += len(p.creds[c].Projects)
+	}
+	regions := make([]string, 0, cnt)
 
-	regions := make([]string, 0, len(projects))
-	for _, proj := range projects {
-		regions = append(regions, proj.Region)
+	for _, c := range p.pubCfg.Configs {
+		for _, proj := range p.creds[c].Projects {
+			regions = append(regions, proj.Region)
+		}
 	}
 	return regions
 }
