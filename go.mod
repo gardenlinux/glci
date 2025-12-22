@@ -12,7 +12,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.3
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.13
-	github.com/alibabacloud-go/ecs-20140526/v7 v7.4.0
+	github.com/alibabacloud-go/ecs-20140526/v7 v7.4.1
 	github.com/alibabacloud-go/tea v1.3.14
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.3.0
 	github.com/aws/aws-sdk-go-v2 v1.41.0
