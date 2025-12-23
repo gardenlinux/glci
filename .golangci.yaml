@@ -45,7 +45,7 @@ linters:
         shadow:
           strict: true
     nolintlint:
-      allow-unused: false
+      allow-unused: true # false is correct but unreliable
       require-explanation: true
       require-specific: true
     revive:

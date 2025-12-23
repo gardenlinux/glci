@@ -126,9 +126,18 @@ func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gl.Ma
 // PutManifest stores a manifest into an ArtifactSource.
 func PutManifest(ctx context.Context, source ArtifactSource, key string, manifest *gl.Manifest) error {
 	var buf bytes.Buffer
-	err := yaml.NewEncoder(&buf).Encode(manifest)
+	enc := yaml.NewEncoder(&buf)
+	defer func() {
+		_ = enc.Close()
+	}()
+
+	err := enc.Encode(manifest)
 	if err != nil {
-		return fmt.Errorf("invalid manifest: %w", err)
+		return fmt.Errorf("cannot encode manifest: %w", err)
+	}
+	err = enc.Close()
+	if err != nil {
+		return fmt.Errorf("cannot encode manifest: %w", err)
 	}
 
 	return source.PutObject(ctx, key, &buf)

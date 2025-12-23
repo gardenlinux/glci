@@ -27,6 +27,8 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	}
 	defer func() {
 		_ = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
+		_ = manifestSource.Close()
+		_ = manifestTarget.Close()
 	}()
 	ctx = task.WithStatePersistor(ctx, state, id(version, commit))
 

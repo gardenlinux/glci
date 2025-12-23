@@ -16,7 +16,11 @@ type FlavorsConfig struct {
 // Validate ensures that the flavours configuration is valid.
 func (c *FlavorsConfig) Validate() error {
 	for _, flavor := range c.Flavors {
-		_, err := cloudprovider.NewPublishingTarget(flavor.Platform)
+		t, err := cloudprovider.NewPublishingTarget(flavor.Platform)
+		if err != nil {
+			return fmt.Errorf("invalid flavor %s: %w", flavor.Cname, err)
+		}
+		err = t.Close()
 		if err != nil {
 			return fmt.Errorf("invalid flavor %s: %w", flavor.Cname, err)
 		}
@@ -43,7 +47,11 @@ func (c *PublishingConfig) Validate() error {
 			return errors.New("missing source")
 		}
 
-		_, err := cloudprovider.NewArtifactSource(source.Type)
+		s, err := cloudprovider.NewArtifactSource(source.Type)
+		if err != nil {
+			return fmt.Errorf("invalid source %s: %w", source.ID, err)
+		}
+		err = s.Close()
 		if err != nil {
 			return fmt.Errorf("invalid source %s: %w", source.ID, err)
 		}
@@ -76,7 +84,11 @@ func (c *PublishingConfig) Validate() error {
 			return errors.New("missing target")
 		}
 
-		_, err := cloudprovider.NewPublishingTarget(target.Type)
+		t, err := cloudprovider.NewPublishingTarget(target.Type)
+		if err != nil {
+			return fmt.Errorf("invalid target: %w", err)
+		}
+		err = t.Close()
 		if err != nil {
 			return fmt.Errorf("invalid target: %w", err)
 		}
@@ -86,7 +98,11 @@ func (c *PublishingConfig) Validate() error {
 		return errors.New("missing OCM target")
 	}
 
-	_, err := cloudprovider.NewOCMTarget(c.OCM.Type)
+	o, err := cloudprovider.NewOCMTarget(c.OCM.Type)
+	if err != nil {
+		return fmt.Errorf("invalid OCM target: %w", err)
+	}
+	err = o.Close()
 	if err != nil {
 		return fmt.Errorf("invalid OCM target: %w", err)
 	}
@@ -95,7 +111,12 @@ func (c *PublishingConfig) Validate() error {
 		return errors.New("missing state")
 	}
 
-	_, err = task.NewStatePersistor(c.State.Type)
+	var p task.StatePersistor
+	p, err = task.NewStatePersistor(c.State.Type)
+	if err != nil {
+		return fmt.Errorf("invalid state: %w", err)
+	}
+	err = p.Close()
 	if err != nil {
 		return fmt.Errorf("invalid state: %w", err)
 	}
