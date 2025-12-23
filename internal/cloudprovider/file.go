@@ -41,6 +41,10 @@ func (*file) OCMType() string {
 	if err != nil {
 		return ""
 	}
+	defer func() {
+		_ = t.Close()
+	}()
+
 	return t.OCMType()
 }
 
