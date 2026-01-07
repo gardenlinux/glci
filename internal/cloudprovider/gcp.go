@@ -83,12 +83,13 @@ func (p *gcp) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 		return fmt.Errorf("missing credentials config %s", p.pubCfg.Config)
 	}
 
-	p.storageClient, err = storage.NewClient(ctx, option.WithCredentialsJSON(creds.serviceAccountKeyJSON))
+	p.storageClient, err = storage.NewClient(ctx, option.WithAuthCredentialsJSON(option.ServiceAccount, creds.serviceAccountKeyJSON))
 	if err != nil {
 		return fmt.Errorf("cannot create storage client: %w", err)
 	}
 
-	p.imagesClient, err = computev1.NewImagesRESTClient(ctx, option.WithCredentialsJSON(creds.serviceAccountKeyJSON))
+	p.imagesClient, err = computev1.NewImagesRESTClient(ctx, option.WithAuthCredentialsJSON(option.ServiceAccount,
+		creds.serviceAccountKeyJSON))
 	if err != nil {
 		return fmt.Errorf("cannot create images client: %w", err)
 	}
