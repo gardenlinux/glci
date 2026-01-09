@@ -27,7 +27,7 @@ require (
 	github.com/goccy/go-yaml v1.19.1
 	github.com/gophercloud/gophercloud/v2 v2.10.0
 	github.com/onsi/ginkgo/v2 v2.27.3
-	github.com/onsi/gomega v1.38.3
+	github.com/onsi/gomega v1.39.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/rs/zerolog v1.34.0
