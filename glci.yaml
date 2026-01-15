@@ -88,12 +88,12 @@ publishing:
     bucket: gardenlinux-images
   - type: OpenStack
     source: S3
-    configs: [ gardenlinux ]
+    configs: [ gardenlinux, gardenlinux-qa ]
     source_china: S3-China
     hypervisor: Bare Metal
   - type: OpenStack
     source: S3
-    configs: [ gardenlinux ]
+    configs: [ gardenlinux, gardenlinux-qa ]
     source_china: S3-China
     hypervisor: VMware
   ocm:
