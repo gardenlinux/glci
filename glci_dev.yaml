@@ -43,26 +43,37 @@ flavors:
   - platform: GCP
     cname: gcp-gardener_prod_tpm2_trustedboot-arm64
 publishing:
+  credentials:
+    type: Vault
+    server: https://vault.tools.sap
+    namespace: gardnlinux
+    token_file:
+    role_id:
+    secret_id:
   manifest_source: S3
   manifest_target: S3test
   sources:
   - id: S3
     type: AWS
-    bucket: gardenlinux-github-releases
     config: gardenlinux
+    region: eu-central-1
+    bucket: gardenlinux-github-releases
   - id: S3test
     type: AWS
-    bucket: gardenlinux-test-import
     config: gardenlinux-integration-test
+    region: eu-central-1
+    bucket: gardenlinux-test-import
   targets:
   - type: Aliyun
     source: S3
     config: gardenlinux-integration-test
-    bucket: gardenlinux-test-upload
+    region: eu-central-1
     regions: [ eu-central-1, eu-west-1 ]
+    bucket: gardenlinux-test-upload
   - type: AWS
     source: S3
     config: gardenlinux-integration-test
+    region: eu-central-1
     regions: [ eu-central-1, eu-west-1 ]
     image_tags:
       include_gardenlinux_version: true
@@ -73,30 +84,44 @@ publishing:
         test-type: gardener-integration
   - type: Azure
     source: S3
-    storage_account_config: gardenlinux-integration-test
-    service_principal_config: gardenlinux-integration-test
-    gallery_config: gardenlinux-integration-test
+    config: gardenlinux-integration-test
+    storage_container: gardenlinux
+    resource_group: test-community-gallery
+    gallery: community_gallery
+    region: westeurope
     regions: [ westeurope, northeurope ]
+    image_prefix: gardenlinux
+    image_description: Garden Linux - a Linux for containers, based on Debian
+    image_eula: https://github.com/gardenlinux/gardenlinux/blob/main/LICENSE.md
+    image_release_note: https://github.com/gardenlinux/gardenlinux/releases
+    image_publisher: GardenLinux
+    image_offer: gardenlinux
+    image_sku_prefix: gardenlinux
   - type: GCP
     source: S3
     config: gardenlinux-integration-test
+    project: sap-cp-k8s-gdnlinux-gcp-test
     bucket: gardenlinux-test-images
   - type: OpenStack
     source: S3
-    configs: [ gardenlinux ]
+    configs:
+    - config: gardenlinux
+      endpoint: https://identity-3.{region}.cloud.sap/v3
+      domain: monsoon3
+      project: gardenlinux
+      regions: [ eu-nl-1 ]
     test: true
     hypervisor: VMware
-    regions: [ eu-nl-1 ]
   ocm:
-    type: File
-    config: ar-gardenlinux-test
+    type: OCI
+    config: gardenlinux
     repository: europe-docker.pkg.dev/sap-se-gcp-gardenlinux/tests
     file: descriptor.yaml
   state:
     type: AWS
-    bucket: glci-state-test
     config: gardenlinux-integration-test
-    file: state.json
+    region: eu-central-1
+    bucket: glci-state-test
 aliases:
   auditd: [ audit ]
   libc-bin: [ glibc ]
@@ -106,4 +131,4 @@ aliases:
   python3-markupsafe: [ MarkupSafe ]
 omit-component-descriptor: true
 steamroll: true
-glacial: false
+glacial: true

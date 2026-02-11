@@ -19,8 +19,6 @@ func publishCmd() *cobra.Command {
 		RunE:  cmd.RunFunc(publish),
 	}
 
-	c.Flags().String("credentials-file", "", "path to credentials YAML file")
-	c.Flags().String("credentials-base64", "", "base64 encoded credentials YAML (overrides --credentials-file)")
 	c.Flags().StringP("version", "v", "", "release version")
 	c.Flags().StringP("commit", "c", "", "release commit(ish)")
 	c.Flags().Bool("omit-component-descriptor", false, "omit publishing a component descriptor")
@@ -31,11 +29,11 @@ func publishCmd() *cobra.Command {
 func publish(ctx context.Context, cfg *viper.Viper) error {
 	log.Info(ctx, "GLCI", "version", version)
 
-	flavorsCfg, publishingCfg, aliasesCfg, creds, err := loadConfigAndCredentials(ctx, cfg)
+	flavorsCfg, publishingCfg, aliasesCfg, err := loadConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
-	return glci.Publish(ctx, flavorsCfg, publishingCfg, aliasesCfg, creds, cfg.GetString("version"), cfg.GetString("commit"),
+	return glci.Publish(ctx, flavorsCfg, publishingCfg, aliasesCfg, cfg.GetString("version"), cfg.GetString("commit"),
 		cfg.GetBool("omit-component-descriptor"))
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/log"
 )
 
@@ -19,20 +20,25 @@ func (*file) Type() string {
 	return "File"
 }
 
-func (*file) SetCredentials(_ map[string]any) error {
-	return nil
+type file struct {
+	fileCfg fileOCMConfig
 }
 
-func (p *file) SetOCMConfig(_ context.Context, cfg map[string]any) error {
-	err := setConfig(cfg, &p.fileCfg)
+type fileOCMConfig struct {
+	File       string `mapstructure:"file"`
+	Repository string `mapstructure:"repository"`
+}
+
+func (p *file) isConfigured() bool {
+	return p.fileCfg.File != ""
+}
+
+func (p *file) SetOCMConfig(_ context.Context, _ credsprovider.CredsSource, cfg map[string]any) error {
+	err := parseConfig(cfg, &p.fileCfg)
 	if err != nil {
 		return err
 	}
 
-	return nil
-}
-
-func (*file) Close() error {
 	return nil
 }
 
@@ -67,15 +73,6 @@ func (p *file) PublishComponentDescriptor(ctx context.Context, _ string, descrip
 	return nil
 }
 
-type file struct {
-	fileCfg fileOCMConfig
-}
-
-type fileOCMConfig struct {
-	File       string `mapstructure:"file"`
-	Repository string `mapstructure:"repository"`
-}
-
-func (p *file) isConfigured() bool {
-	return p.fileCfg.File != ""
+func (*file) Close() error {
+	return nil
 }

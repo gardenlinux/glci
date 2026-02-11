@@ -15,6 +15,7 @@ import (
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
@@ -26,6 +27,7 @@ import (
 
 func init() {
 	env.Clean("OSS_")
+	env.Clean("ALIBABA_")
 
 	registerPublishingTarget(func() PublishingTarget {
 		return &aliyun{}
@@ -36,18 +38,47 @@ func (*aliyun) Type() string {
 	return "Aliyun"
 }
 
-func (p *aliyun) SetCredentials(creds map[string]any) error {
-	return setCredentials(creds, "alicloud", &p.creds)
+type aliyun struct {
+	pubCfg      aliyunPublishingConfig
+	credsSource credsprovider.CredsSource
+	clientsMtx  sync.RWMutex
+	ossClient   *oss.Client
+	ecsClients  map[string]*client.Client
 }
 
-func (p *aliyun) SetTargetConfig(_ context.Context, cfg map[string]any, sources map[string]ArtifactSource) error {
-	err := setConfig(cfg, &p.pubCfg)
+type aliyunPublishingConfig struct {
+	Source  string   `mapstructure:"source"`
+	Config  string   `mapstructure:"config"`
+	Region  string   `mapstructure:"region"`
+	Regions []string `mapstructure:"regions,omitempty"`
+	Bucket  string   `mapstructure:"bucket"`
+}
+
+func (p *aliyun) isConfigured() bool {
+	ossClient, ecsClients := p.clients()
+
+	return ossClient != nil && len(ecsClients) > 0
+}
+
+func (p *aliyun) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
+	sources map[string]ArtifactSource,
+) error {
+	p.credsSource = credsSource
+
+	err := parseConfig(cfg, &p.pubCfg)
 	if err != nil {
 		return err
 	}
 
-	if p.creds == nil {
-		return errors.New("credentials not set")
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case p.pubCfg.Config == "":
+		return errors.New("missing config")
+	case p.pubCfg.Region == "":
+		return errors.New("missing region")
+	case p.pubCfg.Bucket == "":
+		return errors.New("missing bucket")
 	}
 
 	_, ok := sources[p.pubCfg.Source]
@@ -55,40 +86,145 @@ func (p *aliyun) SetTargetConfig(_ context.Context, cfg map[string]any, sources 
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	var creds aliyunCredentials
-	creds, ok = p.creds[p.pubCfg.Config]
-	if !ok {
-		return fmt.Errorf("missing credentials config %s", p.pubCfg.Config)
-	}
-
 	if len(p.pubCfg.Regions) > 0 {
-		if !slices.Contains(p.pubCfg.Regions, creds.Region) {
-			return fmt.Errorf("credentials region %s missing from list of regions", creds.Region)
+		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
+			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
 		}
 	}
 
-	p.ossClient = oss.NewClient(oss.LoadDefaultConfig().WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID,
-		creds.AccessKeySecret)).WithRegion(creds.Region))
-
-	if len(p.pubCfg.Regions) == 0 {
-		p.ecsClients = make(map[string]*client.Client)
-	} else {
-		p.ecsClients = make(map[string]*client.Client, len(p.pubCfg.Regions))
-	}
-	p.ecsClients[creds.Region], err = client.NewClient(&utils.Config{
-		AccessKeyId:     &creds.AccessKeyID,
-		AccessKeySecret: &creds.AccessKeySecret,
-		RegionId:        &creds.Region,
-	})
+	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.pubCfg.Config,
+	}, p.createClients)
 	if err != nil {
-		return fmt.Errorf("cannot create ecs client: %w", err)
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
 	}
 
 	return nil
 }
 
-func (*aliyun) Close() error {
+type aliyunTaskState struct {
+	Region string `json:"region,omitzero"`
+	Blob   string `json:"blob,omitzero"`
+	Image  string `json:"image,omitzero"`
+	Public bool   `json:"public,omitzero"`
+}
+
+type aliyunPublishingOutput struct {
+	Images []aliyunPublishedImage `yaml:"published_alicloud_images,omitempty"`
+}
+
+type aliyunPublishedImage struct {
+	Region string `yaml:"region_id"`
+	ID     string `yaml:"image_id"`
+	Image  string `yaml:"image_name"`
+}
+
+type aliyunCredentials struct {
+	AccessKey     string `mapstructure:"access_key"`
+	SecretKey     string `mapstructure:"secret_key"`
+	SecurityToken string `mapstructure:"security_token"`
+}
+
+func (p *aliyun) createClients(ctx context.Context, rawCreds map[string]any) error {
+	var creds aliyunCredentials
+	err := parseCredentials(rawCreds, &creds)
+	if err != nil {
+		return err
+	}
+
+	p.clientsMtx.Lock()
+	defer p.clientsMtx.Unlock()
+
+	p.ossClient = oss.NewClient(oss.LoadDefaultConfig().WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey,
+		creds.SecretKey, creds.SecurityToken)).WithRegion(p.pubCfg.Region))
+
+	var ecsClient *client.Client
+	ecsClient, err = client.NewClient(&utils.Config{
+		AccessKeyId:     &creds.AccessKey,
+		AccessKeySecret: &creds.SecretKey,
+		RegionId:        &p.pubCfg.Region,
+		SecurityToken:   &creds.SecurityToken,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot create ecs client: %w", err)
+	}
+
+	var regions []string
+	regions, err = p.listRegions(ctx, ecsClient)
+	if err != nil {
+		return fmt.Errorf("cannot list regions: %w", err)
+	}
+	if len(p.pubCfg.Regions) > 0 {
+		regions = slc.Subset(regions, p.pubCfg.Regions)
+	}
+	if len(regions) == 0 {
+		return errors.New("no available regions")
+	}
+	if !slices.Contains(regions, p.pubCfg.Region) {
+		return fmt.Errorf("region %s is not available", p.pubCfg.Region)
+	}
+
+	p.ecsClients = make(map[string]*client.Client, len(regions))
+	for _, region := range regions {
+		if region == p.pubCfg.Region {
+			p.ecsClients[region] = ecsClient
+			continue
+		}
+
+		p.ecsClients[region], err = client.NewClient(&utils.Config{
+			RegionId:   &region,
+			Credential: ecsClient.Credential,
+		})
+		if err != nil {
+			return fmt.Errorf("cannot create client for region %s: %w", region, err)
+		}
+	}
+
 	return nil
+}
+
+func (*aliyun) listRegions(ctx context.Context, c *client.Client) ([]string, error) {
+	log.Debug(ctx, "Listing available regions")
+	err := ctx.Err()
+	if err != nil {
+		return nil, fmt.Errorf("cannot describe regions: %w", err)
+	}
+	var r *client.DescribeRegionsResponse
+	r, err = c.DescribeRegions(&client.DescribeRegionsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("cannot describe regions: %w", err)
+	}
+	if r.Body == nil {
+		return nil, errors.New("cannot describe regions: missing body")
+	}
+	if r.Body.Regions == nil {
+		return nil, errors.New("cannot describe regions: missing regions")
+	}
+
+	regions := make([]string, 0, len(r.Body.Regions.Region))
+	for _, region := range r.Body.Regions.Region {
+		if region == nil {
+			return nil, errors.New("cannot describe regions: missing region")
+		}
+		if region.RegionId == nil {
+			return nil, errors.New("cannot describe regions: missing region ID")
+		}
+		regions = append(regions, *region.RegionId)
+	}
+
+	return regions, nil
+}
+
+func (p *aliyun) clients() (*oss.Client, map[string]*client.Client) {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.ossClient, p.ecsClients
+}
+
+func (*aliyun) imageName(cname, version, committish string) string {
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
 func (*aliyun) ImageSuffix() string {
@@ -172,20 +308,8 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
 	source := sources[p.pubCfg.Source]
-	region := p.creds[p.pubCfg.Config].Region
+	region := p.pubCfg.Region
 	ctx = log.WithValues(ctx, "image", image, "sourceType", source.Type(), "sourceRepo", source.Repository())
-
-	var regions []string
-	regions, err = p.listRegions(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("cannot list regions: %w", err)
-	}
-	if len(p.pubCfg.Regions) > 0 {
-		regions = slc.Subset(regions, p.pubCfg.Regions)
-	}
-	if len(regions) == 0 {
-		return nil, errors.New("no available regions")
-	}
 
 	ctx = task.Begin(ctx, "publish/"+image+"/"+region, &aliyunTaskState{
 		Region: region,
@@ -207,9 +331,10 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 		return nil, task.Fail(ctx, fmt.Errorf("cannot delete blob %s: %w", image, err))
 	}
 
-	images := make(map[string]string, len(regions))
+	_, ecsClients := p.clients()
+	images := make(map[string]string, len(ecsClients))
 	publishImages := parallel.NewActivitySync(ctx)
-	for _, toRegion := range regions {
+	for toRegion := range ecsClients {
 		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
 			localID := imageID
@@ -223,7 +348,8 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 				})
 				localID, er = p.copyImage(ctx, image, imageID, region, toRegion)
 				if er != nil {
-					return nil, task.Fail(ctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, er))
+					return nil, task.Fail(ctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion,
+						er))
 				}
 				ctx = log.WithValues(ctx, "imageID", localID)
 
@@ -265,6 +391,236 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	}, nil
 }
 
+func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, image string) (string, error) {
+	ossKey := image + p.ImageSuffix()
+	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "ossKey", ossKey)
+
+	obj, err := source.GetObject(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("cannot get blob: %w", err)
+	}
+	defer func() {
+		_ = obj.Close()
+	}()
+
+	ossClient, _ := p.clients()
+
+	log.Info(ctx, "Uploading blob")
+	_, err = ossClient.PutObject(ctx, &oss.PutObjectRequest{
+		Bucket: &p.pubCfg.Bucket,
+		Key:    &ossKey,
+		Body:   obj,
+	})
+	if err != nil {
+		return "", fmt.Errorf("cannot put object %s in bucket %s: %w", ossKey, p.pubCfg.Bucket, err)
+	}
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Blob = ossKey
+		return s
+	})
+	log.Debug(ctx, "Blob uploaded")
+
+	err = obj.Close()
+	if err != nil {
+		return "", fmt.Errorf("cannot close blob: %w", err)
+	}
+
+	return ossKey, nil
+}
+
+func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, error) {
+	ctx = log.WithValues(ctx, "blob", blob, "region", p.pubCfg.Region)
+
+	_, ecsClients := p.clients()
+
+	log.Info(ctx, "Importing image")
+	err := ctx.Err()
+	if err != nil {
+		return "", fmt.Errorf("cannot import image: %w", err)
+	}
+	c := ecsClients[p.pubCfg.Region]
+	var r *client.ImportImageResponse
+	r, err = c.ImportImage(&client.ImportImageRequest{
+		DiskDeviceMapping: []*client.ImportImageRequestDiskDeviceMapping{
+			{
+				DiskImageSize: ptr.P(int32(20)),
+				Format:        ptr.P("qcow2"),
+				OSSBucket:     &p.pubCfg.Bucket,
+				OSSObject:     &blob,
+			},
+		},
+		Features: &client.ImportImageRequestFeatures{
+			NvmeSupport: ptr.P("supported"),
+		},
+		ImageName: &image,
+		RegionId:  &p.pubCfg.Region,
+	})
+	if err != nil {
+		return "", fmt.Errorf("cannot import image: %w", err)
+	}
+	if r.Body == nil {
+		return "", errors.New("cannot import image: missing body")
+	}
+	if r.Body.ImageId == nil {
+		return "", errors.New("cannot import image: missing image ID")
+	}
+	imageID := *r.Body.ImageId
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Image = imageID
+		return s
+	})
+	ctx = log.WithValues(ctx, "imageID", imageID)
+
+	err = p.waitForImage(ctx, imageID, p.pubCfg.Region)
+	if err != nil {
+		return "", err
+	}
+	log.Debug(ctx, "Image ready")
+
+	return imageID, nil
+}
+
+func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
+	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "blob", blob)
+
+	ossClient, _ := p.clients()
+
+	log.Info(ctx, "Deleting blob")
+	_, err := ossClient.DeleteObject(ctx, &oss.DeleteObjectRequest{
+		Bucket: &p.pubCfg.Bucket,
+		Key:    &blob,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot delete object %s in bucket %s: %w", blob, p.pubCfg.Bucket, err)
+	}
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Blob = ""
+		return s
+	})
+
+	return nil
+}
+
+func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion string) (string, error) {
+	_, ecsClients := p.clients()
+
+	log.Info(ctx, "Copying image")
+	err := ctx.Err()
+	if err != nil {
+		return "", fmt.Errorf("cannot copy image: %w", err)
+	}
+	c := ecsClients[region]
+	var r *client.CopyImageResponse
+	r, err = c.CopyImage(&client.CopyImageRequest{
+		DestinationImageName: &image,
+		DestinationRegionId:  &toRegion,
+		ImageId:              &imageID,
+		RegionId:             &region,
+	})
+	if err != nil {
+		return "", fmt.Errorf("cannot copy image: %w", err)
+	}
+	if r.Body == nil {
+		return "", errors.New("cannot copy image: missing body")
+	}
+	if r.Body.ImageId == nil {
+		return "", errors.New("cannot copy image: missing image ID")
+	}
+	toImageID := *r.Body.ImageId
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Image = toImageID
+		return s
+	})
+
+	return toImageID, nil
+}
+
+func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error {
+	_, ecsClients := p.clients()
+
+	c := ecsClients[region]
+	var status string
+	for status != "Available" {
+		err := ctx.Err()
+		if err != nil {
+			return fmt.Errorf("cannot describe image: %w", err)
+		}
+		var r *client.DescribeImagesResponse
+		r, err = c.DescribeImages(&client.DescribeImagesRequest{
+			ImageId:  &imageID,
+			RegionId: &region,
+		})
+		if err != nil {
+			return fmt.Errorf("cannot describe image: %w", err)
+		}
+		if r.Body == nil {
+			return errors.New("cannot describe image: missing body")
+		}
+		if r.Body.Images == nil || len(r.Body.Images.Image) > 1 {
+			return errors.New("cannot describe image: missing images")
+		}
+		if len(r.Body.Images.Image) == 1 {
+			if r.Body.Images.Image[0] == nil {
+				return errors.New("cannot describe image: missing image")
+			}
+			if r.Body.Images.Image[0].Status == nil {
+				return errors.New("cannot describe image: missing status")
+			}
+			status = *r.Body.Images.Image[0].Status
+		}
+
+		if status != "Available" {
+			if status != "" {
+				return fmt.Errorf("image has status %s", status)
+			}
+
+			time.Sleep(time.Second * 7)
+		}
+	}
+
+	return nil
+}
+
+func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public, steamroll bool) error {
+	_, ecsClients := p.clients()
+
+	if public {
+		log.Debug(ctx, "Adding share permission to image")
+	} else {
+		log.Debug(ctx, "Removing share permission from image")
+	}
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("cannot modify share permission: %w", err)
+	}
+	c := ecsClients[region]
+	_, err = c.ModifyImageSharePermission(&client.ModifyImageSharePermissionRequest{
+		ImageId:  &imageID,
+		IsPublic: &public,
+		RegionId: &region,
+	})
+	if err != nil {
+		var terr *tea.SDKError
+		if steamroll && errors.As(err, &terr) {
+			if terr.StatusCode != nil && *terr.StatusCode == http.StatusNotFound {
+				log.Debug(ctx, "Image not found but the steamroller keeps going")
+				return nil
+			}
+			if terr.Code != nil && *terr.Code == "Image.NotPublic" {
+				log.Debug(ctx, "Image not public but the steamroller keeps going")
+				return nil
+			}
+		}
+		return fmt.Errorf("cannot modify share permission: %w", err)
+	}
+	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+		s.Public = public
+		return s
+	})
+
+	return nil
+}
+
 func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
@@ -296,6 +652,81 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 		})
 	}
 	return removeImages.Wait()
+}
+
+func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region string, steamroll bool) error {
+	_, ecsClients := p.clients()
+
+	log.Debug(ctx, "Getting image status")
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("cannot describe image: %w", err)
+	}
+	c := ecsClients[region]
+	var r *client.DescribeImagesResponse
+	r, err = c.DescribeImages(&client.DescribeImagesRequest{
+		ImageId:  &imageID,
+		RegionId: &region,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot describe image: %w", err)
+	}
+	if r.Body == nil {
+		return errors.New("cannot describe image: missing body")
+	}
+	if r.Body.Images == nil || r.Body.Images.Image == nil || len(r.Body.Images.Image) > 1 {
+		return errors.New("cannot describe image: missing images")
+	}
+	if len(r.Body.Images.Image) != 1 {
+		if steamroll {
+			log.Debug(ctx, "Image not found but the steamroller keeps going")
+			return nil
+		}
+		return errors.New("cannot describe image: image not found")
+	}
+	if r.Body.Images.Image[0] == nil {
+		return errors.New("cannot describe image: missing image")
+	}
+	if r.Body.Images.Image[0].IsPublic == nil {
+		return errors.New("cannot describe image: missing status")
+	}
+	isPublic := *r.Body.Images.Image[0].IsPublic
+
+	if isPublic {
+		err = p.makePublic(ctx, imageID, region, false, steamroll)
+		if err != nil {
+			return fmt.Errorf("cannot make image not public: %w", err)
+		}
+	} else if !steamroll {
+		return errors.New("image is not public")
+	}
+
+	err = p.deleteImage(ctx, imageID, region, steamroll)
+	if err != nil {
+		return fmt.Errorf("cannot delete image: %w", err)
+	}
+
+	return nil
+}
+
+func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool) error {
+	_, ecsClients := p.clients()
+
+	log.Info(ctx, "Deleting image")
+	err := ctx.Err()
+	if err != nil {
+		return fmt.Errorf("cannot delete image: %w", err)
+	}
+	c := ecsClients[region]
+	_, err = c.DeleteImage(&client.DeleteImageRequest{
+		ImageId:  &imageID,
+		RegionId: &region,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot delete image: %w", err)
+	}
+
+	return nil
 }
 
 func (p *aliyun) CanRollback() string {
@@ -358,430 +789,12 @@ func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error
 	return rollbackTasks.Wait()
 }
 
-type aliyun struct {
-	creds         map[string]aliyunCredentials
-	pubCfg        aliyunPublishingConfig
-	ossClient     *oss.Client
-	ecsClients    map[string]*client.Client
-	ecsClientsMtx sync.RWMutex
-}
-
-type aliyunCredentials struct {
-	Region          string `mapstructure:"region"`
-	AccessKeyID     string `mapstructure:"access_key_id"`
-	AccessKeySecret string `mapstructure:"access_key_secret"`
-}
-
-type aliyunPublishingConfig struct {
-	Source  string   `mapstructure:"source"`
-	Config  string   `mapstructure:"config"`
-	Bucket  string   `mapstructure:"bucket"`
-	Regions []string `mapstructure:"regions,omitempty"`
-}
-
-type aliyunTaskState struct {
-	Region string `json:"region,omitzero"`
-	Blob   string `json:"blob,omitzero"`
-	Image  string `json:"image,omitzero"`
-	Public bool   `json:"public,omitzero"`
-}
-
-type aliyunPublishingOutput struct {
-	Images []aliyunPublishedImage `yaml:"published_alicloud_images,omitempty"`
-}
-
-type aliyunPublishedImage struct {
-	Region string `yaml:"region_id"`
-	ID     string `yaml:"image_id"`
-	Image  string `yaml:"image_name"`
-}
-
-func (p *aliyun) isConfigured() bool {
-	return p.ossClient != nil && len(p.ecsClients) != 0
-}
-
-func (*aliyun) imageName(cname, version, committish string) string {
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
-}
-
-func (p *aliyun) listRegions(ctx context.Context) ([]string, error) {
-	log.Debug(ctx, "Listing available regions")
-	c, err := p.ecsClient("")
-	if err != nil {
-		return nil, err
-	}
-	err = ctx.Err()
-	if err != nil {
-		return nil, fmt.Errorf("cannot describe regions: %w", err)
-	}
-	var r *client.DescribeRegionsResponse
-	r, err = c.DescribeRegions(&client.DescribeRegionsRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("cannot describe regions: %w", err)
-	}
-	if r.Body == nil {
-		return nil, errors.New("cannot describe regions: missing body")
-	}
-	if r.Body.Regions == nil {
-		return nil, errors.New("cannot describe regions: missing regions")
-	}
-
-	regions := make([]string, 0, len(r.Body.Regions.Region))
-	for _, region := range r.Body.Regions.Region {
-		if region == nil {
-			return nil, errors.New("cannot describe regions: missing region")
-		}
-		if region.RegionId == nil {
-			return nil, errors.New("cannot describe regions: missing region ID")
-		}
-		regions = append(regions, *region.RegionId)
-	}
-
-	return regions, nil
-}
-
-func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, image string) (string, error) {
-	ossKey := image + p.ImageSuffix()
-	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "ossKey", ossKey)
-
-	obj, err := source.GetObject(ctx, key)
-	if err != nil {
-		return "", fmt.Errorf("cannot get blob: %w", err)
-	}
-	defer func() {
-		_ = obj.Close()
-	}()
-
-	log.Info(ctx, "Uploading blob")
-	_, err = p.ossClient.PutObject(ctx, &oss.PutObjectRequest{
-		Bucket: &p.pubCfg.Bucket,
-		Key:    &ossKey,
-		Body:   obj,
-	})
-	if err != nil {
-		return "", fmt.Errorf("cannot put object %s in bucket %s: %w", ossKey, p.pubCfg.Bucket, err)
-	}
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
-		s.Blob = ossKey
-		return s
-	})
-	log.Debug(ctx, "Blob uploaded")
-
-	err = obj.Close()
-	if err != nil {
-		return "", fmt.Errorf("cannot close blob: %w", err)
-	}
-
-	return ossKey, nil
-}
-
-func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, error) {
-	region := p.creds[p.pubCfg.Config].Region
-	ctx = log.WithValues(ctx, "blob", blob, "region", region)
-
-	log.Info(ctx, "Importing image")
-	c, err := p.ecsClient("")
-	if err != nil {
-		return "", err
-	}
-	err = ctx.Err()
-	if err != nil {
-		return "", fmt.Errorf("cannot import image: %w", err)
-	}
-	var r *client.ImportImageResponse
-	r, err = c.ImportImage(&client.ImportImageRequest{
-		DiskDeviceMapping: []*client.ImportImageRequestDiskDeviceMapping{
-			{
-				DiskImageSize: ptr.P(int32(20)),
-				Format:        ptr.P("qcow2"),
-				OSSBucket:     &p.pubCfg.Bucket,
-				OSSObject:     &blob,
-			},
-		},
-		Features: &client.ImportImageRequestFeatures{
-			NvmeSupport: ptr.P("supported"),
-		},
-		ImageName: &image,
-		RegionId:  &region,
-	})
-	if err != nil {
-		return "", fmt.Errorf("cannot import image: %w", err)
-	}
-	if r.Body == nil {
-		return "", errors.New("cannot import image: missing body")
-	}
-	if r.Body.ImageId == nil {
-		return "", errors.New("cannot import image: missing image ID")
-	}
-	imageID := *r.Body.ImageId
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
-		s.Image = imageID
-		return s
-	})
-	ctx = log.WithValues(ctx, "imageID", imageID)
-
-	err = p.waitForImage(ctx, imageID, region)
-	if err != nil {
-		return "", err
-	}
-	log.Debug(ctx, "Image ready")
-
-	return imageID, nil
-}
-
-func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
-	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "blob", blob)
-
-	log.Info(ctx, "Deleting blob")
-	_, err := p.ossClient.DeleteObject(ctx, &oss.DeleteObjectRequest{
-		Bucket: &p.pubCfg.Bucket,
-		Key:    &blob,
-	})
-	if err != nil {
-		return fmt.Errorf("cannot delete object %s in bucket %s: %w", blob, p.pubCfg.Bucket, err)
-	}
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
-		s.Blob = ""
-		return s
-	})
-
-	return nil
-}
-
-func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion string) (string, error) {
-	log.Info(ctx, "Copying image")
-	c, err := p.ecsClient("")
-	if err != nil {
-		return "", err
-	}
-	err = ctx.Err()
-	if err != nil {
-		return "", fmt.Errorf("cannot copy image: %w", err)
-	}
-	var r *client.CopyImageResponse
-	r, err = c.CopyImage(&client.CopyImageRequest{
-		DestinationImageName: &image,
-		DestinationRegionId:  &toRegion,
-		ImageId:              &imageID,
-		RegionId:             &region,
-	})
-	if err != nil {
-		return "", fmt.Errorf("cannot copy image: %w", err)
-	}
-	if r.Body == nil {
-		return "", errors.New("cannot copy image: missing body")
-	}
-	if r.Body.ImageId == nil {
-		return "", errors.New("cannot copy image: missing image ID")
-	}
-	toImageID := *r.Body.ImageId
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
-		s.Image = toImageID
-		return s
-	})
-
-	return toImageID, nil
-}
-
-func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error {
-	var status string
-	c, err := p.ecsClient(region)
-	if err != nil {
-		return err
-	}
-
-	for status != "Available" {
-		err = ctx.Err()
-		if err != nil {
-			return fmt.Errorf("cannot describe image: %w", err)
-		}
-		var r *client.DescribeImagesResponse
-		r, err = c.DescribeImages(&client.DescribeImagesRequest{
-			ImageId:  &imageID,
-			RegionId: &region,
+func (p *aliyun) Close() error {
+	if p.pubCfg.Config != "" {
+		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+			Type:   p.Type(),
+			Config: p.pubCfg.Config,
 		})
-		if err != nil {
-			return fmt.Errorf("cannot describe image: %w", err)
-		}
-		if r.Body == nil {
-			return errors.New("cannot describe image: missing body")
-		}
-		if r.Body.Images == nil || len(r.Body.Images.Image) > 1 {
-			return errors.New("cannot describe image: missing images")
-		}
-		if len(r.Body.Images.Image) == 1 {
-			if r.Body.Images.Image[0] == nil {
-				return errors.New("cannot describe image: missing image")
-			}
-			if r.Body.Images.Image[0].Status == nil {
-				return errors.New("cannot describe image: missing status")
-			}
-			status = *r.Body.Images.Image[0].Status
-		}
-
-		if status != "Available" {
-			if status != "" {
-				return fmt.Errorf("image has status %s", status)
-			}
-
-			time.Sleep(time.Second * 7)
-		}
-	}
-
-	return nil
-}
-
-func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public, steamroll bool) error {
-	if public {
-		log.Debug(ctx, "Adding share permission to image")
-	} else {
-		log.Debug(ctx, "Removing share permission from image")
-	}
-	c, err := p.ecsClient(region)
-	if err != nil {
-		return err
-	}
-	err = ctx.Err()
-	if err != nil {
-		return fmt.Errorf("cannot modify share permission: %w", err)
-	}
-	_, err = c.ModifyImageSharePermission(&client.ModifyImageSharePermissionRequest{
-		ImageId:  &imageID,
-		IsPublic: &public,
-		RegionId: &region,
-	})
-	if err != nil {
-		var terr *tea.SDKError
-		if steamroll && errors.As(err, &terr) {
-			if terr.StatusCode != nil && *terr.StatusCode == http.StatusNotFound {
-				log.Debug(ctx, "Image not found but the steamroller keeps going")
-				return nil
-			}
-			if terr.Code != nil && *terr.Code == "Image.NotPublic" {
-				log.Debug(ctx, "Image not public but the steamroller keeps going")
-				return nil
-			}
-		}
-		return fmt.Errorf("cannot modify share permission: %w", err)
-	}
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
-		s.Public = public
-		return s
-	})
-
-	return nil
-}
-
-func (p *aliyun) ecsClient(region string) (*client.Client, error) {
-	mainClient := p.ecsClients[p.creds[p.pubCfg.Config].Region]
-	if region == "" || region == *mainClient.RegionId {
-		return mainClient, nil
-	}
-
-	var c *client.Client
-	var ok bool
-	func() {
-		p.ecsClientsMtx.RLock()
-		defer p.ecsClientsMtx.RUnlock()
-		c, ok = p.ecsClients[region]
-	}()
-	if !ok {
-		p.ecsClientsMtx.Lock()
-		defer p.ecsClientsMtx.Unlock()
-		c, ok = p.ecsClients[region]
-		if ok {
-			return c, nil
-		}
-
-		var err error
-		c, err = client.NewClient(&utils.Config{
-			RegionId:   &region,
-			Credential: mainClient.Credential,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("cannot create client for region %s: %w", region, err)
-		}
-
-		p.ecsClients[region] = c
-	}
-
-	return c, nil
-}
-
-func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region string, steamroll bool) error {
-	c, err := p.ecsClient(region)
-	if err != nil {
-		return err
-	}
-
-	log.Debug(ctx, "Getting image status")
-	err = ctx.Err()
-	if err != nil {
-		return fmt.Errorf("cannot describe image: %w", err)
-	}
-	var r *client.DescribeImagesResponse
-	r, err = c.DescribeImages(&client.DescribeImagesRequest{
-		ImageId:  &imageID,
-		RegionId: &region,
-	})
-	if err != nil {
-		return fmt.Errorf("cannot describe image: %w", err)
-	}
-	if r.Body == nil {
-		return errors.New("cannot describe image: missing body")
-	}
-	if r.Body.Images == nil || r.Body.Images.Image == nil || len(r.Body.Images.Image) > 1 {
-		return errors.New("cannot describe image: missing images")
-	}
-	if len(r.Body.Images.Image) != 1 {
-		if steamroll {
-			log.Debug(ctx, "Image not found but the steamroller keeps going")
-			return nil
-		}
-		return errors.New("cannot describe image: image not found")
-	}
-	if r.Body.Images.Image[0] == nil {
-		return errors.New("cannot describe image: missing image")
-	}
-	if r.Body.Images.Image[0].IsPublic == nil {
-		return errors.New("cannot describe image: missing status")
-	}
-	isPublic := *r.Body.Images.Image[0].IsPublic
-
-	if isPublic {
-		err = p.makePublic(ctx, imageID, region, false, steamroll)
-		if err != nil {
-			return fmt.Errorf("cannot make image not public: %w", err)
-		}
-	} else if !steamroll {
-		return errors.New("image is not public")
-	}
-
-	err = p.deleteImage(ctx, imageID, region, steamroll)
-	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
-	}
-
-	return nil
-}
-
-func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool) error {
-	c, err := p.ecsClient(region)
-	if err != nil {
-		return err
-	}
-
-	log.Info(ctx, "Deleting image")
-	err = ctx.Err()
-	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
-	}
-	_, err = c.DeleteImage(&client.DeleteImageRequest{
-		ImageId:  &imageID,
-		RegionId: &region,
-	})
-	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
 	}
 
 	return nil

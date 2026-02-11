@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ocm"
@@ -15,25 +16,25 @@ import (
 )
 
 // Publish publishes a release to all cloud providers specified in the flavors and publishing configurations.
-func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, aliasesConfig AliasesConfig,
-	creds Credentials, version, commit string, omitComponentDescritpr bool,
+func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, aliasesConfig AliasesConfig, version,
+	commit string, omitComponentDescritpr bool,
 ) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
-	log.Debug(ctx, "Loading credentials and configuration")
-	manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
+	log.Debug(ctx, "Loading configuration")
+	credsSource, manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadConfig(ctx, publishingConfig)
 	if err != nil {
-		return fmt.Errorf("invalid credentials or configuration: %w", err)
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	defer func() {
-		_ = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
+		_ = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
 		_ = manifestSource.Close()
 		_ = manifestTarget.Close()
 	}()
 	ctx = task.WithStatePersistor(ctx, state, id(version, commit))
 
-	err = publish(ctx, flavorsConfig, aliasesConfig, manifestSource, manifestTarget, sources, targets, ocmTarget, state, version, commit,
-		omitComponentDescritpr)
+	err = publish(ctx, flavorsConfig, aliasesConfig, credsSource, manifestSource, manifestTarget, sources, targets, ocmTarget, state,
+		version, commit, omitComponentDescritpr)
 	perr := task.PersistorError(ctx)
 	if perr != nil {
 		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
@@ -41,16 +42,13 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 			err = perr
 		}
 	}
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
-func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig AliasesConfig, manifestSource,
-	manifestTarget cloudprovider.ArtifactSource, sources map[string]cloudprovider.ArtifactSource, targets []cloudprovider.PublishingTarget,
-	ocmTarget cloudprovider.OCMTarget, state task.StatePersistor, version, commit string, omitComponentDescritpr bool,
+func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig AliasesConfig, credsSource credsprovider.CredsSource,
+	manifestSource, manifestTarget cloudprovider.ArtifactSource, sources map[string]cloudprovider.ArtifactSource,
+	targets []cloudprovider.PublishingTarget, ocmTarget cloudprovider.OCMTarget, state task.StatePersistor, version, commit string,
+	omitComponentDescritpr bool,
 ) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(targets))
 	for _, target := range targets {
@@ -255,7 +253,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 	}
 
 	log.Debug(ctx, "Closing sources and targets")
-	err = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
+	err = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
 	if err != nil {
 		return fmt.Errorf("cannot close sources and targets: %w", err)
 	}

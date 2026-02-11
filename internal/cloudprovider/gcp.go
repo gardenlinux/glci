@@ -3,21 +3,23 @@ package cloudprovider
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	computev1 "cloud.google.com/go/compute/apiv1"
+	compute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"cloud.google.com/go/storage"
+	"golang.org/x/oauth2"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/hsh"
@@ -44,32 +46,47 @@ func (*gcp) Type() string {
 	return "GCP"
 }
 
-func (p *gcp) SetCredentials(creds map[string]any) error {
-	err := setCredentials(creds, "gcp", &p.creds)
-	if err != nil {
-		return err
-	}
-
-	for cfg, gcpCreds := range p.creds {
-		gcpCreds.serviceAccountKeyJSON, err = json.Marshal(gcpCreds.ServiceAccountKey)
-		if err != nil {
-			return fmt.Errorf("invalid credentials for config %s: %w", cfg, err)
-		}
-		gcpCreds.ServiceAccountKey = nil
-		p.creds[cfg] = gcpCreds
-	}
-
-	return nil
+type gcp struct {
+	pubCfg        gcpPublishingConfig
+	credsSource   credsprovider.CredsSource
+	clientsMtx    sync.RWMutex
+	storageClient *storage.Client
+	imagesClient  *compute.ImagesClient
+	accessID      string
 }
 
-func (p *gcp) SetTargetConfig(ctx context.Context, cfg map[string]any, sources map[string]ArtifactSource) error {
-	err := setConfig(cfg, &p.pubCfg)
+type gcpPublishingConfig struct {
+	Source  string `mapstructure:"source"`
+	Config  string `mapstructure:"config"`
+	Project string `mapstructure:"project"`
+	Bucket  string `mapstructure:"bucket"`
+}
+
+func (p *gcp) isConfigured() bool {
+	stortageClient, imagesClient := p.clients()
+
+	return stortageClient != nil && imagesClient != nil
+}
+
+func (p *gcp) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
+	sources map[string]ArtifactSource,
+) error {
+	p.credsSource = credsSource
+
+	err := parseConfig(cfg, &p.pubCfg)
 	if err != nil {
 		return err
 	}
 
-	if p.creds == nil {
-		return errors.New("credentials not set")
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case p.pubCfg.Config == "":
+		return errors.New("missing config")
+	case p.pubCfg.Project == "":
+		return errors.New("missing project")
+	case p.pubCfg.Bucket == "":
+		return errors.New("missing bucket")
 	}
 
 	_, ok := sources[p.pubCfg.Source]
@@ -77,42 +94,90 @@ func (p *gcp) SetTargetConfig(ctx context.Context, cfg map[string]any, sources m
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	var creds gcpCredentials
-	creds, ok = p.creds[p.pubCfg.Config]
-	if !ok {
-		return fmt.Errorf("missing credentials config %s", p.pubCfg.Config)
-	}
-
-	p.storageClient, err = storage.NewClient(ctx, option.WithAuthCredentialsJSON(option.ServiceAccount, creds.serviceAccountKeyJSON))
+	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.pubCfg.Config,
+	}, p.createClients)
 	if err != nil {
-		return fmt.Errorf("cannot create storage client: %w", err)
-	}
-
-	p.imagesClient, err = computev1.NewImagesRESTClient(ctx, option.WithAuthCredentialsJSON(option.ServiceAccount,
-		creds.serviceAccountKeyJSON))
-	if err != nil {
-		return fmt.Errorf("cannot create images client: %w", err)
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
 	}
 
 	return nil
 }
 
-func (p *gcp) Close() error {
-	if p.storageClient != nil {
-		err := p.storageClient.Close()
-		if err != nil {
-			return fmt.Errorf("cannot close storage client: %w", err)
-		}
+type gcpTaskState struct {
+	Blob  string `json:"blob,omitzero"`
+	Image string `json:"image,omitzero"`
+}
+
+type gcpPublishingOutput struct {
+	Project string `yaml:"gcp_project_name,omitzero"`
+	Image   string `yaml:"gcp_image_name,omitzero"`
+}
+
+type gcpCredentials struct {
+	ServiceAccountEmail string `mapstructure:"service_account_email"`
+	Token               string `mapstructure:"token"`
+	Expiry              int64  `mapstructure:"expiry"`
+}
+
+func (p *gcp) createClients(ctx context.Context, rawCreds map[string]any) error {
+	var creds gcpCredentials
+	err := parseCredentials(rawCreds, &creds)
+	if err != nil {
+		return err
 	}
 
-	if p.imagesClient != nil {
-		err := p.imagesClient.Close()
-		if err != nil {
-			return fmt.Errorf("cannot close images client: %w", err)
-		}
+	p.clientsMtx.Lock()
+	defer p.clientsMtx.Unlock()
+
+	err = p.destroyClients(p.storageClient, p.imagesClient)
+	if err != nil {
+		return fmt.Errorf("cannot destroy existing clients: %w", err)
 	}
+
+	tokenSrc := oauth2.StaticTokenSource(&oauth2.Token{
+		AccessToken: creds.Token,
+		Expiry:      time.Unix(creds.Expiry, 0),
+	})
+
+	p.storageClient, err = storage.NewClient(ctx, option.WithTokenSource(tokenSrc))
+	if err != nil {
+		return fmt.Errorf("cannot create storage client: %w", err)
+	}
+
+	p.imagesClient, err = compute.NewImagesRESTClient(ctx, option.WithTokenSource(tokenSrc))
+	if err != nil {
+		return fmt.Errorf("cannot create images client: %w", err)
+	}
+
+	p.accessID = creds.ServiceAccountEmail
 
 	return nil
+}
+
+func (p *gcp) clients() (*storage.Client, *compute.ImagesClient) {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.storageClient, p.imagesClient
+}
+
+func (*gcp) imageName(cname, version, committish string) string {
+	cname = hsh.Hash(fnv.New64(), cname)
+	version = strings.ReplaceAll(version, ".", "-")
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
+}
+
+func (*gcp) architecture(arch gl.Architecture) (string, error) {
+	switch arch {
+	case gl.ArchitectureAMD64:
+		return "X86_64", nil
+	case gl.ArchitectureARM64:
+		return "ARM64", nil
+	default:
+		return "", fmt.Errorf("unknown architecture %s", arch)
+	}
 }
 
 func (*gcp) ImageSuffix() string {
@@ -201,9 +266,8 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
 	}
 	source := sources[p.pubCfg.Source]
-	project := p.creds[p.pubCfg.Config].Project
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository(),
-		"project", project)
+		"project", p.pubCfg.Project)
 
 	var secureBoot bool
 	var pk, kek, db string
@@ -237,134 +301,9 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	task.Complete(ctx)
 
 	return &gcpPublishingOutput{
-		Project: project,
+		Project: p.pubCfg.Project,
 		Image:   image,
 	}, nil
-}
-
-func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
-	if !p.isConfigured() {
-		return errors.New("config not set")
-	}
-
-	if flavor(manifest.Platform) != "gcp" {
-		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
-	}
-
-	pubOut, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
-	if err != nil {
-		return fmt.Errorf("invalid manifest: %w", err)
-	}
-	if pubOut.Project == "" || pubOut.Image == "" {
-		return errors.New("invalid manifest: missing published images")
-	}
-	ctx = log.WithValues(ctx, "image", pubOut.Image, "project", pubOut.Project)
-
-	err = p.deleteImage(ctx, pubOut.Image, steamroll)
-	if err != nil {
-		return fmt.Errorf("cannot delete image %s: %w", pubOut.Image, err)
-	}
-
-	return nil
-}
-
-func (p *gcp) CanRollback() string {
-	if !p.isConfigured() {
-		return ""
-	}
-
-	return "gcp"
-}
-
-func (p *gcp) Rollback(ctx context.Context, tasks map[string]task.Task) error {
-	if !p.isConfigured() {
-		return errors.New("config not set")
-	}
-
-	rollbackTasks := parallel.NewActivity(ctx)
-	for _, t := range tasks {
-		state, err := task.ParseState[*gcpTaskState](t.State)
-		if err != nil {
-			return err
-		}
-
-		if state.Blob != "" {
-			rollbackTasks.Go(func(ctx context.Context) error {
-				ctx = log.WithValues(ctx, "blob", state.Blob)
-
-				er := p.deleteBlob(ctx, state.Blob, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
-				}
-
-				return nil
-			})
-		}
-
-		if state.Image != "" {
-			rollbackTasks.Go(func(ctx context.Context) error {
-				ctx = log.WithValues(ctx, "image", state.Image)
-
-				er := p.deleteImage(ctx, state.Image, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
-				}
-
-				return nil
-			})
-		}
-	}
-	return rollbackTasks.Wait()
-}
-
-type gcp struct {
-	creds         map[string]gcpCredentials
-	pubCfg        gcpPublishingConfig
-	storageClient *storage.Client
-	imagesClient  *computev1.ImagesClient
-}
-
-type gcpCredentials struct {
-	Project               string `mapstructure:"project"`
-	ServiceAccountKey     any    `mapstructure:"service_account_key"`
-	serviceAccountKeyJSON []byte
-}
-
-type gcpPublishingConfig struct {
-	Source string `mapstructure:"source"`
-	Config string `mapstructure:"config"`
-	Bucket string `mapstructure:"bucket"`
-}
-
-type gcpTaskState struct {
-	Blob  string `json:"blob,omitzero"`
-	Image string `json:"image,omitzero"`
-}
-
-type gcpPublishingOutput struct {
-	Project string `yaml:"gcp_project_name,omitzero"`
-	Image   string `yaml:"gcp_image_name,omitzero"`
-}
-
-func (p *gcp) isConfigured() bool {
-	return p.storageClient != nil && p.imagesClient != nil
-}
-
-func (*gcp) imageName(cname, version, committish string) string {
-	cname = hsh.Hash(fnv.New64(), cname)
-	version = strings.ReplaceAll(version, ".", "-")
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
-}
-
-func (*gcp) architecture(arch gl.Architecture) (string, error) {
-	switch arch {
-	case gl.ArchitectureAMD64:
-		return "X86_64", nil
-	case gl.ArchitectureARM64:
-		return "ARM64", nil
-	default:
-		return "", fmt.Errorf("unknown architecture %s", arch)
-	}
 }
 
 func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, string, string, string, error) {
@@ -442,8 +381,10 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 		_ = obj.Close()
 	}()
 
+	storageClient, _ := p.clients()
+
 	log.Info(ctx, "Uploading blob")
-	bucket := p.storageClient.Bucket(p.pubCfg.Bucket)
+	bucket := storageClient.Bucket(p.pubCfg.Bucket)
 	w := bucket.Object(blob).NewWriter(ctx)
 	_, err = io.Copy(w, obj)
 	if err != nil {
@@ -466,9 +407,10 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 
 	var url string
 	url, err = bucket.SignedURL(blob, &storage.SignedURLOptions{
-		Method:  "GET",
-		Expires: time.Now().Add(time.Hour * 7),
-		Scheme:  storage.SigningSchemeV4,
+		GoogleAccessID: p.accessID,
+		Method:         "GET",
+		Expires:        time.Now().Add(time.Hour * 7),
+		Scheme:         storage.SigningSchemeV4,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("cannot generate signed URL for blob %s: %w", blob, err)
@@ -478,7 +420,6 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 }
 
 func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureBoot bool, pk, kek, db string) error {
-	project := p.creds[p.pubCfg.Config].Project
 	imageResource := &computepb.Image{
 		Architecture: &arch,
 		GuestOsFeatures: []*computepb.GuestOsFeature{
@@ -518,10 +459,12 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 		}
 	}
 
+	_, imagesClient := p.clients()
+
 	log.Info(ctx, "Inserting image")
-	op, err := p.imagesClient.Insert(ctx, &computepb.InsertImageRequest{
+	op, err := imagesClient.Insert(ctx, &computepb.InsertImageRequest{
 		ImageResource: imageResource,
-		Project:       project,
+		Project:       p.pubCfg.Project,
 	})
 	if err != nil {
 		return fmt.Errorf("cannot insert image: %w", err)
@@ -541,8 +484,10 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 }
 
 func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error {
+	storageClient, _ := p.clients()
+
 	log.Info(ctx, "Deleting blob")
-	err := p.storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Delete(ctx)
+	err := storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Delete(ctx)
 	if err != nil {
 		var terr *googleapi.Error
 		if steamroll && errors.As(err, &terr) && terr.Code == http.StatusNotFound {
@@ -560,10 +505,10 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 }
 
 func (p *gcp) makePublic(ctx context.Context, image string) error {
-	project := p.creds[p.pubCfg.Config].Project
+	_, imagesClient := p.clients()
 
 	log.Debug(ctx, "Setting IAM policy")
-	_, err := p.imagesClient.SetIamPolicy(ctx, &computepb.SetIamPolicyImageRequest{
+	_, err := imagesClient.SetIamPolicy(ctx, &computepb.SetIamPolicyImageRequest{
 		GlobalSetPolicyRequestResource: &computepb.GlobalSetPolicyRequest{
 			Policy: &computepb.Policy{
 				AuditConfigs: nil,
@@ -578,7 +523,7 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 				Version: ptr.P(int32(3)),
 			},
 		},
-		Project:  project,
+		Project:  p.pubCfg.Project,
 		Resource: image,
 	})
 	if err != nil {
@@ -588,13 +533,39 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	return nil
 }
 
+func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	if flavor(manifest.Platform) != "gcp" {
+		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
+	}
+
+	pubOut, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
+	if err != nil {
+		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	if pubOut.Project == "" || pubOut.Image == "" {
+		return errors.New("invalid manifest: missing published images")
+	}
+	ctx = log.WithValues(ctx, "image", pubOut.Image, "project", pubOut.Project)
+
+	err = p.deleteImage(ctx, pubOut.Image, steamroll)
+	if err != nil {
+		return fmt.Errorf("cannot delete image %s: %w", pubOut.Image, err)
+	}
+
+	return nil
+}
+
 func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) error {
-	project := p.creds[p.pubCfg.Config].Project
+	_, imagesClient := p.clients()
 
 	log.Info(ctx, "Deleting image")
-	op, err := p.imagesClient.Delete(ctx, &computepb.DeleteImageRequest{
+	op, err := imagesClient.Delete(ctx, &computepb.DeleteImageRequest{
 		Image:   image,
-		Project: project,
+		Project: p.pubCfg.Project,
 	})
 	if err != nil {
 		var terr *googleapi.Error
@@ -608,6 +579,86 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 	err = op.Wait(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot delete image via operation %s: %w", op.Name(), err)
+	}
+
+	return nil
+}
+
+func (p *gcp) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "gcp"
+}
+
+func (p *gcp) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	rollbackTasks := parallel.NewActivity(ctx)
+	for _, t := range tasks {
+		state, err := task.ParseState[*gcpTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		if state.Blob != "" {
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "blob", state.Blob)
+
+				er := p.deleteBlob(ctx, state.Blob, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				}
+
+				return nil
+			})
+		}
+
+		if state.Image != "" {
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "image", state.Image)
+
+				er := p.deleteImage(ctx, state.Image, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
+				}
+
+				return nil
+			})
+		}
+	}
+	return rollbackTasks.Wait()
+}
+
+func (p *gcp) Close() error {
+	if p.pubCfg.Config != "" {
+		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+			Type:   p.Type(),
+			Config: p.pubCfg.Config,
+		})
+	}
+
+	storageClient, imagesClient := p.clients()
+
+	return p.destroyClients(storageClient, imagesClient)
+}
+
+func (*gcp) destroyClients(storageClient *storage.Client, imagesClient *compute.ImagesClient) error {
+	if storageClient != nil {
+		err := storageClient.Close()
+		if err != nil {
+			return fmt.Errorf("cannot close storage client: %w", err)
+		}
+	}
+
+	if imagesClient != nil {
+		err := imagesClient.Close()
+		if err != nil {
+			return fmt.Errorf("cannot close images client: %w", err)
+		}
 	}
 
 	return nil

@@ -9,20 +9,33 @@ import (
 
 	"github.com/go-viper/mapstructure/v2"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
+)
+
+type (
+	ctxkBatch  struct{}
+	ctxkDomain struct{}
+	ctxkSet    struct{}
+	ctxkTask   struct{}
+	ctxkUndead struct{}
+)
+
+//nolint:gochecknoglobals // Required for automatic registration.
+var (
+	persistors = make(map[string]newStatePersistorFunc)
 )
 
 // StatePersistor is anything that can load and save task state.
 type StatePersistor interface {
 	Type() string
-	SetCredentials(credentials map[string]any) error
-	SetStateConfig(ctx context.Context, config any) error
+	SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, config any) error
 	SetID(id string)
-	Close() error
 	Load() ([]byte, error)
 	Save(state []byte) error
 	Clear() error
+	Close() error
 }
 
 // NewStatePersistor returns a new StatePersistor of a given type.
@@ -35,22 +48,22 @@ func NewStatePersistor(typ string) (StatePersistor, error) {
 	return nf(), nil
 }
 
-// RollbackHandler is anything that can roll back task state.
-type RollbackHandler interface {
-	CanRollback() string
-	Rollback(ctx context.Context, tasks map[string]Task) error
+type newStatePersistorFunc func() StatePersistor
+
+func registerStatePersistor(nf newStatePersistorFunc) {
+	persistors[nf().Type()] = nf
 }
 
-// Task is an ongoing task that can be rolled back.
-type Task struct {
-	State     State  `json:"state,omitempty"`
-	Error     string `json:"error,omitzero"`
-	batch     string
-	completed bool
+type taskSet struct {
+	domains      map[string]taskDomain
+	mtx          sync.Mutex
+	persistor    StatePersistor
+	persistorErr error
 }
 
-// State is the current state of an ongoing task.
-type State any
+type taskDomain struct {
+	Tasks map[string]Task `json:"tasks,omitempty"`
+}
 
 // WithStatePersistor stores a StatePersistor into the context.
 func WithStatePersistor(ctx context.Context, persistor StatePersistor, id string) context.Context {
@@ -108,6 +121,17 @@ func WithBatch(ctx context.Context, batch string) context.Context {
 func WithUndeadMode(ctx context.Context, undead bool) context.Context {
 	return context.WithValue(ctx, ctxkUndead{}, undead)
 }
+
+// Task is an ongoing task that can be rolled back.
+type Task struct {
+	State     State  `json:"state,omitempty"`
+	Error     string `json:"error,omitzero"`
+	batch     string
+	completed bool
+}
+
+// State is the current state of an ongoing task.
+type State any
 
 // Begin begins a new task with an initial state and associates it to the context.
 func Begin[STATE any](ctx context.Context, id string, state STATE) context.Context {
@@ -252,6 +276,25 @@ func RemoveCompleted(ctx context.Context, batch string) {
 	saveState(ctx, tset)
 }
 
+func saveState(ctx context.Context, tset *taskSet) {
+	if tset.persistor == nil {
+		return
+	}
+
+	state, err := json.Marshal(tset.domains)
+	if err != nil {
+		tset.persistorErr = fmt.Errorf("cannot serialize state: %w", err)
+		return
+	}
+
+	log.Debug(ctx, "Saving state", "persistor", tset.persistor.Type())
+	err = tset.persistor.Save(state)
+	if err != nil {
+		tset.persistorErr = fmt.Errorf("cannot save state: %w", err)
+		return
+	}
+}
+
 // Clear removes all state from the persistor.
 func Clear(ctx context.Context) {
 	tset, _ := ctx.Value(ctxkSet{}).(*taskSet)
@@ -281,6 +324,31 @@ func PersistorError(ctx context.Context) error {
 	defer tset.mtx.Unlock()
 
 	return tset.persistorErr
+}
+
+// ParseState converts generic task state into a specific type.
+func ParseState[STATE any](generic State) (STATE, error) {
+	var state STATE
+
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:  &state,
+		TagName: "json",
+	})
+	if err != nil {
+		return state, fmt.Errorf("invalid task state: %w", err)
+	}
+	err = decoder.Decode(generic)
+	if err != nil {
+		return state, fmt.Errorf("invalid task state: %w", err)
+	}
+
+	return state, nil
+}
+
+// RollbackHandler is anything that can roll back task state.
+type RollbackHandler interface {
+	CanRollback() string
+	Rollback(ctx context.Context, tasks map[string]Task) error
 }
 
 // Rollback dispatches ongoing tasks to a set of handlers to roll back based on domains.
@@ -350,85 +418,7 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 	return nil
 }
 
-// ParseState converts generic task state into a specific type.
-func ParseState[STATE any](generic State) (STATE, error) {
-	var state STATE
-
-	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
-		Result:  &state,
-		TagName: "json",
-	})
-	if err != nil {
-		return state, fmt.Errorf("invalid task state: %w", err)
-	}
-	err = decoder.Decode(generic)
-	if err != nil {
-		return state, fmt.Errorf("invalid task state: %w", err)
-	}
-
-	return state, nil
-}
-
-//nolint:gochecknoglobals // Required for automatic registration.
-var (
-	persistors = make(map[string]newStatePersistorFunc)
-)
-
-type (
-	ctxkBatch  struct{}
-	ctxkDomain struct{}
-	ctxkSet    struct{}
-	ctxkTask   struct{}
-	ctxkUndead struct{}
-)
-
-type taskSet struct {
-	domains      map[string]taskDomain
-	mtx          sync.Mutex
-	persistor    StatePersistor
-	persistorErr error
-}
-
-type taskDomain struct {
-	Tasks map[string]Task `json:"tasks,omitempty"`
-}
-
-type newStatePersistorFunc func() StatePersistor
-
-func registerStatePersistor(nf newStatePersistorFunc) {
-	persistors[nf().Type()] = nf
-}
-
-func setCredentials[CREDS any](allCreds map[string]any, section string, creds *map[string]CREDS) error {
-	rawCreds, ok := allCreds[section]
-	if !ok {
-		return errors.New("missing credentials")
-	}
-
-	var sCreds map[string]any
-	sCreds, ok = rawCreds.(map[string]any)
-	if !ok {
-		return errors.New("invalid credentials")
-	}
-
-	if *creds == nil {
-		*creds = make(map[string]CREDS, len(sCreds))
-	}
-
-	for configuration, cCreds := range sCreds {
-		var c CREDS
-		err := mapstructure.Decode(cCreds, &c)
-		if err != nil {
-			return fmt.Errorf("invalid credentials for configuration %s: %w", configuration, err)
-		}
-
-		(*creds)[configuration] = c
-	}
-
-	return nil
-}
-
-func setConfig[CONFIG any](cfg any, config *CONFIG) error {
+func parseConfig[CONFIG any](cfg any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
@@ -437,21 +427,11 @@ func setConfig[CONFIG any](cfg any, config *CONFIG) error {
 	return nil
 }
 
-func saveState(ctx context.Context, tset *taskSet) {
-	if tset.persistor == nil {
-		return
+func parseCredentials[CREDS any](rawCreds map[string]any, creds *CREDS) error {
+	err := mapstructure.Decode(rawCreds, creds)
+	if err != nil {
+		return fmt.Errorf("invalid credentials: %w", err)
 	}
 
-	state, err := json.Marshal(tset.domains)
-	if err != nil {
-		tset.persistorErr = fmt.Errorf("cannot serialize state: %w", err)
-		return
-	}
-
-	log.Debug(ctx, "Saving state", "persistor", tset.persistor.Type())
-	err = tset.persistor.Save(state)
-	if err != nil {
-		tset.persistorErr = fmt.Errorf("cannot save state: %w", err)
-		return
-	}
+	return nil
 }

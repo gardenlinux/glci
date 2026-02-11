@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gophercloud/gophercloud/v2"
@@ -14,11 +15,11 @@ import (
 	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/imageimport"
 	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/images"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
-	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -34,44 +35,104 @@ func (*openstack) Type() string {
 	return "OpenStack"
 }
 
-func (p *openstack) SetCredentials(creds map[string]any) error {
-	err := setCredentials(creds, "ccee", &p.creds)
-	if err != nil {
-		return err
-	}
-
-	return nil
+type openstack struct {
+	pubCfg        openstackPublishingConfig
+	credsSource   credsprovider.CredsSource
+	clientsMtx    sync.RWMutex
+	imagesClients map[string]*gophercloud.ServiceClient
 }
 
-func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sources map[string]ArtifactSource) error {
-	err := setConfig(cfg, &p.pubCfg)
+type openstackPublishingConfig struct {
+	Source      string                            `mapstructure:"source"`
+	SourceChina string                            `mapstructure:"source_china,omitzero"`
+	Configs     []openstackPublishingConfigConfig `mapstructure:"configs"`
+	Hypervisor  openstackHypervisor               `mapstructure:"hypervisor"`
+	Test        bool                              `mapstructure:"test,omitzero"`
+}
+
+type openstackPublishingConfigConfig struct {
+	Config   string   `mapstructure:"config"`
+	Endpoint string   `mapstructure:"endpoint"`
+	Domain   string   `mapstructure:"domain"`
+	Project  string   `mapstructure:"project"`
+	Regions  []string `mapstructure:"regions"`
+}
+
+type openstackHypervisor string
+
+const (
+	openstackHypervisorBareMetal openstackHypervisor = "Bare Metal"
+	openstackHypervisorVMware    openstackHypervisor = "VMware"
+)
+
+func (p *openstack) isConfigured() bool {
+	imagesClients := p.clients()
+
+	return len(imagesClients) > 0
+}
+
+func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
+	sources map[string]ArtifactSource,
+) error {
+	p.credsSource = credsSource
+
+	err := parseConfig(cfg, &p.pubCfg)
 	if err != nil {
 		return err
 	}
 
-	if p.creds == nil {
-		return errors.New("credentials not set")
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case len(p.pubCfg.Configs) == 0:
+		return errors.New("missing configs")
+	case p.pubCfg.Hypervisor == "":
+		return errors.New("missing hypervisor")
 	}
 
 	_, ok := sources[p.pubCfg.Source]
 	if !ok {
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
-
-	creds := make([]openstackCredentials, len(p.pubCfg.Configs))
-	cnt := 0
-	for i, c := range p.pubCfg.Configs {
-		creds[i], ok = p.creds[c]
-		if !ok {
-			return fmt.Errorf("missing credentials config %s", cfg)
-		}
-		cnt += len(creds[i].Projects)
-	}
-
 	if p.pubCfg.SourceChina != "" {
 		_, ok = sources[p.pubCfg.SourceChina]
 		if !ok {
 			return fmt.Errorf("unknown source %s", p.pubCfg.Source)
+		}
+	}
+
+	cs := make(map[string]struct{}, len(p.pubCfg.Configs))
+	rs := make(map[string]struct{})
+	for _, config := range p.pubCfg.Configs {
+		_, ok = cs[config.Config]
+		switch {
+		case config.Config == "":
+			return errors.New("invalid config")
+		case ok:
+			return fmt.Errorf("duplicate config %s", config.Config)
+		case config.Endpoint == "":
+			return fmt.Errorf("missing endpoint for config %s", config.Config)
+		case strings.Count(config.Endpoint, "{region}") != 1:
+			return fmt.Errorf("invalid endpoint for config %s", config.Config)
+		case config.Domain == "":
+			return fmt.Errorf("missing domain for config %s", config.Config)
+		case config.Project == "":
+			return fmt.Errorf("missing project for config %s", config.Config)
+		case len(config.Regions) == 0:
+			return fmt.Errorf("missing regions for config %s", config.Config)
+		case len(p.pubCfg.Configs) == 0:
+			return errors.New("missing configs")
+		case p.pubCfg.Hypervisor == "":
+			return errors.New("missing hypervisor")
+		}
+
+		cs[config.Config] = struct{}{}
+		for _, r := range config.Regions {
+			_, ok = rs[r]
+			if ok {
+				return fmt.Errorf("duplicate region %s", r)
+			}
+			rs[r] = struct{}{}
 		}
 	}
 
@@ -81,63 +142,143 @@ func (p *openstack) SetTargetConfig(ctx context.Context, cfg map[string]any, sou
 		return fmt.Errorf("unknown hypervisor %s", p.pubCfg.Hypervisor)
 	}
 
-	p.imagesClients = make(map[string]*gophercloud.ServiceClient, cnt)
-	initClients := parallel.NewActivitySync(ctx)
-	for i := range creds {
-		for _, proj := range creds[i].Projects {
-			if len(p.pubCfg.Regions) > 0 && !slices.Contains(p.pubCfg.Regions, proj.Region) {
-				continue
-			}
+	func() {
+		p.clientsMtx.Lock()
+		defer p.clientsMtx.Unlock()
 
-			_, ok = p.imagesClients[proj.Region]
-			if ok {
-				return fmt.Errorf("duplicate region %s", proj.Region)
-			}
+		p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(rs))
+	}()
 
-			initClients.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
-				providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
-					IdentityEndpoint: proj.AuthURL,
-					Username:         creds[i].Credentials.Username,
-					Password:         creds[i].Credentials.Password,
-					DomainName:       proj.Domain,
-					Scope: &gophercloud.AuthScope{
-						ProjectName: proj.Project,
-						DomainName:  proj.Domain,
-					},
-				})
-				if er != nil {
-					return nil, fmt.Errorf("cannot create provider client for region %s: %w", proj.Region, er)
-				}
-
-				var client *gophercloud.ServiceClient
-				client, er = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
-					Region: proj.Region,
-				})
-				if er != nil {
-					return nil, fmt.Errorf("cannot create image client for region %s: %w", proj.Region, er)
-				}
-
-				return func() error {
-					p.imagesClients[proj.Region] = client
-
-					return nil
-				}, nil
-			})
+	for _, config := range p.pubCfg.Configs {
+		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+			Type:   p.Type(),
+			Config: config.Config,
+		}, func(ctx context.Context, creds map[string]any) error {
+			return p.createClients(ctx, config, creds)
+		})
+		if err != nil {
+			return fmt.Errorf("cannot acquire credentials for config %s: %w", config.Config, err)
 		}
-	}
-	err = initClients.Wait()
-	if err != nil {
-		return err
-	}
-	if len(p.imagesClients) == 0 {
-		return errors.New("no available regions")
 	}
 
 	return nil
 }
 
-func (*openstack) Close() error {
-	return nil
+type openstackTaskState struct {
+	Region string `json:"region,omitzero"`
+	Image  string `json:"image,omitzero"`
+}
+
+type openstackPublishingOutput struct {
+	Images []openstackPublishedImage `yaml:"published_openstack_images,omitempty"`
+}
+
+type openstackPublishedImage struct {
+	Region     string `yaml:"region_name"`
+	ID         string `yaml:"image_id"`
+	Image      string `yaml:"image_name"`
+	Hypervisor string `yaml:"hypervisor"`
+}
+
+type openstackCredentials struct {
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+}
+
+func (p *openstack) createClients(ctx context.Context, config openstackPublishingConfigConfig, rawCreds map[string]any) error {
+	var creds openstackCredentials
+	err := parseCredentials(rawCreds, &creds)
+	if err != nil {
+		return err
+	}
+
+	p.clientsMtx.Lock()
+	defer p.clientsMtx.Unlock()
+
+	initClients := parallel.NewLimitedActivitySync(ctx, 7)
+	for _, region := range config.Regions {
+		initClients.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
+				IdentityEndpoint: strings.Replace(config.Endpoint, "{region}", region, 1),
+				Username:         creds.Username,
+				Password:         creds.Password,
+				DomainName:       config.Domain,
+				Scope: &gophercloud.AuthScope{
+					ProjectName: config.Project,
+					DomainName:  config.Domain,
+				},
+			})
+			if er != nil {
+				return nil, fmt.Errorf("cannot create provider client for region %s: %w", region, er)
+			}
+
+			var client *gophercloud.ServiceClient
+			client, er = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
+				Region: region,
+			})
+			if er != nil {
+				return nil, fmt.Errorf("cannot create image client for region %s: %w", region, er)
+			}
+
+			return func() error {
+				p.imagesClients[region] = client
+
+				return nil
+			}, nil
+		})
+	}
+
+	return initClients.Wait()
+}
+
+func (p *openstack) clients() map[string]*gophercloud.ServiceClient {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.imagesClients
+}
+
+func (p *openstack) imageName(cname, version, committish string) string {
+	var hypervisor string
+	switch p.pubCfg.Hypervisor {
+	case openstackHypervisorBareMetal:
+		hypervisor = "baremetal"
+	case openstackHypervisorVMware:
+		hypervisor = "vmware"
+	default:
+	}
+	if p.pubCfg.Test {
+		hypervisor += "-test"
+	}
+
+	return fmt.Sprintf("gardenlinux-%s-%s-%s-%.8s", cname, hypervisor, version, committish)
+}
+
+func (p *openstack) hypervisor(platform string) (openstackHypervisor, error) {
+	h, ok := strings.CutPrefix(platform, "openstack")
+	if !ok {
+		return "", fmt.Errorf("invalid platform %s for target %s", platform, p.Type())
+	}
+
+	switch h {
+	case "baremetal":
+		return openstackHypervisorBareMetal, nil
+	case "vmware", "":
+		return openstackHypervisorVMware, nil
+	default:
+		return "", fmt.Errorf("invalid hypervisor %s", h)
+	}
+}
+
+func (*openstack) architecture(arch gl.Architecture) (string, error) {
+	switch arch {
+	case gl.ArchitectureAMD64:
+		return "AMD64", nil
+	case gl.ArchitectureARM64:
+		return "ARM64", nil
+	default:
+		return "", fmt.Errorf("unknown architecture %s", arch)
+	}
 }
 
 func (*openstack) ImageSuffix() string {
@@ -272,52 +413,47 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	ctx = log.WithValues(ctx, "image", image, "hypervisor", p.pubCfg.Hypervisor, "architecture", arch, "sourceType", source.Type(),
 		"sourceRepo", source.Repository())
 
-	regions := p.listRegions()
-	if len(p.pubCfg.Regions) > 0 {
-		regions = slc.Subset(regions, p.pubCfg.Regions)
-	}
-	if len(regions) == 0 {
-		return nil, errors.New("no available regions")
-	}
-
 	sourceChina := source
 	if p.pubCfg.SourceChina != "" {
 		sourceChina = sources[p.pubCfg.SourceChina]
 	}
 
-	outImages := make(map[string]string, len(regions))
+	imagesClients := p.clients()
+	outImages := make(map[string]string, len(imagesClients))
 	publishImages := parallel.NewActivitySync(ctx)
-	for _, region := range regions {
-		imageClient := p.imagesClients[region]
-		src := source
-		if strings.HasPrefix(region, "ap-cn-") {
-			src = sourceChina
-		}
+	for _, config := range p.pubCfg.Configs {
+		for _, region := range config.Regions {
+			imageClient := imagesClients[region]
+			src := source
+			if strings.HasPrefix(region, "ap-cn-") {
+				src = sourceChina
+			}
 
-		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
-			ctx = log.WithValues(ctx, "region", region)
+			publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+				ctx = log.WithValues(ctx, "region", region)
 
-			ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{
-				Region: region,
+				ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{
+					Region: region,
+				})
+				imageID, er := p.createImage(ctx, imageClient, src, imagePath.S3Key, image)
+				if er != nil {
+					return nil, task.Fail(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
+				}
+				ctx = log.WithValues(ctx, "region", region)
+
+				er = p.waitForImage(ctx, imageID, region)
+				if er != nil {
+					return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, er))
+				}
+				task.Complete(ctx)
+
+				return func() error {
+					outImages[region] = imageID
+
+					return nil
+				}, nil
 			})
-			imageID, er := p.createImage(ctx, imageClient, src, imagePath.S3Key, image)
-			if er != nil {
-				return nil, task.Fail(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
-			}
-			ctx = log.WithValues(ctx, "region", region)
-
-			er = p.waitForImage(ctx, imageID, region)
-			if er != nil {
-				return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, er))
-			}
-			task.Complete(ctx)
-
-			return func() error {
-				outImages[region] = imageID
-
-				return nil
-			}, nil
-		})
+		}
 	}
 	err = publishImages.Wait()
 	if err != nil {
@@ -337,219 +473,6 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	return &openstackPublishingOutput{
 		Images: outputImages,
 	}, nil
-}
-
-func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
-	if !p.isConfigured() {
-		return errors.New("config not set")
-	}
-
-	hypervisor, err := p.hypervisor(manifest.Platform)
-	if err != nil {
-		return fmt.Errorf("invalid manifest: %w", err)
-	}
-	if hypervisor != p.pubCfg.Hypervisor {
-		return nil
-	}
-
-	var pubOut *openstackPublishingOutput
-	pubOut, err = publishingOutputFromManifest[*openstackPublishingOutput](manifest)
-	if err != nil {
-		return fmt.Errorf("invalid manifest: %w", err)
-	}
-	if pubOut == nil || len(pubOut.Images) == 0 {
-		return errors.New("invalid manifest: missing published images")
-	}
-
-	ctx = log.WithValues(ctx, "hypervisor", p.pubCfg.Hypervisor)
-
-	regions := p.listRegions()
-	if len(p.pubCfg.Regions) > 0 {
-		regions = slc.Subset(regions, p.pubCfg.Regions)
-	}
-	if len(regions) == 0 {
-		return errors.New("no available regions")
-	}
-
-	removeImages := parallel.NewActivity(ctx)
-	for _, img := range pubOut.Images {
-		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
-			continue
-		}
-
-		if !slices.Contains(regions, img.Region) {
-			return fmt.Errorf("image %s is in unknown region %s", img.ID, img.Region)
-		}
-
-		removeImages.Go(func(ctx context.Context) error {
-			ctx = log.WithValues(ctx, "region", img.Region, "imageID", img.ID)
-
-			er := p.deleteImage(ctx, img.ID, img.Region, steamroll)
-			if err != nil {
-				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, er)
-			}
-
-			return nil
-		})
-	}
-	return removeImages.Wait()
-}
-
-func (p *openstack) CanRollback() string {
-	if !p.isConfigured() {
-		return ""
-	}
-
-	return "openstack/" + strings.ReplaceAll(string(p.pubCfg.Hypervisor), " ", "_")
-}
-
-func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) error {
-	if !p.isConfigured() {
-		return errors.New("config not set")
-	}
-
-	rollbackTasks := parallel.NewActivity(ctx)
-	for _, t := range tasks {
-		state, err := task.ParseState[*openstackTaskState](t.State)
-		if err != nil {
-			return err
-		}
-
-		if state.Region == "" {
-			continue
-		}
-
-		if state.Image != "" {
-			rollbackTasks.Go(func(ctx context.Context) error {
-				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
-
-				er := p.deleteImage(ctx, state.Image, state.Region, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
-				}
-
-				return nil
-			})
-		}
-	}
-	return rollbackTasks.Wait()
-}
-
-type openstack struct {
-	creds         map[string]openstackCredentials
-	pubCfg        openstackPublishingConfig
-	imagesClients map[string]*gophercloud.ServiceClient
-}
-
-type openstackCredentials struct {
-	Credentials openstackCredentialsCredentials `mapstructure:"credentials"`
-	Projects    []openstackProject              `mapstructure:"projects"`
-}
-
-type openstackCredentialsCredentials struct {
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
-}
-
-type openstackProject struct {
-	Project string `mapstructure:"name"`
-	Domain  string `mapstructure:"domain"`
-	Region  string `mapstructure:"region"`
-	AuthURL string `mapstructure:"auth_url"`
-}
-
-type openstackPublishingConfig struct {
-	Source      string              `mapstructure:"source"`
-	Configs     []string            `mapstructure:"configs"`
-	SourceChina string              `mapstructure:"source_china,omitzero"`
-	Test        bool                `mapstructure:"test,omitzero"`
-	Hypervisor  openstackHypervisor `mapstructure:"hypervisor"`
-	Regions     []string            `mapstructure:"regions,omitempty"`
-}
-
-type openstackHypervisor string
-
-const (
-	openstackHypervisorBareMetal openstackHypervisor = "Bare Metal"
-	openstackHypervisorVMware    openstackHypervisor = "VMware"
-)
-
-type openstackTaskState struct {
-	Region string `json:"region,omitzero"`
-	Image  string `json:"image,omitzero"`
-}
-
-type openstackPublishingOutput struct {
-	Images []openstackPublishedImage `yaml:"published_openstack_images,omitempty"`
-}
-
-type openstackPublishedImage struct {
-	Region     string `yaml:"region_name"`
-	ID         string `yaml:"image_id"`
-	Image      string `yaml:"image_name"`
-	Hypervisor string `yaml:"hypervisor"`
-}
-
-func (p *openstack) isConfigured() bool {
-	return len(p.imagesClients) != 0
-}
-
-func (p *openstack) hypervisor(platform string) (openstackHypervisor, error) {
-	h, ok := strings.CutPrefix(platform, "openstack")
-	if !ok {
-		return "", fmt.Errorf("invalid platform %s for target %s", platform, p.Type())
-	}
-
-	switch h {
-	case "baremetal":
-		return openstackHypervisorBareMetal, nil
-	case "vmware", "":
-		return openstackHypervisorVMware, nil
-	default:
-		return "", fmt.Errorf("invalid hypervisor %s", h)
-	}
-}
-
-func (p *openstack) imageName(cname, version, committish string) string {
-	var hypervisor string
-	switch p.pubCfg.Hypervisor {
-	case openstackHypervisorBareMetal:
-		hypervisor = "baremetal"
-	case openstackHypervisorVMware:
-		hypervisor = "vmware"
-	default:
-	}
-	if p.pubCfg.Test {
-		hypervisor += "-test"
-	}
-
-	return fmt.Sprintf("gardenlinux-%s-%s-%s-%.8s", cname, hypervisor, version, committish)
-}
-
-func (*openstack) architecture(arch gl.Architecture) (string, error) {
-	switch arch {
-	case gl.ArchitectureAMD64:
-		return "AMD64", nil
-	case gl.ArchitectureARM64:
-		return "ARM64", nil
-	default:
-		return "", fmt.Errorf("unknown architecture %s", arch)
-	}
-}
-
-func (p *openstack) listRegions() []string {
-	cnt := 0
-	for _, c := range p.pubCfg.Configs {
-		cnt += len(p.creds[c].Projects)
-	}
-	regions := make([]string, 0, cnt)
-
-	for _, c := range p.pubCfg.Configs {
-		for _, proj := range p.creds[c].Projects {
-			regions = append(regions, proj.Region)
-		}
-	}
-	return regions
 }
 
 func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.ServiceClient, source ArtifactSource, key, image string,
@@ -598,6 +521,7 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 		s.Image = img.ID
 		return s
 	})
+	ctx = log.WithValues(ctx, "imageID", img.ID)
 
 	log.Debug(ctx, "Importing image")
 	err = imageimport.Create(ctx, imageClient, img.ID, imageimport.CreateOpts{
@@ -612,10 +536,11 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 }
 
 func (p *openstack) waitForImage(ctx context.Context, imageID, region string) error {
-	imagesClient := p.imagesClients[region]
+	imagesClients := p.clients()
+
 	var status images.ImageStatus
 	for status != images.ImageStatusActive {
-		img, err := images.Get(ctx, imagesClient, imageID).Extract()
+		img, err := images.Get(ctx, imagesClients[region], imageID).Extract()
 		if err != nil {
 			return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, err)
 		}
@@ -633,9 +558,62 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	return nil
 }
 
+func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	hypervisor, err := p.hypervisor(manifest.Platform)
+	if err != nil {
+		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	if hypervisor != p.pubCfg.Hypervisor {
+		return nil
+	}
+
+	var pubOut *openstackPublishingOutput
+	pubOut, err = publishingOutputFromManifest[*openstackPublishingOutput](manifest)
+	if err != nil {
+		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	if pubOut == nil || len(pubOut.Images) == 0 {
+		return errors.New("invalid manifest: missing published images")
+	}
+
+	ctx = log.WithValues(ctx, "hypervisor", p.pubCfg.Hypervisor)
+
+	imagesClients := p.clients()
+
+	removeImages := parallel.NewActivity(ctx)
+	for _, img := range pubOut.Images {
+		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
+			continue
+		}
+
+		_, ok := imagesClients[img.Region]
+		if !ok {
+			return fmt.Errorf("image %s is in unknown region %s", img.ID, img.Region)
+		}
+
+		removeImages.Go(func(ctx context.Context) error {
+			ctx = log.WithValues(ctx, "region", img.Region, "imageID", img.ID)
+
+			er := p.deleteImage(ctx, img.ID, img.Region, steamroll)
+			if err != nil {
+				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, er)
+			}
+
+			return nil
+		})
+	}
+	return removeImages.Wait()
+}
+
 func (p *openstack) deleteImage(ctx context.Context, id, region string, steamroll bool) error {
+	imagesClients := p.clients()
+
 	log.Info(ctx, "Deleting image")
-	err := images.Delete(ctx, p.imagesClients[region], id).ExtractErr()
+	err := images.Delete(ctx, imagesClients[region], id).ExtractErr()
 	if err != nil {
 		var terr gophercloud.ErrUnexpectedResponseCode
 		if steamroll && errors.As(err, &terr) && terr.Actual == http.StatusNotFound {
@@ -643,6 +621,57 @@ func (p *openstack) deleteImage(ctx context.Context, id, region string, steamrol
 			return nil
 		}
 		return fmt.Errorf("cannot delete image: %w", err)
+	}
+
+	return nil
+}
+
+func (p *openstack) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "openstack/" + strings.ReplaceAll(string(p.pubCfg.Hypervisor), " ", "_")
+}
+
+func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	rollbackTasks := parallel.NewActivity(ctx)
+	for _, t := range tasks {
+		state, err := task.ParseState[*openstackTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		if state.Region == "" {
+			continue
+		}
+
+		if state.Image != "" {
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
+
+				er := p.deleteImage(ctx, state.Image, state.Region, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
+				}
+
+				return nil
+			})
+		}
+	}
+	return rollbackTasks.Wait()
+}
+
+func (p *openstack) Close() error {
+	for _, config := range p.pubCfg.Configs {
+		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+			Type:   p.Type(),
+			Config: config.Config,
+		})
 	}
 
 	return nil

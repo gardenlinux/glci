@@ -5,19 +5,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/logging"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
+	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/ptr"
 )
 
 func init() {
+	env.Clean("AWS_")
+	env.Clean("_X_AMZN_")
+
 	registerStatePersistor(func() StatePersistor {
 		return &aws{}
 	})
@@ -27,27 +35,76 @@ func (*aws) Type() string {
 	return "AWS"
 }
 
-func (p *aws) SetCredentials(creds map[string]any) error {
-	return setCredentials(creds, "aws", &p.creds)
+type aws struct {
+	stateCfg    awsStateConfig
+	key         string
+	credsSource credsprovider.CredsSource
+	clientsMtx  sync.RWMutex
+	s3Client    *s3.Client
 }
 
-func (p *aws) SetStateConfig(ctx context.Context, cfg any) error {
-	err := setConfig(cfg, &p.stateCfg)
+type awsStateConfig struct {
+	Config string `mapstructure:"config"`
+	Region string `mapstructure:"region"`
+	Bucket string `mapstructure:"bucket"`
+}
+
+func (p *aws) isConfigured() bool {
+	return p.stateCfg.Bucket != "" && p.key != ""
+}
+
+func (p *aws) SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg any) error {
+	p.credsSource = credsSource
+
+	err := parseConfig(cfg, &p.stateCfg)
 	if err != nil {
 		return err
 	}
 
-	if p.creds == nil {
-		return errors.New("credentials not set")
-	}
-	creds, ok := p.creds[p.stateCfg.Config]
-	if !ok {
-		return fmt.Errorf("missing credentials config %s", p.stateCfg.Config)
+	switch {
+	case p.stateCfg.Config == "":
+		return errors.New("missing config")
+	case p.stateCfg.Region == "":
+		return errors.New("missing region")
+	case p.stateCfg.Bucket == "":
+		return errors.New("missing bucket")
 	}
 
+	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.stateCfg.Config,
+	}, p.createClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials: %w", err)
+	}
+
+	return nil
+}
+
+type awsCredentials struct {
+	AccessKey    string `mapstructure:"access_key"`
+	SecretKey    string `mapstructure:"secret_key"`
+	SessionToken string `mapstructure:"session_token"`
+}
+
+func (p *aws) createClients(ctx context.Context, rawCreds map[string]any) error {
+	var creds awsCredentials
+	err := parseCredentials(rawCreds, &creds)
+	if err != nil {
+		return err
+	}
+
+	p.clientsMtx.Lock()
+	defer p.clientsMtx.Unlock()
+
 	var awsCfg awssdk.Config
-	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(creds.Region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, "")))
+	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(p.stateCfg.Region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, creds.SessionToken)),
+		config.WithRetryer(func() awssdk.Retryer {
+			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.RateLimiter = ratelimit.None
+			})
+		}))
 	if err != nil {
 		return fmt.Errorf("cannot load default config: %w", err)
 	}
@@ -56,12 +113,15 @@ func (p *aws) SetStateConfig(ctx context.Context, cfg any) error {
 	return nil
 }
 
-func (p *aws) SetID(id string) {
-	p.key = "state_" + id + ".json"
+func (p *aws) clients() *s3.Client {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.s3Client
 }
 
-func (*aws) Close() error {
-	return nil
+func (p *aws) SetID(id string) {
+	p.key = "state_" + id + ".json"
 }
 
 func (p *aws) Load() ([]byte, error) {
@@ -69,16 +129,17 @@ func (p *aws) Load() ([]byte, error) {
 		return nil, errors.New("config or ID not set")
 	}
 
+	s3Client := p.clients()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
 	defer cancel()
 
-	r, err := p.s3Client.GetObject(ctx, &s3.GetObjectInput{
+	r, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &p.stateCfg.Bucket,
 		Key:    &p.key,
 	})
 	if err != nil {
-		var noSuchKey *s3types.NoSuchKey
-		if !errors.As(err, &noSuchKey) {
+		if !errors.As(err, ptr.P(&s3types.NoSuchKey{})) {
 			return nil, fmt.Errorf("cannot get object %s from bucket %s: %w", p.key, p.stateCfg.Bucket, err)
 		}
 		return nil, nil
@@ -106,10 +167,12 @@ func (p *aws) Save(state []byte) error {
 		return errors.New("config or ID not set")
 	}
 
+	s3Client := p.clients()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
 	defer cancel()
 
-	_, err := p.s3Client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:          &p.stateCfg.Bucket,
 		Key:             &p.key,
 		Body:            bytes.NewReader(state),
@@ -128,10 +191,12 @@ func (p *aws) Clear() error {
 		return errors.New("config or ID not set")
 	}
 
+	s3Client := p.clients()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
 	defer cancel()
 
-	_, err := p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	_, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: &p.stateCfg.Bucket,
 		Key:    &p.key,
 	})
@@ -142,24 +207,13 @@ func (p *aws) Clear() error {
 	return nil
 }
 
-type aws struct {
-	creds    map[string]awsCredentials
-	stateCfg awsStateCfg
-	key      string
-	s3Client *s3.Client
-}
+func (p *aws) Close() error {
+	if p.stateCfg.Config != "" {
+		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+			Type:   p.Type(),
+			Config: p.stateCfg.Config,
+		})
+	}
 
-type awsCredentials struct {
-	Region          string `mapstructure:"region"`
-	AccessKeyID     string `mapstructure:"access_key_id"`
-	SecretAccessKey string `mapstructure:"secret_access_key"`
-}
-
-type awsStateCfg struct {
-	Config string `mapstructure:"config"`
-	Bucket string `mapstructure:"bucket"`
-}
-
-func (p *aws) isConfigured() bool {
-	return p.stateCfg.Bucket != "" && p.key != ""
+	return nil
 }

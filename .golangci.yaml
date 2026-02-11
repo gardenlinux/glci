@@ -11,10 +11,12 @@ linters:
   - containedctx
   - cyclop
   - depguard
+  - dogsled
   - dupl
   - dupword
   - err113
   - exhaustruct
+  - funcorder
   - funlen
   - gocognit
   - goconst
@@ -45,7 +47,6 @@ linters:
         shadow:
           strict: true
     nolintlint:
-      allow-unused: true # false is correct but unreliable
       require-explanation: true
       require-specific: true
     revive:
@@ -107,6 +108,9 @@ linters:
   exclusions:
     rules:
     - path: internal/cloudprovider/.+\.go
+      linters:
+      - gochecknoinits
+    - path: internal/credsprovider/.+\.go
       linters:
       - gochecknoinits
     - path: internal/task/.+\.go

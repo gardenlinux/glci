@@ -13,18 +13,18 @@ import (
 )
 
 // Remove removes a release from all cloud providers specified in the flavors and publishing configurations.
-func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, creds Credentials, version, commit string,
+func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, version, commit string,
 	steamroll bool,
 ) error {
 	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
 
-	log.Debug(ctx, "Loading credentials and configuration")
-	manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadCredentialsAndConfig(ctx, creds, publishingConfig)
+	log.Debug(ctx, "Loading configuration")
+	credsSource, manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadConfig(ctx, publishingConfig)
 	if err != nil {
-		return fmt.Errorf("invalid credentials or configuration: %w", err)
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	defer func() {
-		_ = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
+		_ = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
 		_ = manifestSource.Close()
 		_ = manifestTarget.Close()
 	}()
@@ -170,7 +170,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	}
 
 	log.Debug(ctx, "Closing sources and targets")
-	err = closeSourcesAndTargetsAndPersistors(sources, targets, ocmTarget, state)
+	err = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
 	if err != nil {
 		return fmt.Errorf("cannot close sources and targets: %w", err)
 	}
