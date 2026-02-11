@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/gardenlinux/glci/internal/credsprovider"
 )
 
 func init() {
@@ -17,20 +19,20 @@ func (*file) Type() string {
 	return "File"
 }
 
-func (*file) SetCredentials(_ map[string]any) error {
-	return nil
+type file struct {
+	key string
 }
 
-func (*file) SetStateConfig(_ context.Context, _ any) error {
+func (p *file) isConfigured() bool {
+	return p.key != ""
+}
+
+func (*file) SetStateConfig(_ context.Context, _ credsprovider.CredsSource, _ any) error {
 	return nil
 }
 
 func (p *file) SetID(id string) {
 	p.key = "state_" + id + ".json"
-}
-
-func (*file) Close() error {
-	return nil
 }
 
 func (p *file) Load() ([]byte, error) {
@@ -75,10 +77,6 @@ func (p *file) Clear() error {
 	return nil
 }
 
-type file struct {
-	key string
-}
-
-func (p *file) isConfigured() bool {
-	return p.key != ""
+func (*file) Close() error {
+	return nil
 }

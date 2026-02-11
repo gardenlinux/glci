@@ -19,8 +19,6 @@ func removeCmd() *cobra.Command {
 		RunE:  cmd.RunFunc(remove),
 	}
 
-	c.Flags().String("credentials-file", "", "path to credentials YAML file")
-	c.Flags().String("credentials-base64", "", "base64 encoded credentials YAML (overrides --credentials-file)")
 	c.Flags().StringP("version", "v", "", "release version")
 	c.Flags().StringP("commit", "c", "", "release commit(ish)")
 	c.Flags().Bool("steamroll", false, "ignore errors while destroying things")
@@ -31,10 +29,10 @@ func removeCmd() *cobra.Command {
 func remove(ctx context.Context, cfg *viper.Viper) error {
 	log.Info(ctx, "GLCI", "version", version)
 
-	flavorsCfg, publishingCfg, _, creds, err := loadConfigAndCredentials(ctx, cfg)
+	flavorsCfg, publishingCfg, _, err := loadConfig(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
-	return glci.Remove(ctx, flavorsCfg, publishingCfg, creds, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
+	return glci.Remove(ctx, flavorsCfg, publishingCfg, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
 }

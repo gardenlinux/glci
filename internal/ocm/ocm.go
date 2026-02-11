@@ -16,6 +16,11 @@ import (
 	"github.com/gardenlinux/glci/internal/parallel"
 )
 
+const (
+	componentProvider = "SAP SE"
+	githubRepoURL     = "https://" + gl.GardenLinuxRepo
+)
+
 // ComponentDescriptor is an OCM data structure that Gardener consumes.
 type ComponentDescriptor struct {
 	Meta      componentDescriptorMetadata  `yaml:"meta"`
@@ -25,6 +30,78 @@ type ComponentDescriptor struct {
 // ToYAML serializes a component desctiptor to YAML.
 func (d *ComponentDescriptor) ToYAML() ([]byte, error) {
 	return yaml.Marshal(d)
+}
+
+//nolint:tagliatelle // Defined by OCM.
+type componentDescriptorMetadata struct {
+	ConfiguredVersion string `yaml:"configuredSchemaVersion"`
+}
+
+//nolint:tagliatelle // Defined by OCM.
+type componentDescriptorComponent struct {
+	Name                string                                 `yaml:"name"`
+	Version             string                                 `yaml:"version"`
+	CreationTime        string                                 `yaml:"creationTime"`
+	Provider            string                                 `yaml:"provider"`
+	RepositoryContexts  []componentDescriptorRepositoryContext `yaml:"repositoryContexts"`
+	Sources             []componentDescriptorSource            `yaml:"sources"`
+	ComponentReferences []struct{}                             `yaml:"componentReferences"`
+	Resources           []componentDesciptorResource           `yaml:"resources"`
+}
+
+//nolint:tagliatelle // Defined by OCM.
+type componentDescriptorRepositoryContext struct {
+	Type    string `yaml:"type"`
+	BaseURL string `yaml:"baseUrl"`
+}
+
+type componentDescriptorSource struct {
+	Name    string                     `yaml:"name"`
+	Version string                     `yaml:"version"`
+	Labels  []componentDescriptorlabel `yaml:"labels,omitempty"`
+	Type    string                     `yaml:"type"`
+	Access  componentDescriptorGitHub  `yaml:"access"`
+}
+
+type componentDescriptorlabel struct {
+	Name  string `yaml:"name"`
+	Value any    `yaml:"value"`
+}
+
+//nolint:tagliatelle // Defined by OCM.
+type componentDescriptorGitHub struct {
+	Type    string `yaml:"type"`
+	RepoURL string `yaml:"repoUrl"`
+	Commit  string `yaml:"commit"`
+}
+
+//nolint:tagliatelle // Defined by OCM.
+type componentDesciptorResource struct {
+	Name          string                     `yaml:"name"`
+	Version       string                     `yaml:"version"`
+	ExtraIdentity map[string]string          `yaml:"extraIdentity,omitempty"`
+	Labels        []componentDescriptorlabel `yaml:"labels,omitempty"`
+	Type          string                     `yaml:"type"`
+	Digest        componentDescriptorDigest  `yaml:"digest,omitzero"`
+	Access        componentDescriptorS3      `yaml:"access"`
+}
+
+//nolint:tagliatelle // Defined by OCM.
+type componentDescriptorDigest struct {
+	HashAlgorithm          string `yaml:"hashAlgorithm"`
+	NormalisationAlgorithm string `yaml:"normalisationAlgorithm"`
+	Value                  string `yaml:"value"`
+}
+
+type componentDescriptorS3 struct {
+	Type   string `yaml:"type"`
+	Bucket string `yaml:"bucket"`
+	Key    string `yaml:"key"`
+}
+
+type nameVersion struct {
+	name    string
+	version string
 }
 
 // BuildComponentDescriptor generates a component desciptor that includes all data except the results of the publishing process.
@@ -195,109 +272,6 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	return descriptor, nil
 }
 
-// AddPublicationOutput adds the outputs of the publishing process to an existing component descriptor.
-func AddPublicationOutput(descriptor *ComponentDescriptor, publications []cloudprovider.Publication) error {
-	if len(descriptor.Component.Resources) != len(publications)*2 {
-		return fmt.Errorf("invalid component descriptor: expected %d resources, got %d", len(publications)*2,
-			len(descriptor.Component.Resources))
-	}
-
-	for i, publication := range publications {
-		if descriptor.Component.Resources[i*2].Type != "virtual_machine_image" {
-			return fmt.Errorf("invalid component descriptor: resource %d has incorrect type %s", i*2,
-				descriptor.Component.Resources[i*2].Type)
-		}
-		if descriptor.Component.Resources[i*2].Name != "gardenlinux" {
-			return fmt.Errorf("invalid component descriptor: resource %d has incorrect name %s", i*2,
-				descriptor.Component.Resources[i*2].Name)
-		}
-
-		descriptor.Component.Resources[i*2].Labels = append(descriptor.Component.Resources[i*2].Labels, componentDescriptorlabel{
-			Name:  "gardener.cloud/gardenlinux/ci/published-image-metadata",
-			Value: publication.Manifest.PublishedImageMetadata,
-		})
-	}
-
-	return nil
-}
-
-const (
-	componentProvider = "SAP SE"
-	githubRepoURL     = "https://" + gl.GardenLinuxRepo
-)
-
-//nolint:tagliatelle // Defined by OCM.
-type componentDescriptorMetadata struct {
-	ConfiguredVersion string `yaml:"configuredSchemaVersion"`
-}
-
-//nolint:tagliatelle // Defined by OCM.
-type componentDescriptorComponent struct {
-	Name                string                                 `yaml:"name"`
-	Version             string                                 `yaml:"version"`
-	CreationTime        string                                 `yaml:"creationTime"`
-	Provider            string                                 `yaml:"provider"`
-	RepositoryContexts  []componentDescriptorRepositoryContext `yaml:"repositoryContexts"`
-	Sources             []componentDescriptorSource            `yaml:"sources"`
-	ComponentReferences []struct{}                             `yaml:"componentReferences"`
-	Resources           []componentDesciptorResource           `yaml:"resources"`
-}
-
-//nolint:tagliatelle // Defined by OCM.
-type componentDescriptorRepositoryContext struct {
-	Type    string `yaml:"type"`
-	BaseURL string `yaml:"baseUrl"`
-}
-
-type componentDescriptorSource struct {
-	Name    string                     `yaml:"name"`
-	Version string                     `yaml:"version"`
-	Labels  []componentDescriptorlabel `yaml:"labels,omitempty"`
-	Type    string                     `yaml:"type"`
-	Access  componentDescriptorGitHub  `yaml:"access"`
-}
-
-type componentDescriptorlabel struct {
-	Name  string `yaml:"name"`
-	Value any    `yaml:"value"`
-}
-
-//nolint:tagliatelle // Defined by OCM.
-type componentDescriptorGitHub struct {
-	Type    string `yaml:"type"`
-	RepoURL string `yaml:"repoUrl"`
-	Commit  string `yaml:"commit"`
-}
-
-//nolint:tagliatelle // Defined by OCM.
-type componentDesciptorResource struct {
-	Name          string                     `yaml:"name"`
-	Version       string                     `yaml:"version"`
-	ExtraIdentity map[string]string          `yaml:"extraIdentity,omitempty"`
-	Labels        []componentDescriptorlabel `yaml:"labels,omitempty"`
-	Type          string                     `yaml:"type"`
-	Digest        componentDescriptorDigest  `yaml:"digest,omitzero"`
-	Access        componentDescriptorS3      `yaml:"access"`
-}
-
-//nolint:tagliatelle // Defined by OCM.
-type componentDescriptorDigest struct {
-	HashAlgorithm          string `yaml:"hashAlgorithm"`
-	NormalisationAlgorithm string `yaml:"normalisationAlgorithm"`
-	Value                  string `yaml:"value"`
-}
-
-type componentDescriptorS3 struct {
-	Type   string `yaml:"type"`
-	Bucket string `yaml:"bucket"`
-	Key    string `yaml:"key"`
-}
-
-type nameVersion struct {
-	name    string
-	version string
-}
-
 func getPackages(ctx context.Context, source cloudprovider.ArtifactSource, manifest *gl.Manifest) ([]nameVersion, error) {
 	log.Debug(ctx, "Getting packages")
 
@@ -366,4 +340,30 @@ func getPackageList(packages []nameVersion) []string {
 		l = append(l, fmt.Sprintf("%s %s", p.name, p.version))
 	}
 	return l
+}
+
+// AddPublicationOutput adds the outputs of the publishing process to an existing component descriptor.
+func AddPublicationOutput(descriptor *ComponentDescriptor, publications []cloudprovider.Publication) error {
+	if len(descriptor.Component.Resources) != len(publications)*2 {
+		return fmt.Errorf("invalid component descriptor: expected %d resources, got %d", len(publications)*2,
+			len(descriptor.Component.Resources))
+	}
+
+	for i, publication := range publications {
+		if descriptor.Component.Resources[i*2].Type != "virtual_machine_image" {
+			return fmt.Errorf("invalid component descriptor: resource %d has incorrect type %s", i*2,
+				descriptor.Component.Resources[i*2].Type)
+		}
+		if descriptor.Component.Resources[i*2].Name != "gardenlinux" {
+			return fmt.Errorf("invalid component descriptor: resource %d has incorrect name %s", i*2,
+				descriptor.Component.Resources[i*2].Name)
+		}
+
+		descriptor.Component.Resources[i*2].Labels = append(descriptor.Component.Resources[i*2].Labels, componentDescriptorlabel{
+			Name:  "gardener.cloud/gardenlinux/ci/published-image-metadata",
+			Value: publication.Manifest.PublishedImageMetadata,
+		})
+	}
+
+	return nil
 }

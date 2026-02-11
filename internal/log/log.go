@@ -31,6 +31,11 @@ func Setup(ctx context.Context, debug, silent bool, writer io.Writer) context.Co
 	return logr.NewContext(ctx, zerologr.New(&zeroLog))
 }
 
+// WithValues appends arbitrary key-value pairs to an existing logger and returns a new context.
+func WithValues(ctx context.Context, keysAndValues ...any) context.Context {
+	return logr.NewContext(ctx, logr.FromContextOrDiscard(ctx).WithValues(keysAndValues...))
+}
+
 // Info logs an information message.
 func Info(ctx context.Context, msg string, keysAndValues ...any) {
 	logr.FromContextOrDiscard(ctx).Info(msg, keysAndValues...)
@@ -49,9 +54,4 @@ func Error(ctx context.Context, err error, keysAndValues ...any) {
 // ErrorMsg logs a message with the severity of an error.
 func ErrorMsg(ctx context.Context, msg string, keysAndValues ...any) {
 	logr.FromContextOrDiscard(ctx).Error(nil, msg, keysAndValues...)
-}
-
-// WithValues appends arbitrary key-value pairs to an existing logger and returns a new context.
-func WithValues(ctx context.Context, keysAndValues ...any) context.Context {
-	return logr.NewContext(ctx, logr.FromContextOrDiscard(ctx).WithValues(keysAndValues...))
 }

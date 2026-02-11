@@ -22,6 +22,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Masterminds/semver/v3"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
@@ -43,56 +44,94 @@ func (*azure) Type() string {
 	return "Azure"
 }
 
-func (p *azure) SetCredentials(creds map[string]any) error {
-	err := setCredentials(creds, "azure_storage_account", &p.storageAccountCreds)
-	if err != nil {
-		return err
-	}
-	for cfg, c := range p.storageAccountCreds {
-		c.cred, err = azblob.NewSharedKeyCredential(c.Account, c.AccountKey)
-		if err != nil {
-			return fmt.Errorf("cannot create shared key credential: %w", err)
-		}
-		p.storageAccountCreds[cfg] = c
-	}
-
-	err = setCredentials(creds, "azure_service_principal", &p.servicePrincipalCreds)
-	if err != nil {
-		return err
-	}
-
-	for cfg, c := range p.servicePrincipalCreds {
-		var opts *azidentity.ClientSecretCredentialOptions
-		if strings.HasSuffix(cfg, "-cn") {
-			opts = &azidentity.ClientSecretCredentialOptions{
-				ClientOptions: azcore.ClientOptions{
-					Cloud: cloud.AzureChina,
-				},
-			}
-		}
-		c.cred, err = azidentity.NewClientSecretCredential(c.TenantID, c.ClientID, c.ClientSecret, opts)
-		if err != nil {
-			return fmt.Errorf("cannot create client secret credential: %w", err)
-		}
-		p.servicePrincipalCreds[cfg] = c
-	}
-
-	err = setCredentials(creds, "azure_shared_gallery", &p.galleryCreds)
-	if err != nil {
-		return err
-	}
-
-	return nil
+type azure struct {
+	pubCfg                              azurePublishingConfig
+	credsSource                         credsprovider.CredsSource
+	clientsMtx                          sync.RWMutex
+	storageClient                       *azblob.Client
+	subscriptionsClient                 *armsubscriptions.Client
+	imagesClient                        *armcompute.ImagesClient
+	galleryImagesClient                 *armcompute.GalleryImagesClient
+	galleryImageVersionsClient          *armcompute.GalleryImageVersionsClient
+	galleriesClient                     *armcompute.GalleriesClient
+	communityGalleryImageVersionsClient *armcompute.CommunityGalleryImageVersionsClient
+	regions                             []string
 }
 
-func (p *azure) SetTargetConfig(_ context.Context, cfg map[string]any, sources map[string]ArtifactSource) error {
-	err := setConfig(cfg, &p.pubCfg)
+type azurePublishingConfig struct {
+	Source           string   `mapstructure:"source"`
+	Config           string   `mapstructure:"config"`
+	StorageContainer string   `mapstructure:"storage_container"`
+	ResourceGroup    string   `mapstructure:"resource_group"`
+	Gallery          string   `mapstructure:"gallery"`
+	Region           string   `mapstructure:"region"`
+	Regions          []string `mapstructure:"regions,omitempty"`
+	ImagePrefix      string   `mapstructure:"image_prefix"`
+	ImageDescription string   `mapstructure:"image_description"`
+	ImageEULA        string   `mapstructure:"image_eula"`
+	ImageReleaseNote string   `mapstructure:"image_release_note"`
+	ImagePublisher   string   `mapstructure:"image_publisher"`
+	ImageOffer       string   `mapstructure:"image_offer"`
+	ImageSKUPrefix   string   `mapstructure:"image_sku_prefix"`
+	china            bool
+}
+
+func (p *azure) isConfigured() bool {
+	storageClient, subscriptionsClient, imagesClient, galleryImagesClient, galleryImageVersionsClient, galleriesClient, communityGalleryImageVersionsClient := p.clients()
+
+	return storageClient != nil && subscriptionsClient != nil && imagesClient != nil && galleryImagesClient != nil &&
+		galleryImageVersionsClient != nil && galleriesClient != nil && communityGalleryImageVersionsClient != nil
+}
+
+func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
+	sources map[string]ArtifactSource,
+) error {
+	p.credsSource = credsSource
+
+	err := parseConfig(cfg, &p.pubCfg)
 	if err != nil {
 		return err
 	}
 
-	if p.storageAccountCreds == nil || p.servicePrincipalCreds == nil || p.galleryCreds == nil {
-		return errors.New("credentials not set")
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case p.pubCfg.Config == "":
+		return errors.New("missing config")
+	case p.pubCfg.StorageContainer == "":
+		return errors.New("missing storage container")
+	case p.pubCfg.ResourceGroup == "":
+		return errors.New("missing resource group")
+	case p.pubCfg.Gallery == "":
+		return errors.New("missing gallery")
+	case p.pubCfg.Region == "":
+		return errors.New("missing region")
+	case p.pubCfg.ImagePrefix == "":
+		return errors.New("missing image prefix")
+	case p.pubCfg.ImageDescription == "":
+		return errors.New("missing image description")
+	case p.pubCfg.ImageEULA == "":
+		return errors.New("missing image EULA")
+	case p.pubCfg.ImageReleaseNote == "":
+		return errors.New("missing image release note")
+	case p.pubCfg.ImagePublisher == "":
+		return errors.New("missing image publisher")
+	case p.pubCfg.ImageOffer == "":
+		return errors.New("missing image offer")
+	case p.pubCfg.ImageSKUPrefix == "":
+		return errors.New("missing image SKU prefix")
+	}
+
+	if len(p.pubCfg.Regions) > 0 {
+		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
+			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
+		}
+	}
+
+	credsType := p.Type()
+	if strings.HasPrefix(p.pubCfg.Region, "china") {
+		p.pubCfg.china = true
+		credsType += "_china"
 	}
 
 	_, ok := sources[p.pubCfg.Source]
@@ -100,76 +139,295 @@ func (p *azure) SetTargetConfig(_ context.Context, cfg map[string]any, sources m
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	var sacreds azureStorageAccountCredentials
-	sacreds, ok = p.storageAccountCreds[p.pubCfg.StorageAccountConfig]
-	if !ok {
-		return fmt.Errorf("missing storage account credentials config %s", p.pubCfg.StorageAccountConfig)
+	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type() + "_storage",
+		Config: p.pubCfg.Config,
+	}, p.createStorageClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
 	}
 
-	var spcreds azureServicePrincipalCredentials
-	spcreds, ok = p.servicePrincipalCreds[p.pubCfg.ServicePrincipalConfig]
-	if !ok {
-		return fmt.Errorf("missing service principal credentials config %s", p.pubCfg.ServicePrincipalConfig)
+	err = credsSource.AcquireValidatedCreds(ctx, credsprovider.CredsID{
+		Type:   credsType,
+		Config: p.pubCfg.Config,
+	}, p.checkCreds, p.createClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
 	}
 
-	var gcreds azureGalleryCredentials
-	gcreds, ok = p.galleryCreds[p.pubCfg.GalleryConfig]
-	if !ok {
-		return fmt.Errorf("missing gallery credentials config %s", p.pubCfg.GalleryConfig)
+	return nil
+}
+
+type azureTaskState struct {
+	Blob    string                `json:"blob,omitzero"`
+	Image   string                `json:"image,omitzero"`
+	Version azureTaskStateVersion `json:"version,omitzero"`
+}
+
+type azureTaskStateVersion struct {
+	Version    string `json:"version,omitzero"`
+	Definition string `json:"definition,omitzero"`
+}
+
+type azurePublishingOutput struct {
+	Images []azurePublishedImage `yaml:"published_gallery_images,omitempty"`
+}
+
+type azurePublishedImage struct {
+	Cloud string `yaml:"azure_cloud"`
+	ID    string `yaml:"community_gallery_image_id"`
+	Gen   string `yaml:"hyper_v_generation"`
+}
+
+type azureCredentials struct {
+	TenantID       string `mapstructure:"tenant_id"`
+	SubscriptionID string `mapstructure:"subscription_id"`
+	ClientID       string `mapstructure:"client_id"`
+	ClientSecret   string `mapstructure:"client_secret"`
+}
+
+type azureStorageCredentials struct {
+	AccessKey      string `mapstructure:"access_key"`
+	StorageAccount string `mapstructure:"storage_account"`
+}
+
+func (p *azure) createStorageClients(_ context.Context, rawCreds map[string]any) error {
+	var creds azureStorageCredentials
+	err := parseCredentials(rawCreds, &creds)
+	if err != nil {
+		return err
 	}
 
-	if strings.HasPrefix(gcreds.Region, "china") {
-		p.pubCfg.china = true
+	p.clientsMtx.Lock()
+	defer p.clientsMtx.Unlock()
+
+	var skc *azblob.SharedKeyCredential
+	skc, err = azblob.NewSharedKeyCredential(creds.StorageAccount, creds.AccessKey)
+	if err != nil {
+		return fmt.Errorf("cannot create shared key credential: %w", err)
 	}
 
 	apiEndpoint := "core.windows.net"
-	var bopts *azblob.ClientOptions
+	var copts *azblob.ClientOptions
 	if p.pubCfg.china {
 		apiEndpoint = "core.chinacloudapi.cn"
-		bopts = &azblob.ClientOptions{
+		copts = &azblob.ClientOptions{
 			ClientOptions: azcore.ClientOptions{
 				Cloud: cloud.AzureChina,
 			},
 		}
 	}
-	url := fmt.Sprintf("https://%s.blob.%s/", sacreds.Account, apiEndpoint)
-	p.storageClient, err = azblob.NewClientWithSharedKeyCredential(url, sacreds.cred, bopts)
+	url := fmt.Sprintf("https://%s.blob.%s/", creds.StorageAccount, apiEndpoint)
+	p.storageClient, err = azblob.NewClientWithSharedKeyCredential(url, skc, copts)
 	if err != nil {
 		return fmt.Errorf("cannot create blob client: %w", err)
 	}
 
-	var aopts *arm.ClientOptions
+	return nil
+}
+
+func (p *azure) checkCreds(ctx context.Context, rawCreds map[string]any) (bool, error) {
+	var creds azureCredentials
+	err := parseCredentials(rawCreds, &creds)
+	if err != nil {
+		return false, err
+	}
+
+	var subscriptionsClient *armsubscriptions.Client
+	subscriptionsClient, _, _, _, _, _, err = p.prepareClients(creds)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = subscriptionsClient.NewListLocationsPager(creds.SubscriptionID, nil).NextPage(ctx)
+	if err == nil {
+		return true, nil
+	}
+	var terr *azidentity.AuthenticationFailedError
+	if errors.As(err, &terr) && terr.RawResponse.StatusCode == http.StatusUnauthorized {
+		return false, nil
+	}
+	return false, err
+}
+
+func (p *azure) createClients(ctx context.Context, rawCreds map[string]any) error {
+	var creds azureCredentials
+	err := parseCredentials(rawCreds, &creds)
+	if err != nil {
+		return err
+	}
+
+	p.clientsMtx.Lock()
+	defer p.clientsMtx.Unlock()
+
+	attempts := 11
+	for {
+		attempts--
+
+		p.subscriptionsClient, p.imagesClient, p.galleryImagesClient, p.galleryImageVersionsClient, p.galleriesClient,
+			p.communityGalleryImageVersionsClient, err = p.prepareClients(creds)
+		if err != nil {
+			return err
+		}
+
+		p.regions, err = p.listRegions(ctx, p.subscriptionsClient, creds.SubscriptionID)
+		if err == nil {
+			break
+		}
+
+		var terr *azidentity.AuthenticationFailedError
+		if attempts > 0 && errors.As(err, &terr) && terr.RawResponse.StatusCode == http.StatusUnauthorized {
+			time.Sleep(time.Second * 3)
+			continue
+		}
+
+		return fmt.Errorf("cannot list regions: %w", err)
+	}
+
+	if len(p.pubCfg.Regions) > 0 {
+		p.regions = slc.Subset(p.regions, p.pubCfg.Regions)
+	}
+	if len(p.regions) == 0 {
+		return errors.New("no available regions")
+	}
+	if !slices.Contains(p.regions, p.pubCfg.Region) {
+		return fmt.Errorf("region %s is not available", p.pubCfg.Region)
+	}
+
+	return nil
+}
+
+func (p *azure) prepareClients(creds azureCredentials) (*armsubscriptions.Client, *armcompute.ImagesClient, *armcompute.GalleryImagesClient,
+	*armcompute.GalleryImageVersionsClient, *armcompute.GalleriesClient, *armcompute.CommunityGalleryImageVersionsClient, error,
+) {
+	var cscopts *azidentity.ClientSecretCredentialOptions
+	var copts *arm.ClientOptions
 	if p.pubCfg.china {
-		aopts = &arm.ClientOptions{
+		cscopts = &azidentity.ClientSecretCredentialOptions{
+			ClientOptions: azcore.ClientOptions{
+				Cloud: cloud.AzureChina,
+			},
+		}
+		copts = &arm.ClientOptions{
 			ClientOptions: policy.ClientOptions{
 				Cloud: cloud.AzureChina,
 			},
 		}
 	}
 
-	var sf *armsubscriptions.ClientFactory
-	sf, err = armsubscriptions.NewClientFactory(spcreds.cred, aopts)
+	csc, err := azidentity.NewClientSecretCredential(creds.TenantID, creds.ClientID, creds.ClientSecret, cscopts)
 	if err != nil {
-		return fmt.Errorf("cannot create subscriptions client: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot create client secret credential: %w", err)
 	}
-	p.subscriptionsClient = sf.NewClient()
+
+	var sf *armsubscriptions.ClientFactory
+	sf, err = armsubscriptions.NewClientFactory(csc, copts)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot create subscriptions client: %w", err)
+	}
+	subscriptionsClient := sf.NewClient()
 
 	var cf *armcompute.ClientFactory
-	cf, err = armcompute.NewClientFactory(spcreds.SubscriptionID, spcreds.cred, aopts)
+	cf, err = armcompute.NewClientFactory(creds.SubscriptionID, csc, copts)
 	if err != nil {
-		return fmt.Errorf("cannot create compute client: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("cannot create compute client: %w", err)
 	}
-	p.imagesClient = cf.NewImagesClient()
-	p.galleryImagesClient = cf.NewGalleryImagesClient()
-	p.galleryImageVersionsClient = cf.NewGalleryImageVersionsClient()
-	p.galleriesClient = cf.NewGalleriesClient()
-	p.communityGalleryImageVersionsClient = cf.NewCommunityGalleryImageVersionsClient()
+	imagesClient := cf.NewImagesClient()
+	galleryImagesClient := cf.NewGalleryImagesClient()
+	galleryImageVersionsClient := cf.NewGalleryImageVersionsClient()
+	galleriesClient := cf.NewGalleriesClient()
+	communityGalleryImageVersionsClient := cf.NewCommunityGalleryImageVersionsClient()
 
-	return nil
+	return subscriptionsClient, imagesClient, galleryImagesClient, galleryImageVersionsClient, galleriesClient, communityGalleryImageVersionsClient, nil
 }
 
-func (*azure) Close() error {
-	return nil
+func (*azure) listRegions(ctx context.Context, subscriptionsClient *armsubscriptions.Client, subscriptionID string) ([]string, error) {
+	unusableRegions := []string{
+		"brazilus",
+		"jioindiacentral",
+	}
+
+	log.Debug(ctx, "Listing available locations")
+	pager := subscriptionsClient.NewListLocationsPager(subscriptionID, nil)
+
+	regions := make([]string, 0)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("cannot list locations: %w", err)
+		}
+
+		for _, location := range page.Value {
+			if location == nil {
+				return nil, errors.New("cannot list locations: missing location")
+			}
+			if location.Name == nil {
+				return nil, errors.New("cannot list locations: missing location name")
+			}
+			if location.Metadata == nil || location.Metadata.RegionType == nil {
+				return nil, errors.New("cannot list locations: missing region type")
+			}
+			if *location.Metadata.RegionType == armsubscriptions.RegionTypeLogical {
+				continue
+			}
+			if slices.Contains(unusableRegions, *location.Name) {
+				continue
+			}
+			if strings.HasSuffix(*location.Name, "euap") || strings.HasSuffix(*location.Name, "usstg") {
+				continue
+			}
+
+			regions = append(regions, *location.Name)
+		}
+	}
+
+	return regions, nil
+}
+
+func (p *azure) clients() (*azblob.Client, *armsubscriptions.Client, *armcompute.ImagesClient, *armcompute.GalleryImagesClient, *armcompute.GalleryImageVersionsClient, *armcompute.GalleriesClient, *armcompute.CommunityGalleryImageVersionsClient) {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.storageClient, p.subscriptionsClient, p.imagesClient, p.galleryImagesClient, p.galleryImageVersionsClient, p.galleriesClient, p.communityGalleryImageVersionsClient
+}
+
+func (p *azure) cloud() string {
+	if p.pubCfg.china {
+		return "china"
+	}
+
+	return "public"
+}
+
+func (*azure) imageName(cname, version, committish string) string {
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
+}
+
+func (*azure) version(version string) (string, error) {
+	ver, err := semver.NewVersion(version)
+	if err != nil {
+		return "", fmt.Errorf("invalid version %s: %w", version, err)
+	}
+	return ver.String(), nil
+}
+
+func (*azure) architecture(arch gl.Architecture) (armcompute.Architecture, error) {
+	switch arch {
+	case gl.ArchitectureAMD64:
+		return armcompute.ArchitectureX64, nil
+	case gl.ArchitectureARM64:
+		return armcompute.ArchitectureArm64, nil
+	default:
+		return "", fmt.Errorf("unknown architecture %s", arch)
+	}
+}
+
+func (*azure) sku(base, cname string, bios bool) string {
+	cname = strings.TrimPrefix(cname, "azure-")
+	if bios {
+		cname += "-bios"
+	}
+	return fmt.Sprintf("%s-%s", base, cname)
 }
 
 func (*azure) ImageSuffix() string {
@@ -296,7 +554,6 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
 	}
 	source := sources[p.pubCfg.Source]
-	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository(), "cloud",
 		cld)
@@ -310,19 +567,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	bios := arch == armcompute.ArchitectureX64 && !requireUEFI && !secureBoot
 	ctx = log.WithValues(ctx, "requireUEFI", requireUEFI, "secureBoot", secureBoot)
 
-	var regions []string
-	regions, err = p.listRegions(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("cannot list regions: %w", err)
-	}
-	if len(p.pubCfg.Regions) > 0 {
-		regions = slc.Subset(regions, p.pubCfg.Regions)
-	}
-	if len(regions) == 0 {
-		return nil, errors.New("no available regions")
-	}
-
-	imageDefinition := p.sku(gallery.Image, cname, false)
+	imageDefinition := p.sku(p.pubCfg.ImagePrefix, cname, false)
 	var imageDefinitionBIOS string
 
 	bctx := ctx
@@ -334,9 +579,9 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 
 	if bios {
 		createBlobAndImage.Go(func(_ context.Context) error {
-			imageDefinitionBIOS = p.sku(gallery.Image, cname, true)
+			imageDefinitionBIOS = p.sku(p.pubCfg.ImagePrefix, cname, true)
 
-			er := p.createImageDefinition(bctx, &gallery, imageDefinitionBIOS, cname, arch, true, false)
+			er := p.createImageDefinition(bctx, imageDefinitionBIOS, cname, arch, true, false)
 			if er != nil {
 				return fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinitionBIOS, image, er)
 			}
@@ -346,7 +591,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	}
 
 	createBlobAndImage.Go(func(ctx context.Context) error {
-		er := p.createImageDefinition(ctx, &gallery, imageDefinition, cname, arch, false, secureBoot)
+		er := p.createImageDefinition(ctx, imageDefinition, cname, arch, false, secureBoot)
 		if er != nil {
 			return fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinition, image, er)
 		}
@@ -380,19 +625,19 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		createImageVersion.Go(func(_ context.Context) (parallel.ResultFunc, error) {
 			imageID, er := func() (string, error) {
 				defer blobUsed.Done()
-				return p.createImage(bctx, &gallery, blobURL, image, true)
+				return p.createImage(bctx, blobURL, image, true)
 			}()
 			if er != nil {
 				return nil, fmt.Errorf("cannot create image %s: %w", image, er)
 			}
 
-			er = p.createImageVersion(bctx, &gallery, imageDefinitionBIOS, imageVersion, imageID, regions, false, "", "", "")
+			er = p.createImageVersion(bctx, imageDefinitionBIOS, imageVersion, imageID, false, "", "", "")
 			if er != nil {
 				return nil, fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, er)
 			}
 
 			var publicID string
-			publicID, er = p.getPublicID(bctx, &gallery, imageDefinitionBIOS, imageVersion)
+			publicID, er = p.getPublicID(bctx, imageDefinitionBIOS, imageVersion)
 			if er != nil {
 				return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, er)
 			}
@@ -413,19 +658,19 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	createImageVersion.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 		imageID, er := func() (string, error) {
 			defer blobUsed.Done()
-			return p.createImage(ctx, &gallery, blobURL, image, false)
+			return p.createImage(ctx, blobURL, image, false)
 		}()
 		if er != nil {
 			return nil, fmt.Errorf("cannot create image %s: %w", image, er)
 		}
 
-		er = p.createImageVersion(ctx, &gallery, imageDefinition, imageVersion, imageID, regions, secureBoot, pk, kek, db)
+		er = p.createImageVersion(ctx, imageDefinition, imageVersion, imageID, secureBoot, pk, kek, db)
 		if er != nil {
 			return nil, fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, er)
 		}
 
 		var publicID string
-		publicID, er = p.getPublicID(ctx, &gallery, imageDefinition, imageVersion)
+		publicID, er = p.getPublicID(ctx, imageDefinition, imageVersion)
 		if er != nil {
 			return nil, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, er)
 		}
@@ -462,242 +707,6 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	return &azurePublishingOutput{
 		Images: outputImages,
 	}, nil
-}
-
-func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
-	if !p.isConfigured() {
-		return errors.New("config not set")
-	}
-
-	if flavor(manifest.Platform) != "azure" {
-		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
-	}
-
-	pubOut, err := publishingOutputFromManifest[azurePublishingOutput](manifest)
-	if err != nil {
-		return fmt.Errorf("invalid manifest: %w", err)
-	}
-	if len(pubOut.Images) == 0 {
-		return errors.New("invalid manifest: missing published images")
-	}
-
-	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
-	cld := p.cloud()
-	ctx = log.WithValues(ctx, "cloud", cld)
-
-	deleteImage := parallel.NewActivity(ctx)
-	for _, img := range pubOut.Images {
-		if img.Cloud != cld {
-			continue
-		}
-
-		deleteImage.Go(func(ctx context.Context) error {
-			ctx = log.WithValues(ctx, "imageID", img.ID)
-
-			imageDefinition, image, imageVersion, er := p.getMetadata(ctx, &gallery, img.ID)
-			if er != nil {
-				var ter *azcore.ResponseError
-				if steamroll && errors.As(er, &ter) && ter.StatusCode == http.StatusNotFound {
-					log.Debug(ctx, "Image not found but the steamroller keeps going")
-					return nil
-				}
-				return fmt.Errorf("cannot get metadata: %w", er)
-			}
-			ctx = log.WithValues(ctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion, "image", image)
-
-			er = p.deleteImageVersion(ctx, &gallery, imageDefinition, imageVersion, steamroll)
-			if er != nil {
-				return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, er)
-			}
-
-			er = p.deleteImage(ctx, gallery.ResourceGroup, image, steamroll)
-			if er != nil {
-				return fmt.Errorf("cannot delete image %s: %w", image, er)
-			}
-
-			er = p.deleteEmptyImageDefinition(ctx, &gallery, imageDefinition)
-			if er != nil {
-				return fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, er)
-			}
-
-			return nil
-		})
-	}
-	return deleteImage.Wait()
-}
-
-func (p *azure) CanRollback() string {
-	if !p.isConfigured() {
-		return ""
-	}
-
-	return "azure/" + strings.ReplaceAll(p.cloud(), " ", "_")
-}
-
-func (p *azure) Rollback(ctx context.Context, tasks map[string]task.Task) error {
-	if !p.isConfigured() {
-		return errors.New("config not set")
-	}
-	gallery := p.galleryCreds[p.pubCfg.GalleryConfig]
-
-	rollbackTasks := parallel.NewActivity(ctx)
-	for _, t := range tasks {
-		state, err := task.ParseState[*azureTaskState](t.State)
-		if err != nil {
-			return err
-		}
-
-		if state.Blob != "" {
-			rollbackTasks.Go(func(ctx context.Context) error {
-				ctx = log.WithValues(ctx, "blob", state.Blob)
-
-				er := p.deleteBlob(ctx, state.Blob, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
-				}
-
-				return nil
-			})
-		}
-
-		if state.Image != "" {
-			rollbackTasks.Go(func(ctx context.Context) error {
-				ctx = log.WithValues(ctx, "image", state.Image)
-
-				er := p.deleteImage(ctx, gallery.ResourceGroup, state.Image, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
-				}
-
-				return nil
-			})
-		}
-
-		if state.Version.Version != "" {
-			rollbackTasks.Go(func(ctx context.Context) error {
-				ctx = log.WithValues(ctx, "imageDefinition", state.Version.Definition, "imageVersion", state.Version.Version)
-
-				er := p.deleteImageVersion(ctx, &gallery, state.Version.Definition, state.Version.Version, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete image version %s for image definition %s: %w", state.Version, state.Version.Definition,
-						er)
-				}
-
-				return nil
-			})
-		}
-	}
-	return rollbackTasks.Wait()
-}
-
-type azure struct {
-	storageAccountCreds                 map[string]azureStorageAccountCredentials
-	servicePrincipalCreds               map[string]azureServicePrincipalCredentials
-	galleryCreds                        map[string]azureGalleryCredentials
-	pubCfg                              azurePublishingConfig
-	storageClient                       *azblob.Client
-	subscriptionsClient                 *armsubscriptions.Client
-	imagesClient                        *armcompute.ImagesClient
-	galleryImagesClient                 *armcompute.GalleryImagesClient
-	galleryImageVersionsClient          *armcompute.GalleryImageVersionsClient
-	galleriesClient                     *armcompute.GalleriesClient
-	communityGalleryImageVersionsClient *armcompute.CommunityGalleryImageVersionsClient
-}
-
-type azureStorageAccountCredentials struct {
-	AccountKey   string `mapstructure:"access_key"`
-	Account      string `mapstructure:"storage_account_name"`
-	Container    string `mapstructure:"container_name"`
-	ContainerSig string `mapstructure:"container_name_sig"`
-	cred         *azblob.SharedKeyCredential
-}
-
-type azureServicePrincipalCredentials struct {
-	ClientID       string `mapstructure:"client_id"`
-	ClientSecret   string `mapstructure:"client_secret"`
-	ObjectID       string `mapstructure:"object_id"`
-	SubscriptionID string `mapstructure:"subscription_id"`
-	TenantID       string `mapstructure:"tenant_id"`
-	cred           *azidentity.ClientSecretCredential
-}
-
-type azureGalleryCredentials struct {
-	ResourceGroup  string `mapstructure:"resource_group_name"`
-	Gallery        string `mapstructure:"gallery_name"`
-	Image          string `mapstructure:"published_name"`
-	Region         string `mapstructure:"location"`
-	Description    string `mapstructure:"description"`
-	EULA           string `mapstructure:"eula"`
-	ReleaseNoteURI string `mapstructure:"release_note_uri"`
-	Publisher      string `mapstructure:"identifier_publisher"`
-	Offer          string `mapstructure:"identifier_offer"`
-	SKU            string `mapstructure:"identifier_sku"`
-}
-
-type azurePublishingConfig struct {
-	Source                 string   `mapstructure:"source"`
-	StorageAccountConfig   string   `mapstructure:"storage_account_config"`
-	ServicePrincipalConfig string   `mapstructure:"service_principal_config"`
-	GalleryConfig          string   `mapstructure:"gallery_config"`
-	Regions                []string `mapstructure:"regions,omitempty"`
-	china                  bool
-}
-
-type azureTaskState struct {
-	Blob    string                `json:"blob,omitzero"`
-	Image   string                `json:"image,omitzero"`
-	Version azureTaskStateVersion `json:"version,omitzero"`
-}
-
-type azureTaskStateVersion struct {
-	Version    string `json:"version,omitzero"`
-	Definition string `json:"definition,omitzero"`
-}
-
-type azurePublishingOutput struct {
-	Images []azurePublishedImage `yaml:"published_gallery_images,omitempty"`
-}
-
-type azurePublishedImage struct {
-	Cloud string `yaml:"azure_cloud"`
-	ID    string `yaml:"community_gallery_image_id"`
-	Gen   string `yaml:"hyper_v_generation"`
-}
-
-func (p *azure) isConfigured() bool {
-	return p.storageClient != nil && p.subscriptionsClient != nil && p.imagesClient != nil && p.galleryImagesClient != nil &&
-		p.galleryImageVersionsClient != nil && p.galleriesClient != nil && p.communityGalleryImageVersionsClient != nil
-}
-
-func (p *azure) cloud() string {
-	if p.pubCfg.china {
-		return "china"
-	}
-
-	return "public"
-}
-
-func (*azure) imageName(cname, version, committish string) string {
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
-}
-
-func (*azure) version(version string) (string, error) {
-	ver, err := semver.NewVersion(version)
-	if err != nil {
-		return "", fmt.Errorf("invalid version %s: %w", version, err)
-	}
-	return ver.String(), nil
-}
-
-func (*azure) architecture(arch gl.Architecture) (armcompute.Architecture, error) {
-	switch arch {
-	case gl.ArchitectureAMD64:
-		return armcompute.ArchitectureX64, nil
-	case gl.ArchitectureARM64:
-		return armcompute.ArchitectureArm64, nil
-	default:
-		return "", fmt.Errorf("unknown architecture %s", arch)
-	}
 }
 
 func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, bool, string, string, string,
@@ -765,60 +774,8 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 	return manifest.RequireUEFI, manifest.SecureBoot, pk, kek, db, nil
 }
 
-func (p *azure) listRegions(ctx context.Context) ([]string, error) {
-	unusableRegions := []string{
-		"brazilus",
-		"jioindiacentral",
-	}
-	spcreds := p.servicePrincipalCreds[p.pubCfg.ServicePrincipalConfig]
-
-	log.Debug(ctx, "Listing available locations")
-	pager := p.subscriptionsClient.NewListLocationsPager(spcreds.SubscriptionID, nil)
-
-	regions := make([]string, 0)
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("cannot list locations: %w", err)
-		}
-
-		for _, location := range page.Value {
-			if location == nil {
-				return nil, errors.New("cannot list locations: missing location")
-			}
-			if location.Name == nil {
-				return nil, errors.New("cannot list locations: missing location name")
-			}
-			if location.Metadata == nil || location.Metadata.RegionType == nil {
-				return nil, errors.New("cannot list locations: missing region type")
-			}
-			if *location.Metadata.RegionType == armsubscriptions.RegionTypeLogical {
-				continue
-			}
-			if slices.Contains(unusableRegions, *location.Name) {
-				continue
-			}
-			if strings.HasSuffix(*location.Name, "euap") || strings.HasSuffix(*location.Name, "usstg") {
-				continue
-			}
-
-			regions = append(regions, *location.Name)
-		}
-	}
-
-	return regions, nil
-}
-
-func (*azure) sku(base, cname string, bios bool) string {
-	cname = strings.TrimPrefix(cname, "azure-")
-	if bios {
-		cname += "-bios"
-	}
-	return fmt.Sprintf("%s-%s", base, cname)
-}
-
-func (p *azure) createImageDefinition(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, cname string,
-	arch armcompute.Architecture, bios, secureBoot bool,
+func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, cname string, arch armcompute.Architecture, bios,
+	secureBoot bool,
 ) error {
 	gen := armcompute.HyperVGenerationV2
 	features := []*armcompute.GalleryImageFeature{
@@ -842,12 +799,14 @@ func (p *azure) createImageDefinition(ctx context.Context, gallery *azureGallery
 	}
 	ctx = log.WithValues(ctx, "imageDefinition", imageDefinition)
 
+	_, _, _, galleryImagesClient, _, _, _ := p.clients()
+
 	log.Debug(ctx, "Getting image definition")
 	exists := true
-	_, err := p.galleryImagesClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, nil)
+	_, err := galleryImagesClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition, nil)
 	if err != nil {
-		var rerr *azcore.ResponseError
-		if !errors.As(err, &rerr) || rerr.StatusCode != http.StatusNotFound {
+		var terr *azcore.ResponseError
+		if !errors.As(err, &terr) || terr.StatusCode != http.StatusNotFound {
 			return fmt.Errorf("cannot get image definition %s: %w", imageDefinition, err)
 		}
 		exists = false
@@ -858,23 +817,23 @@ func (p *azure) createImageDefinition(ctx context.Context, gallery *azureGallery
 
 	log.Info(ctx, "Creating image definition")
 	var poller *runtime.Poller[armcompute.GalleryImagesClientCreateOrUpdateResponse]
-	poller, err = p.galleryImagesClient.BeginCreateOrUpdate(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition,
+	poller, err = galleryImagesClient.BeginCreateOrUpdate(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition,
 		armcompute.GalleryImage{
-			Location: &gallery.Region,
+			Location: &p.pubCfg.Region,
 			Properties: &armcompute.GalleryImageProperties{
 				Identifier: &armcompute.GalleryImageIdentifier{
-					Offer:     &gallery.Offer,
-					Publisher: &gallery.Publisher,
-					SKU:       ptr.P(p.sku(gallery.SKU, cname, bios)),
+					Offer:     &p.pubCfg.ImageOffer,
+					Publisher: &p.pubCfg.ImagePublisher,
+					SKU:       ptr.P(p.sku(p.pubCfg.ImageSKUPrefix, cname, bios)),
 				},
 				OSState:          ptr.P(armcompute.OperatingSystemStateTypesGeneralized),
 				OSType:           ptr.P(armcompute.OperatingSystemTypesLinux),
 				Architecture:     &arch,
-				Description:      &gallery.Description,
-				Eula:             &gallery.EULA,
+				Description:      &p.pubCfg.ImageDescription,
+				Eula:             &p.pubCfg.ImageEULA,
 				Features:         features,
 				HyperVGeneration: &gen,
-				ReleaseNoteURI:   &gallery.ReleaseNoteURI,
+				ReleaseNoteURI:   &p.pubCfg.ImageReleaseNote,
 			},
 		}, nil)
 	if err != nil {
@@ -892,13 +851,12 @@ func (p *azure) createImageDefinition(ctx context.Context, gallery *azureGallery
 }
 
 func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, image string) (string, string, error) {
-	container := p.storageAccountCreds[p.pubCfg.StorageAccountConfig].Container
 	blob := image + p.ImageSuffix()
 	size, err := source.GetObjectSize(ctx, key)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot get object size: %w", err)
 	}
-	ctx = log.WithValues(ctx, "key", key, "container", container, "blob", blob, "size", size)
+	ctx = log.WithValues(ctx, "key", key, "container", p.pubCfg.StorageContainer, "blob", blob, "size", size)
 
 	log.Info(ctx, "Uploading blob")
 	var url string
@@ -907,7 +865,9 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 		return "", "", fmt.Errorf("cannot get image URL for %s: %w", key, err)
 	}
 
-	blobClient := p.storageClient.ServiceClient().NewContainerClient(container).NewPageBlobClient(blob)
+	storageClient, _, _, _, _, _, _ := p.clients()
+
+	blobClient := storageClient.ServiceClient().NewContainerClient(p.pubCfg.StorageContainer).NewPageBlobClient(blob)
 	_, err = blobClient.Create(ctx, size, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot create blob: %w", err)
@@ -921,7 +881,7 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 		block := min(size-offset, 4*1024*1024)
 		_, err = blobClient.UploadPagesFromURL(ctx, url, offset, offset, block, nil)
 		if err != nil {
-			return "", "", fmt.Errorf("cannot upload to blob %s in container %s: %w", blob, container, err)
+			return "", "", fmt.Errorf("cannot upload to blob %s in container %s: %w", blob, p.pubCfg.StorageContainer, err)
 		}
 		offset += block
 	}
@@ -930,7 +890,7 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 	return blob, blobClient.URL(), nil
 }
 
-func (p *azure) createImage(ctx context.Context, gallery *azureGalleryCredentials, blobURL, image string, bios bool) (string, error) {
+func (p *azure) createImage(ctx context.Context, blobURL, image string, bios bool) (string, error) {
 	imageName := image
 	gen := armcompute.HyperVGenerationTypesV2
 	if bios {
@@ -940,9 +900,11 @@ func (p *azure) createImage(ctx context.Context, gallery *azureGalleryCredential
 	imageName += p.ImageSuffix()
 	ctx = log.WithValues(ctx, "imageName", imageName)
 
+	_, _, imagesClient, _, _, _, _ := p.clients()
+
 	log.Info(ctx, "Creating image")
-	poller, err := p.imagesClient.BeginCreateOrUpdate(ctx, gallery.ResourceGroup, imageName, armcompute.Image{
-		Location: &gallery.Region,
+	poller, err := imagesClient.BeginCreateOrUpdate(ctx, p.pubCfg.ResourceGroup, imageName, armcompute.Image{
+		Location: &p.pubCfg.Region,
 		Properties: &armcompute.ImageProperties{
 			HyperVGeneration: &gen,
 			StorageProfile: &armcompute.ImageStorageProfile{
@@ -977,8 +939,7 @@ func (p *azure) createImage(ctx context.Context, gallery *azureGalleryCredential
 	return *r.ID, nil
 }
 
-func (p *azure) createImageVersion(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, imageVersion, imageID string,
-	regions []string, secureBoot bool, _, kek, db string,
+func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVersion, imageID string, secureBoot bool, _, kek, db string,
 ) error {
 	var security *armcompute.ImageVersionSecurityProfile
 	if secureBoot {
@@ -1015,18 +976,20 @@ func (p *azure) createImageVersion(ctx context.Context, gallery *azureGalleryCre
 			},
 		}
 	}
-	targetRegions := make([]*armcompute.TargetRegion, 0, len(regions))
-	for _, region := range regions {
+	targetRegions := make([]*armcompute.TargetRegion, 0, len(p.regions))
+	for _, region := range p.regions {
 		targetRegions = append(targetRegions, &armcompute.TargetRegion{
 			Name: &region,
 		})
 	}
 	ctx = log.WithValues(ctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion)
 
+	_, _, _, _, galleryImageVersionsClient, _, _ := p.clients()
+
 	log.Info(ctx, "Creating image version")
-	poller, err := p.galleryImageVersionsClient.BeginCreateOrUpdate(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition,
+	poller, err := galleryImageVersionsClient.BeginCreateOrUpdate(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition,
 		imageVersion, armcompute.GalleryImageVersion{
-			Location: &gallery.Region,
+			Location: &p.pubCfg.Region,
 			Properties: &armcompute.GalleryImageVersionProperties{
 				StorageProfile: &armcompute.GalleryImageVersionStorageProfile{
 					Source: &armcompute.GalleryArtifactVersionFullSource{
@@ -1063,9 +1026,11 @@ func (p *azure) createImageVersion(ctx context.Context, gallery *azureGalleryCre
 	return nil
 }
 
-func (p *azure) getPublicID(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, imageVersion string) (string, error) {
+func (p *azure) getPublicID(ctx context.Context, imageDefinition, imageVersion string) (string, error) {
+	_, _, _, _, _, galleriesClient, communityGalleryImageVersionsClient := p.clients()
+
 	log.Debug(ctx, "Getting gallery")
-	gr, err := p.galleriesClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, nil)
+	gr, err := galleriesClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, nil)
 	if err != nil {
 		return "", fmt.Errorf("cannot get gallery: %w", err)
 	}
@@ -1078,7 +1043,7 @@ func (p *azure) getPublicID(ctx context.Context, gallery *azureGalleryCredential
 
 	log.Debug(ctx, "Getting image version")
 	var givr armcompute.CommunityGalleryImageVersionsClientGetResponse
-	givr, err = p.communityGalleryImageVersionsClient.Get(ctx, gallery.Region, publicName, imageDefinition, imageVersion, nil)
+	givr, err = communityGalleryImageVersionsClient.Get(ctx, p.pubCfg.Region, publicName, imageDefinition, imageVersion, nil)
 	if err != nil {
 		return "", fmt.Errorf("cannot get community gallery image version: %w", err)
 	}
@@ -1090,11 +1055,12 @@ func (p *azure) getPublicID(ctx context.Context, gallery *azureGalleryCredential
 }
 
 func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll bool) error {
-	container := p.storageAccountCreds[p.pubCfg.StorageAccountConfig].Container
-	ctx = log.WithValues(ctx, "container", container, "blob", blob)
+	ctx = log.WithValues(ctx, "container", p.pubCfg.StorageContainer, "blob", blob)
+
+	storageClient, _, _, _, _, _, _ := p.clients()
 
 	log.Info(ctx, "Deleting blob")
-	blobClient := p.storageClient.ServiceClient().NewContainerClient(container).NewPageBlobClient(blob)
+	blobClient := storageClient.ServiceClient().NewContainerClient(p.pubCfg.StorageContainer).NewPageBlobClient(blob)
 	_, err := blobClient.Delete(ctx, &azblob.DeleteBlobOptions{
 		DeleteSnapshots: ptr.P(azblob.DeleteSnapshotsOptionTypeInclude),
 	})
@@ -1114,7 +1080,68 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll bool) err
 	return nil
 }
 
-func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredentials, imageID string) (string, string, string, error) {
+func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	if flavor(manifest.Platform) != "azure" {
+		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
+	}
+
+	pubOut, err := publishingOutputFromManifest[azurePublishingOutput](manifest)
+	if err != nil {
+		return fmt.Errorf("invalid manifest: %w", err)
+	}
+	if len(pubOut.Images) == 0 {
+		return errors.New("invalid manifest: missing published images")
+	}
+
+	cld := p.cloud()
+	ctx = log.WithValues(ctx, "cloud", cld)
+
+	deleteImage := parallel.NewActivity(ctx)
+	for _, img := range pubOut.Images {
+		if img.Cloud != cld {
+			continue
+		}
+
+		deleteImage.Go(func(ctx context.Context) error {
+			ctx = log.WithValues(ctx, "imageID", img.ID)
+
+			imageDefinition, image, imageVersion, er := p.getMetadata(ctx, img.ID)
+			if er != nil {
+				var ter *azcore.ResponseError
+				if steamroll && errors.As(er, &ter) && ter.StatusCode == http.StatusNotFound {
+					log.Debug(ctx, "Image not found but the steamroller keeps going")
+					return nil
+				}
+				return fmt.Errorf("cannot get metadata: %w", er)
+			}
+			ctx = log.WithValues(ctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion, "image", image)
+
+			er = p.deleteImageVersion(ctx, imageDefinition, imageVersion, steamroll)
+			if er != nil {
+				return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, er)
+			}
+
+			er = p.deleteImage(ctx, image, steamroll)
+			if er != nil {
+				return fmt.Errorf("cannot delete image %s: %w", image, er)
+			}
+
+			er = p.deleteEmptyImageDefinition(ctx, imageDefinition)
+			if er != nil {
+				return fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, er)
+			}
+
+			return nil
+		})
+	}
+	return deleteImage.Wait()
+}
+
+func (p *azure) getMetadata(ctx context.Context, imageID string) (string, string, string, error) {
 	parts := strings.Split(imageID, "/")
 	if len(parts) != 7 {
 		return "", "", "", fmt.Errorf("invalid image ID %s", imageID)
@@ -1123,18 +1150,20 @@ func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredential
 	imageDefinition := parts[4]
 	imageVersion := parts[6]
 
+	_, _, _, _, galleryImageVersionsClient, galleriesClient, _ := p.clients()
+
 	log.Debug(ctx, "Getting gallery")
-	gr, err := p.galleriesClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, nil)
+	gr, err := galleriesClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, nil)
 	if err != nil {
-		return "", "", "", fmt.Errorf("cannot get gallery %s: %w", gallery.Gallery, err)
+		return "", "", "", fmt.Errorf("cannot get gallery %s: %w", p.pubCfg.Gallery, err)
 	}
 	if gr.Properties == nil || gr.Properties.SharingProfile == nil || gr.Properties.SharingProfile.CommunityGalleryInfo == nil {
-		return "", "", "", fmt.Errorf("cannot get gallery %s: missing public names", gallery.Gallery)
+		return "", "", "", fmt.Errorf("cannot get gallery %s: missing public names", p.pubCfg.Gallery)
 	}
 	found := false
 	for _, name := range gr.Properties.SharingProfile.CommunityGalleryInfo.PublicNames {
 		if name == nil {
-			return "", "", "", fmt.Errorf("cannot get gallery%s : missing public name", gallery.Gallery)
+			return "", "", "", fmt.Errorf("cannot get gallery %s: missing public name", p.pubCfg.Gallery)
 		}
 		if *name == imageGallery {
 			found = true
@@ -1142,12 +1171,12 @@ func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredential
 		}
 	}
 	if !found {
-		return "", "", "", fmt.Errorf("cannot get gallery %s: no public name matches gallery %s", gallery.Gallery, imageGallery)
+		return "", "", "", fmt.Errorf("cannot get gallery %s: no public name matches gallery %s", p.pubCfg.Gallery, imageGallery)
 	}
 
 	log.Debug(ctx, "Getting gallery image version")
 	var givr armcompute.GalleryImageVersionsClientGetResponse
-	givr, err = p.galleryImageVersionsClient.Get(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
+	givr, err = galleryImageVersionsClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition, imageVersion, nil)
 	if err != nil {
 		return "", "", "", fmt.Errorf("cannot get gallery image version: %w", err)
 	}
@@ -1164,10 +1193,11 @@ func (p *azure) getMetadata(ctx context.Context, gallery *azureGalleryCredential
 	return imageDefinition, image, imageVersion, nil
 }
 
-func (p *azure) deleteImageVersion(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition, imageVersion string, _ bool,
-) error {
+func (p *azure) deleteImageVersion(ctx context.Context, imageDefinition, imageVersion string, _ bool) error {
+	_, _, _, _, galleryImageVersionsClient, _, _ := p.clients()
+
 	log.Info(ctx, "Deleting image version")
-	poller, err := p.galleryImageVersionsClient.BeginDelete(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, imageVersion, nil)
+	poller, err := galleryImageVersionsClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition, imageVersion, nil)
 	if err != nil {
 		return fmt.Errorf("cannot delete gallery image version: %w", err)
 	}
@@ -1182,9 +1212,11 @@ func (p *azure) deleteImageVersion(ctx context.Context, gallery *azureGalleryCre
 	return nil
 }
 
-func (p *azure) deleteImage(ctx context.Context, imageResourceGroup, image string, _ bool) error {
+func (p *azure) deleteImage(ctx context.Context, image string, _ bool) error {
+	_, _, imagesClient, _, _, _, _ := p.clients()
+
 	log.Info(ctx, "Deleting image")
-	poller, err := p.imagesClient.BeginDelete(ctx, imageResourceGroup, image, nil)
+	poller, err := imagesClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, image, nil)
 	if err != nil {
 		return fmt.Errorf("cannot delete image: %w", err)
 	}
@@ -1199,9 +1231,11 @@ func (p *azure) deleteImage(ctx context.Context, imageResourceGroup, image strin
 	return nil
 }
 
-func (p *azure) deleteEmptyImageDefinition(ctx context.Context, gallery *azureGalleryCredentials, imageDefinition string) error {
+func (p *azure) deleteEmptyImageDefinition(ctx context.Context, imageDefinition string) error {
+	_, _, _, galleryImagesClient, galleryImageVersionsClient, _, _ := p.clients()
+
 	log.Debug(ctx, "Listing image versions")
-	pager := p.galleryImageVersionsClient.NewListByGalleryImagePager(gallery.ResourceGroup, gallery.Gallery, imageDefinition, nil)
+	pager := galleryImageVersionsClient.NewListByGalleryImagePager(p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition, nil)
 	if pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -1210,7 +1244,7 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, gallery *azureGa
 		if len(page.Value) == 0 {
 			log.Info(ctx, "Deleting image definition")
 			var poller *runtime.Poller[armcompute.GalleryImagesClientDeleteResponse]
-			poller, err = p.galleryImagesClient.BeginDelete(ctx, gallery.ResourceGroup, gallery.Gallery, imageDefinition, nil)
+			poller, err = galleryImagesClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition, nil)
 			if err != nil {
 				return fmt.Errorf("cannot delete gallery image definition: %w", err)
 			}
@@ -1222,6 +1256,85 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, gallery *azureGa
 				return fmt.Errorf("cannot delete gallery image definition: %w", err)
 			}
 		}
+	}
+
+	return nil
+}
+
+func (p *azure) CanRollback() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "azure/" + strings.ReplaceAll(p.cloud(), " ", "_")
+}
+
+func (p *azure) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+	if !p.isConfigured() {
+		return errors.New("config not set")
+	}
+
+	rollbackTasks := parallel.NewActivity(ctx)
+	for _, t := range tasks {
+		state, err := task.ParseState[*azureTaskState](t.State)
+		if err != nil {
+			return err
+		}
+
+		if state.Blob != "" {
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "blob", state.Blob)
+
+				er := p.deleteBlob(ctx, state.Blob, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				}
+
+				return nil
+			})
+		}
+
+		if state.Image != "" {
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "image", state.Image)
+
+				er := p.deleteImage(ctx, state.Image, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
+				}
+
+				return nil
+			})
+		}
+
+		if state.Version.Version != "" {
+			rollbackTasks.Go(func(ctx context.Context) error {
+				ctx = log.WithValues(ctx, "imageDefinition", state.Version.Definition, "imageVersion", state.Version.Version)
+
+				er := p.deleteImageVersion(ctx, state.Version.Definition, state.Version.Version, true)
+				if er != nil {
+					return fmt.Errorf("cannot delete image version %s for image definition %s: %w", state.Version, state.Version.Definition,
+						er)
+				}
+
+				return nil
+			})
+		}
+	}
+	return rollbackTasks.Wait()
+}
+
+func (p *azure) Close() error {
+	if p.pubCfg.Config != "" {
+		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+			Type:   p.Type() + "storage",
+			Config: p.pubCfg.Config,
+		})
+
+		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+			Type:   p.Type(),
+			Config: p.pubCfg.Config,
+		})
 	}
 
 	return nil

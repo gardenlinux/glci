@@ -17,6 +17,16 @@ func init() {
 	startTime = time.Now()
 }
 
+type ctxkCfg struct{}
+
+//nolint:gochecknoglobals // This needs to be set as early as possible.
+var startTime time.Time
+
+// StartTime returns the approximate start time of the process.
+func StartTime() time.Time {
+	return startTime
+}
+
 // Setup sets up a Cobra command in such a way that it supports integration with Viper.
 func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Viper, error) {
 	rootCmd := &cobra.Command{}
@@ -53,7 +63,7 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 			return nil, nil, err
 		}
 		cfg.SetEnvPrefix(strings.ToUpper(rootCmd.Name()))
-		cfg.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+		cfg.SetEnvKeyReplacer(strings.NewReplacer("-", "_", ".", "_"))
 		cfg.AutomaticEnv()
 
 		cfgFile := cfg.GetString("config-file")
@@ -87,13 +97,3 @@ func RunFunc(run func(context.Context, *viper.Viper) error) func(*cobra.Command,
 		return run(ctx, v)
 	}
 }
-
-// StartTime returns the approximate start time of the process.
-func StartTime() time.Time {
-	return startTime
-}
-
-//nolint:gochecknoglobals // This needs to be set as early as possible.
-var startTime time.Time
-
-type ctxkCfg struct{}

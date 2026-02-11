@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 
 	"github.com/opencontainers/go-digest"
 	specv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -17,8 +19,13 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+)
+
+const (
+	repoSuffix = "/component-descriptors/" + gl.GardenLinuxRepo
 )
 
 func init() {
@@ -31,23 +38,86 @@ func (*oci) Type() string {
 	return "OCI"
 }
 
-func (p *oci) SetCredentials(creds map[string]any) error {
-	return setCredentials(creds, "container_registry", &p.creds)
+type oci struct {
+	ociCfg      ociOCMConfig
+	credsSource credsprovider.CredsSource
+	clientsMtx  sync.RWMutex
+	repo        *remote.Repository
 }
 
-func (p *oci) SetOCMConfig(_ context.Context, cfg map[string]any) error {
-	err := setConfig(cfg, &p.ociCfg)
+type ociOCMConfig struct {
+	Config     string `mapstructure:"config"`
+	Repository string `mapstructure:"repository"`
+}
+
+func (p *oci) isConfigured() bool {
+	return p.repo != nil
+}
+
+func (p *oci) SetOCMConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
+	p.credsSource = credsSource
+
+	err := parseConfig(cfg, &p.ociCfg)
 	if err != nil {
 		return err
 	}
 
-	if p.creds == nil {
-		return errors.New("credentials not set")
+	switch {
+	case p.ociCfg.Config == "":
+		return errors.New("missing config")
+	case p.ociCfg.Repository == "":
+		return errors.New("missing repository")
 	}
-	creds, ok := p.creds[p.ociCfg.Config]
-	if !ok {
-		return fmt.Errorf("missing credentials config %s", p.ociCfg.Config)
+
+	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType()),
+		Config: p.ociCfg.Config,
+	}, p.createClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.ociCfg.Config, err)
 	}
+
+	return nil
+}
+
+type ociCredentials struct {
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+}
+
+type ociGCPCredentials struct {
+	Token string `mapstructure:"token"`
+}
+
+func (p *oci) credsType() string {
+	switch {
+	case strings.HasPrefix(p.ociCfg.Repository, "europe-docker.pkg.dev/"):
+		return "GCP"
+	default:
+		return "userpass"
+	}
+}
+
+func (p *oci) createClients(_ context.Context, rawCreds map[string]any) error {
+	var creds ociCredentials
+	var err error
+	switch p.credsType() {
+	case "GCP":
+		var gcpCreds ociGCPCredentials
+		err = parseCredentials(rawCreds, &gcpCreds)
+		creds.Username = "oauth2accesstoken"
+		creds.Password = gcpCreds.Token
+	case "userpass":
+		fallthrough
+	default:
+		err = parseCredentials(rawCreds, &creds)
+	}
+	if err != nil {
+		return err
+	}
+
+	p.clientsMtx.Lock()
+	defer p.clientsMtx.Unlock()
 
 	fullRepositoryPath := p.ociCfg.Repository + repoSuffix
 	p.repo, err = remote.NewRepository(fullRepositoryPath)
@@ -67,8 +137,11 @@ func (p *oci) SetOCMConfig(_ context.Context, cfg map[string]any) error {
 	return nil
 }
 
-func (*oci) Close() error {
-	return nil
+func (p *oci) clients() *remote.Repository {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.repo
 }
 
 func (*oci) OCMType() string {
@@ -184,8 +257,10 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 		return fmt.Errorf("cannot tag OCI manifest: %w", err)
 	}
 
+	repo := p.clients()
+
 	log.Debug(ctx, "Copying artifact")
-	_, err = oras.Copy(ctx, fs, version, p.repo, version, oras.DefaultCopyOptions)
+	_, err = oras.Copy(ctx, fs, version, repo, version, oras.DefaultCopyOptions)
 	if err != nil {
 		return fmt.Errorf("cannot upload OCI artifact: %w", err)
 	}
@@ -203,26 +278,13 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 	return nil
 }
 
-type oci struct {
-	creds  map[string]ociCredentials
-	ociCfg ociOCMConfig
-	repo   *remote.Repository
-}
+func (p *oci) Close() error {
+	if p.ociCfg.Config != "" {
+		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType()),
+			Config: p.ociCfg.Config,
+		})
+	}
 
-const (
-	repoSuffix = "/component-descriptors/" + gl.GardenLinuxRepo
-)
-
-type ociCredentials struct {
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
-}
-
-type ociOCMConfig struct {
-	Config     string `mapstructure:"config"`
-	Repository string `mapstructure:"repository"`
-}
-
-func (p *oci) isConfigured() bool {
-	return p.repo != nil
+	return nil
 }

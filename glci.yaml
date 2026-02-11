@@ -45,65 +45,143 @@ flavors:
   - platform: GCP
     cname: gcp-gardener_prod_tpm2_trustedboot-arm64
 publishing:
+  credentials:
+    type: Vault
+    server: https://vault.tools.sap
+    namespace: gardnlinux
+    token_file:
+    role_id:
+    secret_id:
   manifest_source: S3
   sources:
   - id: S3
     type: AWS
-    bucket: gardenlinux-github-releases
     config: gardenlinux
+    region: eu-central-1
+    bucket: gardenlinux-github-releases
   - id: S3-China
     type: AWS
-    bucket: gardenlinux-github-releases
     config: gardenlinux-cn
+    region: cn-northwest-1
+    bucket: gardenlinux-github-releases
   targets:
   - type: Aliyun
     source: S3
     config: gardenlinux
+    region: eu-central-1
     bucket: gardenlinux-community
   - type: AWS
     source: S3
     config: gardenlinux
+    region: eu-central-1
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
   - type: AWS
     source: S3-China
     config: gardenlinux-cn
+    region: cn-northwest-1
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
   - type: Azure
     source: S3
-    storage_account_config: gardenlinux-community-gallery
-    service_principal_config: gardenlinux
-    gallery_config: gardenlinux-community-gallery-nvme
+    config: gardenlinux
+    storage_container: gardenlinux
+    resource_group: community-gallery
+    gallery: gardenlinux_community_gallery
+    region: westeurope
+    image_prefix: gardenlinux-nvme
+    image_description: Garden Linux - a Linux for containers, based on Debian
+    image_eula: https://github.com/gardenlinux/gardenlinux/blob/main/LICENSE.md
+    image_release_note: https://github.com/gardenlinux/gardenlinux/releases
+    image_publisher: GardenLinux
+    image_offer: gardenlinux
+    image_sku_prefix: gardenlinux_nvme
   - type: Azure
     source: S3-China
-    storage_account_config: gardenlinux-community-gallery-cn
-    service_principal_config: gardenlinux-cn
-    gallery_config: gardenlinux-community-gallery-nvme-cn
+    config: gardenlinux-cn
+    storage_container: gardenlinux
+    resource_group: community-gallery
+    gallery: gardenlinux_community_gallery
+    region: chinanorth3
+    image_prefix: gardenlinux-nvme
+    image_description: Garden Linux - a Linux for containers, based on Debian
+    image_eula: https://github.com/gardenlinux/gardenlinux/blob/main/LICENSE.md
+    image_release_note: https://github.com/gardenlinux/gardenlinux/releases
+    image_publisher: GardenLinux
+    image_offer: gardenlinux
+    image_sku_prefix: gardenlinux_nvme
   - type: GCP
     source: S3
     config: gardenlinux
+    project: sap-se-gcp-gardenlinux
     bucket: gardenlinux-images
   - type: OpenStack
     source: S3
-    configs: [ gardenlinux ]
     source_china: S3-China
+    configs:
+    - config: gardenlinux
+      endpoint: https://identity-3.{region}.cloud.sap/v3
+      domain: monsoon3
+      project: gardenlinux
+      regions:
+      - ap-ae-1
+      - ap-au-1
+      - ap-cn-1
+      - ap-jp-1
+      - ap-jp-2
+      - ap-sa-1
+      - ap-sa-2
+      - eu-de-1
+      - eu-de-2
+      - eu-nl-1
+      - la-br-1
+      - na-ca-1
+      - na-us-1
+      - na-us-2
+      - na-us-3
     hypervisor: Bare Metal
   - type: OpenStack
     source: S3
-    configs: [ gardenlinux ]
     source_china: S3-China
+    configs:
+    - config: gardenlinux
+      endpoint: https://identity-3.{region}.cloud.sap/v3
+      domain: monsoon3
+      project: gardenlinux
+      regions:
+      - ap-ae-1
+      - ap-au-1
+      - ap-cn-1
+      - ap-jp-1
+      - ap-jp-2
+      - ap-sa-1
+      - ap-sa-2
+      - eu-de-1
+      - eu-de-2
+      - eu-nl-1
+      - la-br-1
+      - na-ca-1
+      - na-us-1
+      - na-us-2
+      - na-us-3
+    - config: gardenlinux-qa
+      endpoint: https://identity-3.{region}.cloud.sap/v3
+      domain: monsoon3
+      project: gardenlinux-live
+      regions:
+      - qa-de-1
     hypervisor: VMware
   ocm:
     type: OCI
-    config: gcr-readwrite
+    config: gardenlinux
     repository: europe-docker.pkg.dev/gardener-project/releases
   state:
     type: AWS
-    bucket: glci-state
     config: gardenlinux
+    region: eu-central-1
+    bucket: glci-state
 aliases:
   auditd: [ audit ]
   libc-bin: [ glibc ]

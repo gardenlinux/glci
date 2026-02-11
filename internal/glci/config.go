@@ -13,6 +13,11 @@ type FlavorsConfig struct {
 	Flavors []cfgFlavor `mapstructure:"flavors"`
 }
 
+type cfgFlavor struct {
+	Platform string `mapstructure:"platform"`
+	Cname    string `mapstructure:"cname"`
+}
+
 // Validate ensures that the flavours configuration is valid.
 func (c *FlavorsConfig) Validate() error {
 	for _, flavor := range c.Flavors {
@@ -33,14 +38,44 @@ func (c *FlavorsConfig) Validate() error {
 type PublishingConfig struct {
 	ManifestSource string      `mapstructure:"manifest_source"`
 	ManifestTarget string      `mapstructure:"manifest_target,omitzero"`
+	Credentials    cfgCreds    `mapstructure:"credentials"`
 	Sources        []cfgSource `mapstructure:"sources"`
 	Targets        []cfgTarget `mapstructure:"targets"`
 	OCM            cfgTarget   `mapstructure:"ocm"`
 	State          cfgState    `mapstructure:"state"`
 }
 
+type cfgCreds struct {
+	Type string `mapstructure:"type"`
+	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
+	Config map[string]any `mapstructure:"-,remain"`
+}
+
+type cfgSource struct {
+	ID   string `mapstructure:"id"`
+	Type string `mapstructure:"type"`
+	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
+	Config map[string]any `mapstructure:"-,remain"`
+}
+
+type cfgTarget struct {
+	Type string `mapstructure:"type"`
+	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
+	Config map[string]any `mapstructure:"-,remain"`
+}
+
+type cfgState struct {
+	Type string `mapstructure:"type"`
+	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
+	Config map[string]any `mapstructure:"-,remain"`
+}
+
 // Validate ensures that the publishing configuration is valid.
 func (c *PublishingConfig) Validate() error {
+	if c.Credentials.Type == "" {
+		return errors.New("missing credentials")
+	}
+
 	ids := make(map[string]struct{}, len(c.Sources))
 	for _, source := range c.Sources {
 		if source.Type == "" {
@@ -122,30 +157,6 @@ func (c *PublishingConfig) Validate() error {
 	}
 
 	return nil
-}
-
-type cfgFlavor struct {
-	Platform string `mapstructure:"platform"`
-	Cname    string `mapstructure:"cname"`
-}
-
-type cfgSource struct {
-	ID   string `mapstructure:"id"`
-	Type string `mapstructure:"type"`
-	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
-	Config map[string]any `mapstructure:"-,remain"`
-}
-
-type cfgTarget struct {
-	Type string `mapstructure:"type"`
-	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
-	Config map[string]any `mapstructure:"-,remain"`
-}
-
-type cfgState struct {
-	Type string `mapstructure:"type"`
-	//nolint:revive // The remain tag overrides the -, which is necessary to avoid an implicit name.
-	Config map[string]any `mapstructure:"-,remain"`
 }
 
 // AliasesConfig contains package aliases which are reflected in the component descriptor.

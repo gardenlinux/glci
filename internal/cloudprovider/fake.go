@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -22,27 +23,21 @@ func init() {
 	})
 }
 
+type fake struct{}
+
 func (*fake) Type() string {
 	return "Fake"
 }
 
-func (*fake) SetCredentials(_ map[string]any) error {
+func (*fake) SetSourceConfig(_ context.Context, _ credsprovider.CredsSource, _ map[string]any) error {
 	return nil
 }
 
-func (*fake) SetSourceConfig(_ context.Context, _ map[string]any) error {
+func (*fake) SetTargetConfig(_ context.Context, _ credsprovider.CredsSource, _ map[string]any, _ map[string]ArtifactSource) error {
 	return nil
 }
 
-func (*fake) SetTargetConfig(_ context.Context, _ map[string]any, _ map[string]ArtifactSource) error {
-	return nil
-}
-
-func (*fake) SetOCMConfig(_ context.Context, _ map[string]any) error {
-	return nil
-}
-
-func (*fake) Close() error {
+func (*fake) SetOCMConfig(_ context.Context, _ credsprovider.CredsSource, _ map[string]any) error {
 	return nil
 }
 
@@ -60,6 +55,10 @@ func (*fake) GetObjectSize(_ context.Context, _ string) (int64, error) {
 
 func (p *fake) GetObject(_ context.Context, _ string) (io.ReadCloser, error) {
 	return p, nil
+}
+
+func (*fake) Read(_ []byte) (int, error) {
+	return 0, io.EOF
 }
 
 func (*fake) PutObject(_ context.Context, _ string, _ io.Reader) error {
@@ -90,15 +89,15 @@ func (p *fake) Publish(_ context.Context, _ string, _ *gl.Manifest, _ map[string
 	return p, nil
 }
 
+func (*fake) Remove(_ context.Context, _ *gl.Manifest, _ map[string]ArtifactSource, _ bool) error {
+	return nil
+}
+
 func (*fake) CanRollback() string {
 	return ""
 }
 
 func (*fake) Rollback(_ context.Context, _ map[string]task.Task) error {
-	return nil
-}
-
-func (*fake) Remove(_ context.Context, _ *gl.Manifest, _ map[string]ArtifactSource, _ bool) error {
 	return nil
 }
 
@@ -114,8 +113,6 @@ func (*fake) PublishComponentDescriptor(_ context.Context, _ string, _ []byte) e
 	return nil
 }
 
-func (*fake) Read(_ []byte) (int, error) {
-	return 0, io.EOF
+func (*fake) Close() error {
+	return nil
 }
-
-type fake struct{}

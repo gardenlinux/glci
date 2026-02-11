@@ -2,6 +2,8 @@ package task
 
 import (
 	"context"
+
+	"github.com/gardenlinux/glci/internal/credsprovider"
 )
 
 func init() {
@@ -10,15 +12,13 @@ func init() {
 	})
 }
 
+type fake struct{}
+
 func (*fake) Type() string {
 	return "Fake"
 }
 
-func (*fake) SetCredentials(_ map[string]any) error {
-	return nil
-}
-
-func (*fake) SetStateConfig(_ context.Context, _ any) error {
+func (*fake) SetStateConfig(_ context.Context, _ credsprovider.CredsSource, _ any) error {
 	return nil
 }
 
@@ -40,5 +40,3 @@ func (*fake) Save(_ []byte) error {
 func (*fake) Clear() error {
 	return nil
 }
-
-type fake struct{}
