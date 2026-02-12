@@ -17,7 +17,7 @@ flavors:
   - platform: OpenStack
     cname: openstack-gardener_prod-amd64
   - platform: OpenStack
-    cname: openstack-gardener-metal_prod-amd64
+    cname: openstackbaremetal-gardener_prod-amd64
   - platform: AWS
     cname: aws-gardener_prod_usi-amd64
   - platform: AWS
@@ -147,7 +147,8 @@ publishing:
       project: gardenlinux-live
       regions:
       - qa-de-1
-    variant: vm
+    hypervisor: Bare Metal
+    variant: metal
   - type: OpenStack
     source: S3
     source_china: S3-China
@@ -178,7 +179,8 @@ publishing:
       project: gardenlinux-live
       regions:
       - qa-de-1
-    variant: metal
+    hypervisor: VMware
+    variant: vm
   ocm:
     type: OCI
     config: gardenlinux

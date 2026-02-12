@@ -189,7 +189,7 @@ func (p *gcp) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	return flavor(manifest.Platform) == "gcp"
+	return manifest.Platform == "gcp"
 }
 
 func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
@@ -247,11 +247,11 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		return nil, errors.New("config not set")
 	}
 
-	f := flavor(cname)
-	if f != "gcp" {
+	pl := platform(cname)
+	if pl != "gcp" {
 		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
 	}
-	if f != manifest.Platform {
+	if pl != manifest.Platform {
 		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
 	}
 
@@ -538,7 +538,7 @@ func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 		return errors.New("config not set")
 	}
 
-	if flavor(manifest.Platform) != "gcp" {
+	if manifest.Platform != "gcp" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 

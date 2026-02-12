@@ -27,7 +27,8 @@ ENV GLCI_PUBLISHING_CREDENTIALS_TOKEN_FILE= GLCI_PUBLISHING_CREDENTIALS_ROLE_ID=
 ENTRYPOINT ["/glci"]
 COPY --from=builder /glci/glci .
 COPY glci.yaml glci.yaml
-COPY glci_classic.yaml glci_classic.yaml
+COPY glci_1877.yaml glci_1877.yaml
+COPY glci_1592.yaml glci_1592.yaml
 COPY glci_integration_test.yaml glci_integration_test.yaml
 COPY glci_dev.yaml glci_dev.yaml
 

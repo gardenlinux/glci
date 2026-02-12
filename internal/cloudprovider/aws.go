@@ -424,7 +424,7 @@ func (p *aws) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	if flavor(manifest.Platform) != "aws" {
+	if manifest.Platform != "aws" {
 		return false
 	}
 
@@ -519,11 +519,11 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		return nil, errors.New("config not set")
 	}
 
-	f := flavor(cname)
-	if f != "aws" {
+	pl := platform(cname)
+	if pl != "aws" {
 		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
 	}
-	if f != manifest.Platform {
+	if pl != manifest.Platform {
 		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
 	}
 
@@ -906,7 +906,7 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 		return errors.New("config not set")
 	}
 
-	if flavor(manifest.Platform) != "aws" {
+	if manifest.Platform != "aws" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 

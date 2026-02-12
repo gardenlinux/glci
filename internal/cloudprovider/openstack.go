@@ -47,6 +47,7 @@ type openstackPublishingConfig struct {
 	SourceChina string                            `mapstructure:"source_china,omitzero"`
 	Configs     []openstackPublishingConfigConfig `mapstructure:"configs"`
 	Hypervisor  openstackHypervisor               `mapstructure:"hypervisor"`
+	Variant     openstackVariant                  `mapstructure:"variant"`
 	Test        bool                              `mapstructure:"test,omitzero"`
 }
 
@@ -63,6 +64,13 @@ type openstackHypervisor string
 const (
 	openstackHypervisorBareMetal openstackHypervisor = "Bare Metal"
 	openstackHypervisorVMware    openstackHypervisor = "VMware"
+)
+
+type openstackVariant string
+
+const (
+	openstackVariantVM    openstackVariant = "vm"
+	openstackVariantMetal openstackVariant = "metal"
 )
 
 func (p *openstack) isConfigured() bool {
@@ -86,8 +94,8 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 		return errors.New("missing source")
 	case len(p.pubCfg.Configs) == 0:
 		return errors.New("missing configs")
-	case p.pubCfg.Hypervisor == "":
-		return errors.New("missing hypervisor")
+	case p.pubCfg.Variant == "":
+		return errors.New("missing variant")
 	}
 
 	_, ok := sources[p.pubCfg.Source]
@@ -120,10 +128,6 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 			return fmt.Errorf("missing project for config %s", config.Config)
 		case len(config.Regions) == 0:
 			return fmt.Errorf("missing regions for config %s", config.Config)
-		case len(p.pubCfg.Configs) == 0:
-			return errors.New("missing configs")
-		case p.pubCfg.Hypervisor == "":
-			return errors.New("missing hypervisor")
 		}
 
 		cs[config.Config] = struct{}{}
@@ -137,9 +141,15 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 	}
 
 	switch p.pubCfg.Hypervisor {
-	case openstackHypervisorBareMetal, openstackHypervisorVMware:
+	case "", openstackHypervisorBareMetal, openstackHypervisorVMware:
 	default:
 		return fmt.Errorf("unknown hypervisor %s", p.pubCfg.Hypervisor)
+	}
+
+	switch p.pubCfg.Variant {
+	case openstackVariantVM, openstackVariantMetal:
+	default:
+		return fmt.Errorf("unknown variant %s", p.pubCfg.Variant)
 	}
 
 	func() {
@@ -177,6 +187,7 @@ type openstackPublishedImage struct {
 	Region     string `yaml:"region_name"`
 	ID         string `yaml:"image_id"`
 	Image      string `yaml:"image_name"`
+	Variant    string `yaml:"variant"`
 	Hypervisor string `yaml:"hypervisor"`
 }
 
@@ -238,35 +249,28 @@ func (p *openstack) clients() map[string]*gophercloud.ServiceClient {
 	return p.imagesClients
 }
 
-func (p *openstack) imageName(cname, version, committish string) string {
-	var hypervisor string
-	switch p.pubCfg.Hypervisor {
-	case openstackHypervisorBareMetal:
-		hypervisor = "baremetal"
-	case openstackHypervisorVMware:
-		hypervisor = "vmware"
-	default:
-	}
-	if p.pubCfg.Test {
-		hypervisor += "-test"
-	}
-
-	return fmt.Sprintf("gardenlinux-%s-%s-%s-%.8s", cname, hypervisor, version, committish)
+func (*openstack) imageName(cname, version, committish string) string {
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
-func (p *openstack) hypervisor(platform string) (openstackHypervisor, error) {
-	h, ok := strings.CutPrefix(platform, "openstack")
-	if !ok {
-		return "", fmt.Errorf("invalid platform %s for target %s", platform, p.Type())
+func (*openstack) variant(platform, variant string) (openstackVariant, error) {
+	if variant == "" || variant == "vmware" || variant == "baremetal" {
+		switch platform {
+		case "openstack":
+			return openstackVariantVM, nil
+		case "openstackbaremetal", "metal,openstackbaremetal":
+			return openstackVariantMetal, nil
+		default:
+		}
 	}
 
-	switch h {
-	case "baremetal":
-		return openstackHypervisorBareMetal, nil
-	case "vmware", "":
-		return openstackHypervisorVMware, nil
+	switch variant {
+	case string(openstackVariantVM):
+		return openstackVariantVM, nil
+	case string(openstackVariantMetal):
+		return openstackVariantMetal, nil
 	default:
-		return "", fmt.Errorf("invalid hypervisor %s", h)
+		return "", fmt.Errorf("invalid variant %s", variant)
 	}
 }
 
@@ -290,12 +294,8 @@ func (p *openstack) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	hypervisor, err := p.hypervisor(manifest.Platform)
-	if err != nil {
-		return false
-	}
-
-	return hypervisor == p.pubCfg.Hypervisor
+	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
+	return err == nil && variant == p.pubCfg.Variant
 }
 
 func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
@@ -303,7 +303,7 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, errors.New("config not set")
 	}
 
-	_, err := p.hypervisor(manifest.Platform)
+	_, err := p.variant(manifest.Platform, manifest.PlatformVariant)
 	if err != nil {
 		return false, fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -315,7 +315,7 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 	}
 
 	for _, img := range openstackOutput.Images {
-		if img.Hypervisor == string(p.pubCfg.Hypervisor) {
+		if img.Variant == string(p.pubCfg.Variant) {
 			return true, nil
 		}
 	}
@@ -339,13 +339,13 @@ func (p *openstack) AddOwnPublishingOutput(output, own PublishingOutput) (Publis
 	}
 
 	for _, img := range ownOutput.Images {
-		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
+		if img.Variant != string(p.pubCfg.Variant) {
 			return nil, errors.New("new publishing output has extraneous entries")
 		}
 	}
 
 	for _, img := range openstackOutput.Images {
-		if img.Hypervisor == string(p.pubCfg.Hypervisor) {
+		if img.Variant == string(p.pubCfg.Variant) {
 			return nil, errors.New("cannot add publishing output to existing publishing output")
 		}
 	}
@@ -366,7 +366,7 @@ func (p *openstack) RemoveOwnPublishingOutput(output PublishingOutput) (Publishi
 
 	var otherImages []openstackPublishedImage
 	for _, img := range openstackOutput.Images {
-		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
+		if img.Variant != string(p.pubCfg.Variant) {
 			otherImages = append(otherImages, img)
 		}
 	}
@@ -385,17 +385,18 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
-
-	f := flavor(cname)
-	hypervisor, err := p.hypervisor(f)
-	if err != nil {
-		return nil, fmt.Errorf("invalid cname: %w", err)
+	if manifest.Platform == "metal,openstackbaremetal" { // A terrible workaround, please remove a soon as possible.
+		manifest.Platform = "openstackbaremetal"
 	}
-	if hypervisor != p.pubCfg.Hypervisor {
-		return nil, nil
-	}
-	if f != manifest.Platform {
+	if platform(cname) != manifest.Platform {
 		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+	}
+	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
+	if err != nil {
+		return nil, fmt.Errorf("invalid manifest: %w", err)
+	}
+	if variant != p.pubCfg.Variant {
+		return nil, fmt.Errorf("unexpected variant %s", variant)
 	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
@@ -410,7 +411,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
 	}
 	source := sources[p.pubCfg.Source]
-	ctx = log.WithValues(ctx, "image", image, "hypervisor", p.pubCfg.Hypervisor, "architecture", arch, "sourceType", source.Type(),
+	ctx = log.WithValues(ctx, "image", image, "variant", variant, "architecture", arch, "sourceType", source.Type(),
 		"sourceRepo", source.Repository())
 
 	sourceChina := source
@@ -467,6 +468,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 			Region:     region,
 			ID:         imageID,
 			Image:      image,
+			Variant:    string(variant),
 			Hypervisor: string(p.pubCfg.Hypervisor),
 		})
 	}
@@ -479,15 +481,8 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 ) (string, error) {
 	var properties map[string]string
 	visibility := images.ImageVisibilityCommunity
-	switch p.pubCfg.Hypervisor {
-	case openstackHypervisorBareMetal:
-		properties = map[string]string{
-			"hypervisor_type":  "baremetal",
-			"os_distro":        "debian10_64Guest",
-			"img_config_drive": "mandatory",
-		}
-		visibility = images.ImageVisibilityPublic
-	case openstackHypervisorVMware:
+	switch p.pubCfg.Variant {
+	case openstackVariantVM:
 		properties = map[string]string{
 			"hypervisor_type":    "vmware",
 			"hw_disk_bus":        "scsi",
@@ -497,7 +492,14 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 			"vmware_disktype":    "streamOptimized",
 			"vmware_ostype":      "debian10_64Guest",
 		}
+	case openstackVariantMetal:
+		properties = map[string]string{
+			"hypervisor_type":  "baremetal",
+			"os_distro":        "debian10_64Guest",
+			"img_config_drive": "mandatory",
+		}
 	default:
+		return "", fmt.Errorf("unsupported variant %s", p.pubCfg.Variant)
 	}
 	url, err := source.GetObjectURL(ctx, key)
 	if err != nil {
@@ -563,12 +565,12 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 		return errors.New("config not set")
 	}
 
-	hypervisor, err := p.hypervisor(manifest.Platform)
+	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
-	if hypervisor != p.pubCfg.Hypervisor {
-		return nil
+	if variant != p.pubCfg.Variant {
+		return fmt.Errorf("unexpected variant %s", variant)
 	}
 
 	var pubOut *openstackPublishingOutput
@@ -580,13 +582,13 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	ctx = log.WithValues(ctx, "hypervisor", p.pubCfg.Hypervisor)
+	ctx = log.WithValues(ctx, "variant", variant)
 
 	imagesClients := p.clients()
 
 	removeImages := parallel.NewActivity(ctx)
 	for _, img := range pubOut.Images {
-		if img.Hypervisor != string(p.pubCfg.Hypervisor) {
+		if img.Variant != string(p.pubCfg.Variant) {
 			continue
 		}
 
@@ -631,7 +633,7 @@ func (p *openstack) CanRollback() string {
 		return ""
 	}
 
-	return "openstack/" + strings.ReplaceAll(string(p.pubCfg.Hypervisor), " ", "_")
+	return "openstack/" + string(p.pubCfg.Variant)
 }
 
 func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) error {

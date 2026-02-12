@@ -77,7 +77,7 @@ func loadConfig(ctx context.Context, publishingConfig PublishingConfig) (credspr
 	}
 
 	targets := make([]cloudprovider.PublishingTarget, 0, len(publishingConfig.Targets))
-	rollbackHandlers := make(map[string]struct{}, len(targets))
+	rollbackHandlers := make(map[string]struct{}, len(publishingConfig.Targets))
 	configureTargets := parallel.NewActivitySync(ctx)
 	for _, t := range publishingConfig.Targets {
 		var target cloudprovider.PublishingTarget
