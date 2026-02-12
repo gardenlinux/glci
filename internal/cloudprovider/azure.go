@@ -439,7 +439,7 @@ func (p *azure) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	return flavor(manifest.Platform) == "azure"
+	return manifest.Platform == "azure"
 }
 
 func (p *azure) IsPublished(manifest *gl.Manifest) (bool, error) {
@@ -530,11 +530,11 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		return nil, errors.New("config not set")
 	}
 
-	f := flavor(cname)
-	if f != "azure" {
+	pl := platform(cname)
+	if pl != "azure" {
 		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
 	}
-	if f != manifest.Platform {
+	if pl != manifest.Platform {
 		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
 	}
 
@@ -1085,7 +1085,7 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 		return errors.New("config not set")
 	}
 
-	if flavor(manifest.Platform) != "azure" {
+	if manifest.Platform != "azure" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 

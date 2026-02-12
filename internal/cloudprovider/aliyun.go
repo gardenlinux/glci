@@ -236,7 +236,7 @@ func (p *aliyun) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	return flavor(manifest.Platform) == "ali"
+	return manifest.Platform == "ali"
 }
 
 func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
@@ -294,11 +294,11 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 		return nil, errors.New("config not set")
 	}
 
-	f := flavor(cname)
-	if f != "ali" {
+	pl := platform(cname)
+	if pl != "ali" {
 		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
 	}
-	if f != manifest.Platform {
+	if pl != manifest.Platform {
 		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
 	}
 
@@ -626,7 +626,7 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 		return errors.New("config not set")
 	}
 
-	if flavor(manifest.Platform) != "ali" {
+	if manifest.Platform != "ali" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 

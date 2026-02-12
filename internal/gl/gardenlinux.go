@@ -16,6 +16,7 @@ type Manifest struct {
 	GLCIVersion            string          `yaml:"glci_version,omitzero"`
 	Architecture           Architecture    `yaml:"architecture"`
 	Platform               string          `yaml:"platform"`
+	PlatformVariant        string          `yaml:"platform_variant,omitzero"`
 	Modifiers              []string        `yaml:"modifiers"`
 	BuildTimestamp         string          `yaml:"build_timestamp"`
 	Paths                  []S3ReleaseFile `yaml:"paths"`

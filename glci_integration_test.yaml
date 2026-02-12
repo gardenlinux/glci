@@ -85,7 +85,7 @@ publishing:
       project: gardenlinux
       regions: [ eu-nl-1 ]
     test: true
-    hypervisor: VMware
+    variant: vm
   ocm:
     type: OCI
     config: gardenlinux

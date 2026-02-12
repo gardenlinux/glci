@@ -212,7 +212,7 @@ func (e KeyNotFoundError) Error() string {
 	return e.err.Error()
 }
 
-func flavor(cname string) string {
+func platform(cname string) string {
 	return strings.SplitN(cname, "-", 2)[0]
 }
 
