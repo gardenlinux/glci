@@ -1274,7 +1274,7 @@ func (p *azure) Rollback(ctx context.Context, tasks map[string]task.Task) error 
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewActivity(ctx)
+	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*azureTaskState](t.State)
 		if err != nil {

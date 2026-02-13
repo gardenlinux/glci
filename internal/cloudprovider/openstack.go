@@ -586,7 +586,7 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 
 	imagesClients := p.clients()
 
-	removeImages := parallel.NewActivity(ctx)
+	removeImages := parallel.NewLimitedActivity(ctx, 3)
 	for _, img := range pubOut.Images {
 		if img.Variant != string(p.pubCfg.Variant) {
 			continue
@@ -641,7 +641,7 @@ func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) er
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewActivity(ctx)
+	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*openstackTaskState](t.State)
 		if err != nil {

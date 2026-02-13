@@ -44,7 +44,7 @@ func loadConfig(ctx context.Context, publishingConfig PublishingConfig) (credspr
 	}
 
 	sources := make(map[string]cloudprovider.ArtifactSource, len(publishingConfig.Sources))
-	configureSources := parallel.NewActivitySync(ctx)
+	configureSources := parallel.NewLimitedActivitySync(ctx, 3)
 	for _, s := range publishingConfig.Sources {
 		var source cloudprovider.ArtifactSource
 		source, err = cloudprovider.NewArtifactSource(s.Type)
@@ -78,7 +78,7 @@ func loadConfig(ctx context.Context, publishingConfig PublishingConfig) (credspr
 
 	targets := make([]cloudprovider.PublishingTarget, 0, len(publishingConfig.Targets))
 	rollbackHandlers := make(map[string]struct{}, len(publishingConfig.Targets))
-	configureTargets := parallel.NewActivitySync(ctx)
+	configureTargets := parallel.NewLimitedActivitySync(ctx, 3)
 	for _, t := range publishingConfig.Targets {
 		var target cloudprovider.PublishingTarget
 		target, err = cloudprovider.NewPublishingTarget(t.Type)

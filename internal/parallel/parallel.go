@@ -29,6 +29,11 @@ type ActivityFunc func(context.Context) error
 
 // NewActivity creates a new activity, either parallel or inline.
 func NewActivity(ctx context.Context) Activity {
+	return NewLimitedActivity(ctx, 0)
+}
+
+// NewLimitedActivity creates a new activity, either parallel or inline, with a given parallelism limit.
+func NewLimitedActivity(ctx context.Context, limit int) Activity {
 	inline, _ := ctx.Value(ctxkInline{}).(bool)
 	if inline {
 		return &inlineActivity{
@@ -36,9 +41,16 @@ func NewActivity(ctx context.Context) Activity {
 		}
 	}
 
+	var exec parallel.Executor
+	if limit == 0 {
+		exec = parallel.Unlimited(ctx)
+	} else {
+		exec = parallel.Limited(ctx, limit)
+	}
+
 	return &parallelActivity{
 		ctx:  ctx,
-		exec: parallel.GatherErrs(parallel.Unlimited(ctx)),
+		exec: parallel.GatherErrs(exec),
 	}
 }
 
@@ -110,6 +122,7 @@ func NewLimitedActivitySync(ctx context.Context, limit int) ActivitySync {
 	} else {
 		exec = parallel.Limited(ctx, limit)
 	}
+
 	return &parallelActivitySync{
 		ctx: ctx,
 		exec: parallel.FeedWithErrs(exec, func(_ context.Context, rf ResultFunc) error {
