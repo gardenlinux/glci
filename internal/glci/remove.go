@@ -118,7 +118,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		log.Info(ctx, "Nothing to remove")
 	}
 
-	removePublications := parallel.NewActivitySync(ctx)
+	removePublications := parallel.NewLimitedActivitySync(ctx, 7)
 	for _, publication := range publications {
 		removePublications.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			ctx = log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())

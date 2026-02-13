@@ -146,7 +146,7 @@ publishing:
     variant: vm
   ocm:
     type: OCI
-    config: gardenlinux
+    config: gardener
     repository: europe-docker.pkg.dev/gardener-project/releases
   state:
     type: AWS

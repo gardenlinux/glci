@@ -333,7 +333,7 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 
 	_, ecsClients := p.clients()
 	images := make(map[string]string, len(ecsClients))
-	publishImages := parallel.NewActivitySync(ctx)
+	publishImages := parallel.NewLimitedActivitySync(ctx, 12)
 	for toRegion := range ecsClients {
 		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
@@ -638,7 +638,7 @@ func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	removeImages := parallel.NewActivity(ctx)
+	removeImages := parallel.NewLimitedActivity(ctx, 3)
 	for _, img := range pubOut.Images {
 		removeImages.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "image", img.ID, "region", img.Region)
@@ -742,7 +742,7 @@ func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewActivity(ctx)
+	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*aliyunTaskState](t.State)
 		if err != nil {
