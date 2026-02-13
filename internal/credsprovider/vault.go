@@ -58,7 +58,7 @@ type vault struct {
 type vaultConfig struct {
 	Server    string `mapstructure:"server"`
 	Namespace string `mapstructure:"namespace,omitzero"`
-	TokenEnv  string `mapstructure:"token_env"`
+	Token     string `mapstructure:"token"`
 	TokenFile string `mapstructure:"token_file,omitzero"`
 	RoleID    string `mapstructure:"role_id,omitzero"`
 	SecretID  string `mapstructure:"secret_id,omitzero"`
@@ -279,12 +279,11 @@ func (p *vault) login(ctx context.Context) error {
 	log.Info(ctx, "Logging in to Vault")
 
 	switch {
-	case p.credsCfg.TokenEnv != "":
+	case p.credsCfg.Token != "":
 		log.Debug(ctx, "Using provided token")
-
-		token := strings.TrimSpace(os.Getenv(p.credsCfg.TokenEnv))
+		token := strings.TrimSpace(p.credsCfg.Token)
 		if token == "" {
-			return fmt.Errorf("token environment varriable %s empty or missing", p.credsCfg.TokenEnv)
+			return errors.New("empty token")
 		}
 		p.vaultClient.SetToken(token)
 		var err error
