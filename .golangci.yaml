@@ -29,6 +29,7 @@ linters:
   - nestif
   - nilnil
   - nlreturn
+  - nolintlint
   - varnamelen
   - wrapcheck
   - wsl
