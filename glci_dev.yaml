@@ -47,6 +47,7 @@ publishing:
     type: Vault
     server: https://vault.tools.sap
     namespace: gardnlinux
+    token_env:
     token_file:
     role_id:
     secret_id:
