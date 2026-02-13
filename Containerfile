@@ -19,6 +19,8 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     --allow-change-held-packages -fuy install \
     \
     ca-certificates \
+    curl \
+    jq \
     \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
