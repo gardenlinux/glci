@@ -573,7 +573,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}
 
 	images := make(map[string]string, len(p.regions))
-	publishImages := parallel.NewActivitySync(ctx)
+	publishImages := parallel.NewLimitedActivitySync(ctx, 12)
 	for _, toRegion := range p.regions {
 		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
@@ -921,7 +921,7 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	cld := p.cloud()
 	ctx = log.WithValues(ctx, "cloud", cld)
 
-	removeImages := parallel.NewActivity(ctx)
+	removeImages := parallel.NewLimitedActivity(ctx, 3)
 	for _, img := range pubOut.Images {
 		if img.Cloud != cld {
 			continue
@@ -987,7 +987,7 @@ func (p *aws) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewActivity(ctx)
+	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*awsTaskState](t.State)
 		if err != nil {
