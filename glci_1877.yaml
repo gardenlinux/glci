@@ -148,8 +148,8 @@ publishing:
       project: gardenlinux-live
       regions:
       - qa-de-1
-    hypervisor: Bare Metal
     variant: metal
+    openstackbaremetal_mode: true
   - type: OpenStack
     source: S3
     source_china: S3-China
@@ -180,8 +180,8 @@ publishing:
       project: gardenlinux-live
       regions:
       - qa-de-1
-    hypervisor: VMware
-    variant: vm
+    variant: vmware
+    openstackbaremetal_mode: true
   ocm:
     type: OCI
     config: gardener

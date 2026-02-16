@@ -43,12 +43,12 @@ type openstack struct {
 }
 
 type openstackPublishingConfig struct {
-	Source      string                            `mapstructure:"source"`
-	SourceChina string                            `mapstructure:"source_china,omitzero"`
-	Configs     []openstackPublishingConfigConfig `mapstructure:"configs"`
-	Hypervisor  openstackHypervisor               `mapstructure:"hypervisor"`
-	Variant     openstackVariant                  `mapstructure:"variant"`
-	Test        bool                              `mapstructure:"test,omitzero"`
+	Source                 string                            `mapstructure:"source"`
+	SourceChina            string                            `mapstructure:"source_china,omitzero"`
+	Configs                []openstackPublishingConfigConfig `mapstructure:"configs"`
+	Variant                openstackVariant                  `mapstructure:"variant"`
+	Test                   bool                              `mapstructure:"test,omitzero"`
+	OpenstackbaremetalMode bool                              `mapstructure:"openstackbaremetal_mode,omitzero"` // A terrible workaround, please remove a soon as possible.
 }
 
 type openstackPublishingConfigConfig struct {
@@ -59,18 +59,11 @@ type openstackPublishingConfigConfig struct {
 	Regions  []string `mapstructure:"regions"`
 }
 
-type openstackHypervisor string
-
-const (
-	openstackHypervisorBareMetal openstackHypervisor = "Bare Metal"
-	openstackHypervisorVMware    openstackHypervisor = "VMware"
-)
-
 type openstackVariant string
 
 const (
-	openstackVariantVM    openstackVariant = "vm"
-	openstackVariantMetal openstackVariant = "metal"
+	openstackVariantVMware openstackVariant = "vmware"
+	openstackVariantMetal  openstackVariant = "metal"
 )
 
 func (p *openstack) isConfigured() bool {
@@ -140,14 +133,8 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 		}
 	}
 
-	switch p.pubCfg.Hypervisor {
-	case "", openstackHypervisorBareMetal, openstackHypervisorVMware:
-	default:
-		return fmt.Errorf("unknown hypervisor %s", p.pubCfg.Hypervisor)
-	}
-
 	switch p.pubCfg.Variant {
-	case openstackVariantVM, openstackVariantMetal:
+	case openstackVariantVMware, openstackVariantMetal:
 	default:
 		return fmt.Errorf("unknown variant %s", p.pubCfg.Variant)
 	}
@@ -184,11 +171,10 @@ type openstackPublishingOutput struct {
 }
 
 type openstackPublishedImage struct {
-	Region     string `yaml:"region_name"`
-	ID         string `yaml:"image_id"`
-	Image      string `yaml:"image_name"`
-	Variant    string `yaml:"variant"`
-	Hypervisor string `yaml:"hypervisor"`
+	Region  string `yaml:"region_name"`
+	ID      string `yaml:"image_id"`
+	Image   string `yaml:"image_name"`
+	Variant string `yaml:"variant"`
 }
 
 type openstackCredentials struct {
@@ -253,11 +239,11 @@ func (*openstack) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
-func (*openstack) variant(platform, variant string) (openstackVariant, error) {
-	if variant == "" || variant == "vmware" || variant == "baremetal" {
+func (p *openstack) variant(platform, variant string) (openstackVariant, error) {
+	if p.pubCfg.OpenstackbaremetalMode || p.pubCfg.Variant == "" {
 		switch platform {
 		case "openstack":
-			return openstackVariantVM, nil
+			return openstackVariantVMware, nil
 		case "openstackbaremetal", "metal,openstackbaremetal":
 			return openstackVariantMetal, nil
 		default:
@@ -265,8 +251,8 @@ func (*openstack) variant(platform, variant string) (openstackVariant, error) {
 	}
 
 	switch variant {
-	case string(openstackVariantVM):
-		return openstackVariantVM, nil
+	case string(openstackVariantVMware):
+		return openstackVariantVMware, nil
 	case string(openstackVariantMetal):
 		return openstackVariantMetal, nil
 	default:
@@ -465,11 +451,10 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	outputImages := make([]openstackPublishedImage, 0, len(outImages))
 	for region, imageID := range outImages {
 		outputImages = append(outputImages, openstackPublishedImage{
-			Region:     region,
-			ID:         imageID,
-			Image:      image,
-			Variant:    string(variant),
-			Hypervisor: string(p.pubCfg.Hypervisor),
+			Region:  region,
+			ID:      imageID,
+			Image:   image,
+			Variant: string(variant),
 		})
 	}
 	return &openstackPublishingOutput{
@@ -482,7 +467,7 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 	var properties map[string]string
 	visibility := images.ImageVisibilityCommunity
 	switch p.pubCfg.Variant {
-	case openstackVariantVM:
+	case openstackVariantVMware:
 		properties = map[string]string{
 			"hypervisor_type":    "vmware",
 			"hw_disk_bus":        "scsi",

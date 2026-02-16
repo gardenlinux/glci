@@ -116,8 +116,8 @@ publishing:
       - na-us-1
       - na-us-2
       - na-us-3
-    hypervisor: Bare Metal
     variant: metal
+    openstackbaremetal_mode: true
   - type: OpenStack
     source: S3
     source_china: S3-China
@@ -142,8 +142,8 @@ publishing:
       - na-us-1
       - na-us-2
       - na-us-3
-    hypervisor: VMware
-    variant: vm
+    variant: vmware
+    openstackbaremetal_mode: true
   ocm:
     type: OCI
     config: gardener
