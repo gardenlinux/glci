@@ -185,8 +185,8 @@ func (a *inlineActivitySync) Wait() error {
 
 func printErrs(ctx context.Context, err error) error {
 	if err != nil {
-		var terr parallel.MultiError
-		if errors.As(err, &terr) {
+		terr, ok := errors.AsType[parallel.MultiError](err)
+		if ok {
 			errs := terr.Unwrap()
 			log.ErrorMsg(ctx, "Errors encountered during parallel execution", "cnt", len(errs))
 		}

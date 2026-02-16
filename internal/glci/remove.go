@@ -68,7 +68,8 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 				log.Info(ctx, "Retrieving manifest")
 				manifest, er := cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
 				if er != nil {
-					if errors.As(er, &cloudprovider.KeyNotFoundError{}) && manifestTarget != manifestSource {
+					_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
+					if ok && manifestTarget != manifestSource {
 						log.Debug(ctx, "Manifest not found, skipping")
 						return nil, nil
 					}

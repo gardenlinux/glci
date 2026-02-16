@@ -25,7 +25,6 @@ import (
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
-	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -424,13 +423,13 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 		Architecture: &arch,
 		GuestOsFeatures: []*computepb.GuestOsFeature{
 			{
-				Type: ptr.P("VIRTIO_SCSI_MULTIQUEUE"),
+				Type: new("VIRTIO_SCSI_MULTIQUEUE"),
 			},
 			{
-				Type: ptr.P("UEFI_COMPATIBLE"),
+				Type: new("UEFI_COMPATIBLE"),
 			},
 			{
-				Type: ptr.P("GVNIC"),
+				Type: new("GVNIC"),
 			},
 		},
 		Name: &image,
@@ -443,18 +442,18 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 			Dbs: []*computepb.FileContentBuffer{
 				{
 					Content:  &db,
-					FileType: ptr.P("X509"),
+					FileType: new("X509"),
 				},
 			},
 			Keks: []*computepb.FileContentBuffer{
 				{
 					Content:  &kek,
-					FileType: ptr.P("X509"),
+					FileType: new("X509"),
 				},
 			},
 			Pk: &computepb.FileContentBuffer{
 				Content:  &pk,
-				FileType: ptr.P("X509"),
+				FileType: new("X509"),
 			},
 		}
 	}
@@ -489,8 +488,8 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 	log.Info(ctx, "Deleting blob")
 	err := storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Delete(ctx)
 	if err != nil {
-		var terr *googleapi.Error
-		if steamroll && errors.As(err, &terr) && terr.Code == http.StatusNotFound {
+		terr, ok := errors.AsType[*googleapi.Error](err)
+		if steamroll && ok && terr.Code == http.StatusNotFound {
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}
@@ -517,10 +516,10 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 						Members: []string{
 							"allAuthenticatedUsers",
 						},
-						Role: ptr.P("roles/compute.imageUser"),
+						Role: new("roles/compute.imageUser"),
 					},
 				},
-				Version: ptr.P(int32(3)),
+				Version: new(int32(3)),
 			},
 		},
 		Project:  p.pubCfg.Project,
@@ -568,8 +567,8 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 		Project: p.pubCfg.Project,
 	})
 	if err != nil {
-		var terr *googleapi.Error
-		if steamroll && errors.As(err, &terr) && terr.Code == http.StatusNotFound {
+		terr, ok := errors.AsType[*googleapi.Error](err)
+		if steamroll && ok && terr.Code == http.StatusNotFound {
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}

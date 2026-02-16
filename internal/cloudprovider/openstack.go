@@ -492,6 +492,7 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 			"vmware_disktype":    "streamOptimized",
 			"vmware_ostype":      "debian10_64Guest",
 		}
+		visibility = images.ImageVisibilityPublic
 	case openstackVariantMetal:
 		properties = map[string]string{
 			"hypervisor_type":  "baremetal",
@@ -617,8 +618,8 @@ func (p *openstack) deleteImage(ctx context.Context, id, region string, steamrol
 	log.Info(ctx, "Deleting image")
 	err := images.Delete(ctx, imagesClients[region], id).ExtractErr()
 	if err != nil {
-		var terr gophercloud.ErrUnexpectedResponseCode
-		if steamroll && errors.As(err, &terr) && terr.Actual == http.StatusNotFound {
+		terr, ok := errors.AsType[gophercloud.ErrUnexpectedResponseCode](err)
+		if steamroll && ok && terr.Actual == http.StatusNotFound {
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}

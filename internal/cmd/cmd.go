@@ -73,7 +73,8 @@ func Setup(name string, build func(*cobra.Command)) (*cobra.Command, *viper.Vipe
 
 		err = cfg.ReadInConfig()
 		if err != nil {
-			if !errors.As(err, &viper.ConfigFileNotFoundError{}) {
+			_, ok := errors.AsType[viper.ConfigFileNotFoundError](err)
+			if !ok {
 				return nil, nil, fmt.Errorf("cannot read config file: %w", err)
 			}
 		}

@@ -101,7 +101,8 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 				log.Debug(ctx, "Retrieving target manifest")
 				var targetManifest *gl.Manifest
 				targetManifest, er = cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
-				if er != nil && !errors.As(er, &cloudprovider.KeyNotFoundError{}) {
+				_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
+				if er != nil && !ok {
 					return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, er)
 				}
 				if targetManifest != nil {

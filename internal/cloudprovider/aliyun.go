@@ -20,7 +20,6 @@ import (
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
-	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -443,14 +442,14 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 	r, err = c.ImportImage(&client.ImportImageRequest{
 		DiskDeviceMapping: []*client.ImportImageRequestDiskDeviceMapping{
 			{
-				DiskImageSize: ptr.P(int32(20)),
-				Format:        ptr.P("qcow2"),
+				DiskImageSize: new(int32(20)),
+				Format:        new("qcow2"),
 				OSSBucket:     &p.pubCfg.Bucket,
 				OSSObject:     &blob,
 			},
 		},
 		Features: &client.ImportImageRequestFeatures{
-			NvmeSupport: ptr.P("supported"),
+			NvmeSupport: new("supported"),
 		},
 		ImageName: &image,
 		RegionId:  &p.pubCfg.Region,
@@ -600,8 +599,8 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 		RegionId: &region,
 	})
 	if err != nil {
-		var terr *tea.SDKError
-		if steamroll && errors.As(err, &terr) {
+		terr, ok := errors.AsType[*tea.SDKError](err)
+		if steamroll && ok {
 			if terr.StatusCode != nil && *terr.StatusCode == http.StatusNotFound {
 				log.Debug(ctx, "Image not found but the steamroller keeps going")
 				return nil
