@@ -41,12 +41,18 @@ type componentDescriptorMetadata struct {
 type componentDescriptorComponent struct {
 	Name                string                                 `yaml:"name"`
 	Version             string                                 `yaml:"version"`
+	Labels              []componentDescriptorlabel             `yaml:"labels,omitempty"`
 	CreationTime        string                                 `yaml:"creationTime"`
 	Provider            string                                 `yaml:"provider"`
 	RepositoryContexts  []componentDescriptorRepositoryContext `yaml:"repositoryContexts"`
 	Sources             []componentDescriptorSource            `yaml:"sources"`
 	ComponentReferences []struct{}                             `yaml:"componentReferences"`
 	Resources           []componentDesciptorResource           `yaml:"resources"`
+}
+
+type componentDescriptorlabel struct {
+	Name  string `yaml:"name"`
+	Value any    `yaml:"value"`
 }
 
 //nolint:tagliatelle // Defined by OCM.
@@ -61,11 +67,6 @@ type componentDescriptorSource struct {
 	Labels  []componentDescriptorlabel `yaml:"labels,omitempty"`
 	Type    string                     `yaml:"type"`
 	Access  componentDescriptorGitHub  `yaml:"access"`
-}
-
-type componentDescriptorlabel struct {
-	Name  string `yaml:"name"`
-	Value any    `yaml:"value"`
 }
 
 //nolint:tagliatelle // Defined by OCM.
@@ -115,8 +116,14 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			ConfiguredVersion: "v2",
 		},
 		Component: componentDescriptorComponent{
-			Name:         gl.GardenLinuxRepo,
-			Version:      version,
+			Name:    gl.GardenLinuxRepo,
+			Version: version,
+			Labels: []componentDescriptorlabel{
+				{
+					Name:  "glci-version",
+					Value: glciVersion,
+				},
+			},
 			CreationTime: time.Now().Format(time.RFC3339),
 			Provider:     componentProvider,
 			RepositoryContexts: []componentDescriptorRepositoryContext{
@@ -194,7 +201,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		})
 		if glciVersion != "" {
 			labels = append(labels, componentDescriptorlabel{
-				Name:  "gardenlinux.io/glci/version",
+				Name:  "gardenlinux.org/glci/version",
 				Value: glciVersion,
 			})
 		}
@@ -207,16 +214,21 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			})
 		}
 
+		extraIdentity := map[string]string{
+			"feature-flags":    strings.Join(publication.Manifest.Modifiers, ","),
+			"architecture":     string(publication.Manifest.Architecture),
+			"platform":         publication.Manifest.Platform,
+			"platform-variant": publication.Manifest.PlatformVariant,
+		}
+		if publication.Manifest.PlatformVariant == "" {
+			delete(extraIdentity, "platform_variant")
+		}
 		descriptor.Component.Resources = append(descriptor.Component.Resources, componentDesciptorResource{
-			Name:    "gardenlinux",
-			Version: publication.Manifest.Version,
-			ExtraIdentity: map[string]string{
-				"feature-flags": strings.Join(publication.Manifest.Modifiers, ","),
-				"architecture":  string(publication.Manifest.Architecture),
-				"platform":      publication.Manifest.Platform,
-			},
-			Labels: labels,
-			Type:   "virtual_machine_image",
+			Name:          "gardenlinux",
+			Version:       publication.Manifest.Version,
+			ExtraIdentity: extraIdentity,
+			Labels:        labels,
+			Type:          "virtual_machine_image",
 			Digest: componentDescriptorDigest{
 				HashAlgorithm:          "NO-DIGEST",
 				NormalisationAlgorithm: "EXCLUDE-FROM-SIGNATURE",
@@ -228,13 +240,9 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 				Key:    imagePath.S3Key,
 			},
 		}, componentDesciptorResource{
-			Name:    "rootfs",
-			Version: publication.Manifest.Version,
-			ExtraIdentity: map[string]string{
-				"feature-flags": strings.Join(publication.Manifest.Modifiers, ","),
-				"architecture":  string(publication.Manifest.Architecture),
-				"platform":      publication.Manifest.Platform,
-			},
+			Name:          "rootfs",
+			Version:       publication.Manifest.Version,
+			ExtraIdentity: extraIdentity,
 			Labels: []componentDescriptorlabel{
 				{
 					Name: "gardener.cloud/gardenlinux/ci/build-metadata",

@@ -112,7 +112,7 @@ publishing:
       project: gardenlinux
       regions: [ eu-nl-1 ]
     test: true
-    variant: vm
+    variant: vmware
   ocm:
     type: OCI
     config: gardenlinux

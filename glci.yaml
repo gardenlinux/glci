@@ -148,7 +148,7 @@ publishing:
       project: gardenlinux-live
       regions:
       - qa-de-1
-    variant: vm
+    variant: vmware
   - type: OpenStack
     source: S3
     source_china: S3-China
