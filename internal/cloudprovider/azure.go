@@ -27,7 +27,6 @@ import (
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
-	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -243,8 +242,8 @@ func (p *azure) checkCreds(ctx context.Context, rawCreds map[string]any) (bool, 
 	if err == nil {
 		return true, nil
 	}
-	var terr *azidentity.AuthenticationFailedError
-	if errors.As(err, &terr) && terr.RawResponse.StatusCode == http.StatusUnauthorized {
+	terr, ok := errors.AsType[*azidentity.AuthenticationFailedError](err)
+	if ok && terr.RawResponse.StatusCode == http.StatusUnauthorized {
 		return false, nil
 	}
 	return false, err
@@ -275,8 +274,8 @@ func (p *azure) createClients(ctx context.Context, rawCreds map[string]any) erro
 			break
 		}
 
-		var terr *azidentity.AuthenticationFailedError
-		if attempts > 0 && errors.As(err, &terr) && terr.RawResponse.StatusCode == http.StatusUnauthorized {
+		terr, ok := errors.AsType[*azidentity.AuthenticationFailedError](err)
+		if attempts > 0 && ok && terr.RawResponse.StatusCode == http.StatusUnauthorized {
 			time.Sleep(time.Second * 3)
 			continue
 		}
@@ -780,12 +779,12 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, cnam
 	gen := armcompute.HyperVGenerationV2
 	features := []*armcompute.GalleryImageFeature{
 		{
-			Name:  ptr.P("IsAcceleratedNetworkSupported"),
-			Value: ptr.P("True"),
+			Name:  new("IsAcceleratedNetworkSupported"),
+			Value: new("True"),
 		},
 		{
-			Name:  ptr.P("DiskControllerTypes"),
-			Value: ptr.P("NVMe, SCSI"),
+			Name:  new("DiskControllerTypes"),
+			Value: new("NVMe, SCSI"),
 		},
 	}
 	if bios {
@@ -793,8 +792,8 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, cnam
 	}
 	if secureBoot {
 		features = append(features, &armcompute.GalleryImageFeature{
-			Name:  ptr.P("SecurityType"),
-			Value: ptr.P("TrustedLaunchSupported"),
+			Name:  new("SecurityType"),
+			Value: new("TrustedLaunchSupported"),
 		})
 	}
 	ctx = log.WithValues(ctx, "imageDefinition", imageDefinition)
@@ -805,8 +804,8 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, cnam
 	exists := true
 	_, err := galleryImagesClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition, nil)
 	if err != nil {
-		var terr *azcore.ResponseError
-		if !errors.As(err, &terr) || terr.StatusCode != http.StatusNotFound {
+		terr, ok := errors.AsType[*azcore.ResponseError](err)
+		if !ok || terr.StatusCode != http.StatusNotFound {
 			return fmt.Errorf("cannot get image definition %s: %w", imageDefinition, err)
 		}
 		exists = false
@@ -824,10 +823,10 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, cnam
 				Identifier: &armcompute.GalleryImageIdentifier{
 					Offer:     &p.pubCfg.ImageOffer,
 					Publisher: &p.pubCfg.ImagePublisher,
-					SKU:       ptr.P(p.sku(p.pubCfg.ImageSKUPrefix, cname, bios)),
+					SKU:       new(p.sku(p.pubCfg.ImageSKUPrefix, cname, bios)),
 				},
-				OSState:          ptr.P(armcompute.OperatingSystemStateTypesGeneralized),
-				OSType:           ptr.P(armcompute.OperatingSystemTypesLinux),
+				OSState:          new(armcompute.OperatingSystemStateTypesGeneralized),
+				OSType:           new(armcompute.OperatingSystemTypesLinux),
 				Architecture:     &arch,
 				Description:      &p.pubCfg.ImageDescription,
 				Eula:             &p.pubCfg.ImageEULA,
@@ -909,10 +908,10 @@ func (p *azure) createImage(ctx context.Context, blobURL, image string, bios boo
 			HyperVGeneration: &gen,
 			StorageProfile: &armcompute.ImageStorageProfile{
 				OSDisk: &armcompute.ImageOSDisk{
-					OSState: ptr.P(armcompute.OperatingSystemStateTypesGeneralized),
-					OSType:  ptr.P(armcompute.OperatingSystemTypesLinux),
+					OSState: new(armcompute.OperatingSystemStateTypesGeneralized),
+					OSType:  new(armcompute.OperatingSystemTypesLinux),
 					BlobURI: &blobURL,
-					Caching: ptr.P(armcompute.CachingTypesReadWrite),
+					Caching: new(armcompute.CachingTypesReadWrite),
 				},
 			},
 		},
@@ -948,7 +947,7 @@ func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVe
 				AdditionalSignatures: &armcompute.UefiKeySignatures{
 					Db: []*armcompute.UefiKey{
 						{
-							Type: ptr.P(armcompute.UefiKeyTypeX509),
+							Type: new(armcompute.UefiKeyTypeX509),
 							Value: []*string{
 								&db,
 							},
@@ -956,7 +955,7 @@ func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVe
 					},
 					Kek: []*armcompute.UefiKey{
 						{
-							Type: ptr.P(armcompute.UefiKeyTypeX509),
+							Type: new(armcompute.UefiKeyTypeX509),
 							Value: []*string{
 								&kek,
 							},
@@ -971,7 +970,7 @@ func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVe
 					// },
 				},
 				SignatureTemplateNames: []*armcompute.UefiSignatureTemplateName{
-					ptr.P(armcompute.UefiSignatureTemplateNameMicrosoftUefiCertificateAuthorityTemplate),
+					new(armcompute.UefiSignatureTemplateNameMicrosoftUefiCertificateAuthorityTemplate),
 				},
 			},
 		}
@@ -997,14 +996,14 @@ func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVe
 					},
 				},
 				PublishingProfile: &armcompute.GalleryImageVersionPublishingProfile{
-					ReplicaCount:       ptr.P(int32(1)),
-					StorageAccountType: ptr.P(armcompute.StorageAccountTypeStandardLRS),
+					ReplicaCount:       new(int32(1)),
+					StorageAccountType: new(armcompute.StorageAccountTypeStandardLRS),
 					TargetRegions:      targetRegions,
 				},
 				SecurityProfile: security,
 			},
 			Tags: map[string]*string{
-				"component": ptr.P("gardenlinux"),
+				"component": new("gardenlinux"),
 			},
 		}, nil)
 	if err != nil {
@@ -1062,11 +1061,11 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll bool) err
 	log.Info(ctx, "Deleting blob")
 	blobClient := storageClient.ServiceClient().NewContainerClient(p.pubCfg.StorageContainer).NewPageBlobClient(blob)
 	_, err := blobClient.Delete(ctx, &azblob.DeleteBlobOptions{
-		DeleteSnapshots: ptr.P(azblob.DeleteSnapshotsOptionTypeInclude),
+		DeleteSnapshots: new(azblob.DeleteSnapshotsOptionTypeInclude),
 	})
 	if err != nil {
-		var terr *azcore.ResponseError
-		if steamroll && errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
+		terr, ok := errors.AsType[*azcore.ResponseError](err)
+		if steamroll && ok && terr.StatusCode == http.StatusNotFound {
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}
@@ -1111,8 +1110,8 @@ func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]
 
 			imageDefinition, image, imageVersion, er := p.getMetadata(ctx, img.ID)
 			if er != nil {
-				var ter *azcore.ResponseError
-				if steamroll && errors.As(er, &ter) && ter.StatusCode == http.StatusNotFound {
+				ter, ok := errors.AsType[*azcore.ResponseError](err)
+				if steamroll && ok && ter.StatusCode == http.StatusNotFound {
 					log.Debug(ctx, "Image not found but the steamroller keeps going")
 					return nil
 				}

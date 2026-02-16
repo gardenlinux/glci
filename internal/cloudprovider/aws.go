@@ -27,7 +27,6 @@ import (
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
-	"github.com/gardenlinux/glci/internal/ptr"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -351,7 +350,8 @@ func (p *aws) GetObjectSize(ctx context.Context, key string) (int64, error) {
 		Key:    &key,
 	})
 	if err != nil {
-		if errors.As(err, ptr.P(&s3types.NoSuchKey{})) {
+		_, ok := errors.AsType[*s3types.NoSuchKey](err)
+		if ok {
 			err = KeyNotFoundError{
 				err: err,
 			}
@@ -380,7 +380,8 @@ func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) 
 		Key:    &key,
 	})
 	if err != nil {
-		if errors.As(err, ptr.P(&s3types.NoSuchKey{})) {
+		_, ok := errors.AsType[*s3types.NoSuchKey](err)
+		if ok {
 			err = KeyNotFoundError{
 				err: err,
 			}
@@ -405,8 +406,8 @@ func (p *aws) PutObject(ctx context.Context, key string, object io.Reader) error
 		Bucket:          &p.srcCfg.Bucket,
 		Key:             &key,
 		Body:            object,
-		ContentEncoding: ptr.P("utf-8"),
-		ContentType:     ptr.P("text/yaml"),
+		ContentEncoding: new("utf-8"),
+		ContentType:     new("text/yaml"),
 	})
 	if err != nil {
 		return fmt.Errorf("cannot put object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
@@ -643,14 +644,14 @@ func (p *aws) prepareTags(manifest *gl.Manifest) []ec2types.Tag {
 
 	if p.pubCfg.ImageTags.IncludeGardenLinuxVersion {
 		tags = append(tags, ec2types.Tag{
-			Key:   ptr.P("gardenlinux-version"),
+			Key:   new("gardenlinux-version"),
 			Value: &manifest.Version,
 		})
 	}
 
 	if p.pubCfg.ImageTags.IncludeGardenLinuxCommittish {
 		tags = append(tags, ec2types.Tag{
-			Key:   ptr.P("gardenlinux-committish"),
+			Key:   new("gardenlinux-committish"),
 			Value: &manifest.BuildCommittish,
 		})
 	}
@@ -671,11 +672,12 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 			}
 
 			var efivars []byte
+			//nolint:staticcheck // https://github.com/dominikh/go-tools/issues/1698
 			efivars, er = getObjectBytes(ctx, source, efivarsFile.S3Key)
 			if er != nil {
 				return fmt.Errorf("cannot get efivars: %w", er)
 			}
-			uefiData = ptr.P(string(efivars))
+			uefiData = new(string(efivars))
 
 			return nil
 		})
@@ -699,13 +701,13 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 	r, err := ec2Client.ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
 		DiskContainer: &ec2types.SnapshotDiskContainer{
 			Description: &image,
-			Format:      ptr.P("raw"),
+			Format:      new("raw"),
 			UserBucket: &ec2types.UserBucket{
 				S3Bucket: &bucket,
 				S3Key:    &key,
 			},
 		},
-		Encrypted: ptr.P(false),
+		Encrypted: new(false),
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot import snapshot in bucket %s: %w", bucket, err)
@@ -784,18 +786,18 @@ func (p *aws) registerImage(ctx context.Context, snapshot, image string, arch ec
 		Name:         &image,
 		Architecture: arch,
 		BlockDeviceMappings: []ec2types.BlockDeviceMapping{{
-			DeviceName: ptr.P("/dev/xvda"),
+			DeviceName: new("/dev/xvda"),
 			Ebs: &ec2types.EbsBlockDevice{
-				DeleteOnTermination: ptr.P(true),
+				DeleteOnTermination: new(true),
 				SnapshotId:          &snapshot,
 				VolumeType:          ec2types.VolumeTypeGp3,
 			},
 		}},
 		BootMode:           ec2types.BootModeValuesUefiPreferred,
-		EnaSupport:         ptr.P(true),
+		EnaSupport:         new(true),
 		ImdsSupport:        ec2types.ImdsSupportValuesV20,
-		RootDeviceName:     ptr.P("/dev/xvda"),
-		VirtualizationType: ptr.P("hvm"),
+		RootDeviceName:     new("/dev/xvda"),
+		VirtualizationType: new("hvm"),
 	}
 	if requireUEFI {
 		params.BootMode = ec2types.BootModeValuesUefi
@@ -834,7 +836,7 @@ func (p *aws) copyImage(ctx context.Context, image, imageID, region, toRegion st
 		Name:          &image,
 		SourceImageId: &imageID,
 		SourceRegion:  &region,
-		CopyImageTags: ptr.P(true),
+		CopyImageTags: new(true),
 	}, overrideRegion(toRegion))
 	if err != nil {
 		return "", fmt.Errorf("cannot copy image: %w", err)
@@ -885,7 +887,7 @@ func (p *aws) makePublic(ctx context.Context, imageID, region string) error {
 	log.Debug(ctx, "Adding launch permission to image")
 	_, err := ec2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
 		ImageId:   &imageID,
-		Attribute: ptr.P("launchPermission"),
+		Attribute: new("launchPermission"),
 		LaunchPermission: &ec2types.LaunchPermissionModifications{
 			Add: []ec2types.LaunchPermission{
 				{
@@ -947,11 +949,11 @@ func (p *aws) deregisterImage(ctx context.Context, imageID, region string, steam
 	log.Info(ctx, "Deregistering image")
 	r, err := ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
 		ImageId:                   &imageID,
-		DeleteAssociatedSnapshots: ptr.P(true),
+		DeleteAssociatedSnapshots: new(true),
 	}, overrideRegion(region))
 	if err != nil {
-		var terr *smithy.GenericAPIError
-		if steamroll && errors.As(err, &terr) && terr.Code == "InvalidAMIID.Unavailable" {
+		terr, ok := errors.AsType[*smithy.GenericAPIError](err)
+		if steamroll && ok && terr.Code == "InvalidAMIID.Unavailable" {
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}
@@ -1096,8 +1098,8 @@ func (p *aws) deleteSnapshot(ctx context.Context, snapshot, region string, steam
 		SnapshotId: &snapshot,
 	}, overrideRegion(region))
 	if err != nil {
-		var terr *smithy.GenericAPIError
-		if steamroll && errors.As(err, &terr) && terr.Code == "InvalidSnapshot.NotFound" {
+		terr, ok := errors.AsType[*smithy.GenericAPIError](err)
+		if steamroll && ok && terr.Code == "InvalidSnapshot.NotFound" {
 			log.Debug(ctx, "Snapshot not found but the steamroller keeps going")
 			return nil
 		}

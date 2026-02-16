@@ -19,7 +19,6 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/ptr"
 )
 
 func init() {
@@ -139,7 +138,8 @@ func (p *aws) Load() ([]byte, error) {
 		Key:    &p.key,
 	})
 	if err != nil {
-		if !errors.As(err, ptr.P(&s3types.NoSuchKey{})) {
+		_, ok := errors.AsType[*s3types.NoSuchKey](err)
+		if !ok {
 			return nil, fmt.Errorf("cannot get object %s from bucket %s: %w", p.key, p.stateCfg.Bucket, err)
 		}
 		return nil, nil
@@ -176,8 +176,8 @@ func (p *aws) Save(state []byte) error {
 		Bucket:          &p.stateCfg.Bucket,
 		Key:             &p.key,
 		Body:            bytes.NewReader(state),
-		ContentEncoding: ptr.P("utf-8"),
-		ContentType:     ptr.P("application/json"),
+		ContentEncoding: new("utf-8"),
+		ContentType:     new("application/json"),
 	})
 	if err != nil {
 		return fmt.Errorf("cannot put object %s to bucket %s: %w", p.key, p.stateCfg.Bucket, err)
