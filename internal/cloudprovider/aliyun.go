@@ -248,7 +248,7 @@ func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
-	return len(aliyunOutput.Images) != 0, nil
+	return len(aliyunOutput.Images) > 0, nil
 }
 
 func (p *aliyun) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
@@ -266,7 +266,7 @@ func (p *aliyun) AddOwnPublishingOutput(output, own PublishingOutput) (Publishin
 		return nil, err
 	}
 
-	if len(aliyunOutput.Images) != 0 {
+	if len(aliyunOutput.Images) > 0 {
 		return nil, errors.New("cannot add publishing output to existing publishing output")
 	}
 

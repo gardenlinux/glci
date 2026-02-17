@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,12 +42,10 @@ type openstack struct {
 }
 
 type openstackPublishingConfig struct {
-	Source                 string                            `mapstructure:"source"`
-	SourceChina            string                            `mapstructure:"source_china,omitzero"`
-	Configs                []openstackPublishingConfigConfig `mapstructure:"configs"`
-	Variant                openstackVariant                  `mapstructure:"variant"`
-	Test                   bool                              `mapstructure:"test,omitzero"`
-	OpenstackbaremetalMode bool                              `mapstructure:"openstackbaremetal_mode,omitzero"` // A terrible workaround, please remove a soon as possible.
+	Source      string                            `mapstructure:"source"`
+	SourceChina string                            `mapstructure:"source_china,omitzero"`
+	Configs     []openstackPublishingConfigConfig `mapstructure:"configs"`
+	Test        bool                              `mapstructure:"test,omitzero"`
 }
 
 type openstackPublishingConfigConfig struct {
@@ -87,8 +84,6 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 		return errors.New("missing source")
 	case len(p.pubCfg.Configs) == 0:
 		return errors.New("missing configs")
-	case p.pubCfg.Variant == "":
-		return errors.New("missing variant")
 	}
 
 	_, ok := sources[p.pubCfg.Source]
@@ -131,12 +126,6 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 			}
 			rs[r] = struct{}{}
 		}
-	}
-
-	switch p.pubCfg.Variant {
-	case openstackVariantVMware, openstackVariantMetal:
-	default:
-		return fmt.Errorf("unknown variant %s", p.pubCfg.Variant)
 	}
 
 	func() {
@@ -239,8 +228,8 @@ func (*openstack) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
-func (p *openstack) variant(platform, variant string) (openstackVariant, error) {
-	if p.pubCfg.OpenstackbaremetalMode || variant == "" {
+func (*openstack) variant(platform, variant string) (openstackVariant, error) {
+	if variant == "" {
 		switch platform {
 		case "openstack":
 			return openstackVariantVMware, nil
@@ -280,8 +269,8 @@ func (p *openstack) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
-	return err == nil && variant == p.pubCfg.Variant
+	_, err := p.variant(manifest.Platform, manifest.PlatformVariant)
+	return err == nil
 }
 
 func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
@@ -300,13 +289,7 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 		return false, err
 	}
 
-	for _, img := range openstackOutput.Images {
-		if img.Variant == string(p.pubCfg.Variant) {
-			return true, nil
-		}
-	}
-
-	return false, nil
+	return len(openstackOutput.Images) > 0, nil
 }
 
 func (p *openstack) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
@@ -324,19 +307,10 @@ func (p *openstack) AddOwnPublishingOutput(output, own PublishingOutput) (Publis
 		return nil, err
 	}
 
-	for _, img := range ownOutput.Images {
-		if img.Variant != string(p.pubCfg.Variant) {
-			return nil, errors.New("new publishing output has extraneous entries")
-		}
+	if len(openstackOutput.Images) > 0 {
+		return nil, errors.New("cannot add publishing output to existing publishing output")
 	}
 
-	for _, img := range openstackOutput.Images {
-		if img.Variant == string(p.pubCfg.Variant) {
-			return nil, errors.New("cannot add publishing output to existing publishing output")
-		}
-	}
-
-	ownOutput.Images = slices.Concat(openstackOutput.Images, ownOutput.Images)
 	return &ownOutput, nil
 }
 
@@ -345,24 +319,12 @@ func (p *openstack) RemoveOwnPublishingOutput(output PublishingOutput) (Publishi
 		return nil, errors.New("config not set")
 	}
 
-	openstackOutput, err := publishingOutput[openstackPublishingOutput](output)
+	_, err := publishingOutput[openstackPublishingOutput](output)
 	if err != nil {
 		return nil, err
 	}
 
-	var otherImages []openstackPublishedImage
-	for _, img := range openstackOutput.Images {
-		if img.Variant != string(p.pubCfg.Variant) {
-			otherImages = append(otherImages, img)
-		}
-	}
-	if len(otherImages) == 0 {
-		return nil, nil
-	}
-
-	return &openstackPublishingOutput{
-		Images: otherImages,
-	}, nil
+	return nil, nil
 }
 
 func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
@@ -380,9 +342,6 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
-	}
-	if variant != p.pubCfg.Variant {
-		return nil, fmt.Errorf("unexpected variant %s", variant)
 	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
@@ -422,7 +381,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 				ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{
 					Region: region,
 				})
-				imageID, er := p.createImage(ctx, imageClient, src, imagePath.S3Key, image)
+				imageID, er := p.createImage(ctx, imageClient, src, imagePath.S3Key, image, variant)
 				if er != nil {
 					return nil, task.Fail(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
 				}
@@ -462,11 +421,12 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	}, nil
 }
 
-func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.ServiceClient, source ArtifactSource, key, image string,
+func (*openstack) createImage(ctx context.Context, imageClient *gophercloud.ServiceClient, source ArtifactSource, key, image string,
+	variant openstackVariant,
 ) (string, error) {
 	var properties map[string]string
 	visibility := images.ImageVisibilityCommunity
-	switch p.pubCfg.Variant {
+	switch variant {
 	case openstackVariantVMware:
 		properties = map[string]string{
 			"hypervisor_type":    "vmware",
@@ -485,7 +445,7 @@ func (p *openstack) createImage(ctx context.Context, imageClient *gophercloud.Se
 			"img_config_drive": "mandatory",
 		}
 	default:
-		return "", fmt.Errorf("unsupported variant %s", p.pubCfg.Variant)
+		return "", fmt.Errorf("unsupported variant %s", variant)
 	}
 	url, err := source.GetObjectURL(ctx, key)
 	if err != nil {
@@ -555,9 +515,6 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
-	if variant != p.pubCfg.Variant {
-		return fmt.Errorf("unexpected variant %s", variant)
-	}
 
 	var pubOut *openstackPublishingOutput
 	pubOut, err = publishingOutputFromManifest[*openstackPublishingOutput](manifest)
@@ -574,10 +531,6 @@ func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[str
 
 	removeImages := parallel.NewLimitedActivity(ctx, 3)
 	for _, img := range pubOut.Images {
-		if img.Variant != string(p.pubCfg.Variant) {
-			continue
-		}
-
 		_, ok := imagesClients[img.Region]
 		if !ok {
 			return fmt.Errorf("image %s is in unknown region %s", img.ID, img.Region)
@@ -619,7 +572,7 @@ func (p *openstack) CanRollback() string {
 		return ""
 	}
 
-	return "openstack/" + string(p.pubCfg.Variant)
+	return "openstack"
 }
 
 func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) error {
