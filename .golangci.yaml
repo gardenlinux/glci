@@ -40,6 +40,8 @@ linters:
         G301: "0755"
         G302: "0644"
         G306: "0644"
+      excludes:
+        - G117
     govet:
       enable-all: true
       disable:

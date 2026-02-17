@@ -44,7 +44,6 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/bin/vault /usr/bin/vault
 
-ENV GLCI_PUBLISHING_CREDENTIALS_TOKEN_FILE= GLCI_PUBLISHING_CREDENTIALS_ROLE_ID= GLCI_PUBLISHING_CREDENTIALS_SECRET_ID=
 ENTRYPOINT ["/glci"]
 COPY --from=builder /glci/glci .
 COPY glci.yaml glci.yaml

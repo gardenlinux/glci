@@ -672,7 +672,6 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 			}
 
 			var efivars []byte
-			//nolint:staticcheck // https://github.com/dominikh/go-tools/issues/1698
 			efivars, er = getObjectBytes(ctx, source, efivarsFile.S3Key)
 			if er != nil {
 				return fmt.Errorf("cannot get efivars: %w", er)
