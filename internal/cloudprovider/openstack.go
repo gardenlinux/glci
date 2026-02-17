@@ -240,7 +240,7 @@ func (*openstack) imageName(cname, version, committish string) string {
 }
 
 func (p *openstack) variant(platform, variant string) (openstackVariant, error) {
-	if p.pubCfg.OpenstackbaremetalMode || p.pubCfg.Variant == "" {
+	if p.pubCfg.OpenstackbaremetalMode || variant == "" {
 		switch platform {
 		case "openstack":
 			return openstackVariantVMware, nil
