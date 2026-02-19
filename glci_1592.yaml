@@ -47,15 +47,11 @@ publishing:
     bucket: gardenlinux-community
   - type: AWS
     source: S3
+    source_china: S3-China
     config: gardenlinux
+    config_china: gardenlinux-cn
     region: eu-central-1
-    image_tags:
-      static_tags:
-        sec-by-def-public-image-exception: enabled
-  - type: AWS
-    source: S3-China
-    config: gardenlinux-cn
-    region: cn-northwest-1
+    region_china: cn-northwest-1
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
