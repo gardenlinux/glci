@@ -188,11 +188,9 @@ func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.C
 		}
 	}
 
-	err = credsSource.AcquireValidatedCreds(ctx, credsprovider.CredsID{
+	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   p.Type(),
 		Config: p.pubCfg.Config,
-	}, func(ctx context.Context, creds map[string]any) (bool, error) {
-		return p.checkCreds(ctx, creds, false)
 	}, func(ctx context.Context, creds map[string]any) error {
 		return p.createClients(ctx, creds, false)
 	})
@@ -201,11 +199,9 @@ func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.C
 	}
 
 	if p.enableChina {
-		err = credsSource.AcquireValidatedCreds(ctx, credsprovider.CredsID{
+		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type() + "_china",
 			Config: p.pubCfg.ConfigChina,
-		}, func(ctx context.Context, creds map[string]any) (bool, error) {
-			return p.checkCreds(ctx, creds, true)
 		}, func(ctx context.Context, creds map[string]any) error {
 			return p.createClients(ctx, creds, true)
 		})
@@ -290,30 +286,6 @@ func (p *azure) createStorageClients(_ context.Context, rawCreds map[string]any,
 	}
 
 	return nil
-}
-
-func (p *azure) checkCreds(ctx context.Context, rawCreds map[string]any, china bool) (bool, error) {
-	var creds azureCredentials
-	err := parseCredentials(rawCreds, &creds)
-	if err != nil {
-		return false, err
-	}
-
-	var subscriptionsClient *armsubscriptions.Client
-	subscriptionsClient, _, _, _, _, _, err = p.prepareClients(creds, china)
-	if err != nil {
-		return false, err
-	}
-
-	_, err = subscriptionsClient.NewListLocationsPager(creds.SubscriptionID, nil).NextPage(ctx)
-	if err == nil {
-		return true, nil
-	}
-	terr, ok := errors.AsType[*azidentity.AuthenticationFailedError](err)
-	if ok && terr.RawResponse.StatusCode == http.StatusUnauthorized {
-		return false, nil
-	}
-	return false, err
 }
 
 func (p *azure) createClients(ctx context.Context, rawCreds map[string]any, china bool) error {

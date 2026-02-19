@@ -325,11 +325,11 @@ func (*vault) secretKeys(id CredsID) []string {
 		return []string{
 			fmt.Sprintf("se-alicloud-%s/creds/glci", id.Config),
 		}
-	case "AWS":
+	case "AWS", "AWS_src":
 		return []string{
 			fmt.Sprintf("se-aws-%s/creds/glci", id.Config),
 		}
-	case "AWS_china":
+	case "AWS_china", "AWS_src_china":
 		return []string{
 			fmt.Sprintf("se-aws-%s/data/creds/glci", id.Config),
 		}
@@ -429,37 +429,20 @@ func (p *vault) validateAndAnnounceNewCreds(ctx context.Context, creds vaultCred
 }
 
 func (*vault) validateCreds(ctx context.Context, validate ValidateFunc, data map[string]any) error {
-	var success int
-	var best int
-	var err error
-	for success < 3 {
-		var attempt int
-		var good bool
-		for attempt < 11 {
-			if attempt == 0 && success >= best {
-				log.Debug(ctx, "Validating credentials", "success", success)
-			}
-			good, err = validate(ctx, data)
-			if err != nil {
-				return err
-			}
-			if good {
-				success++
-				if success > best {
-					best = success
-				}
-				break
-			}
-			time.Sleep(time.Second * 3)
-			attempt++
-			success = 0
+	var attempt int
+	for attempt < 11 {
+		log.Debug(ctx, "Validating credentials", "attempt", attempt)
+		good, err := validate(ctx, data)
+		if err != nil {
+			return err
 		}
-		if !good {
-			return errors.New("maximum number of attempts exceeded")
+		if good {
+			return nil
 		}
+		time.Sleep(time.Second * 3)
+		attempt++
 	}
-
-	return nil
+	return errors.New("maximum number of attempts exceeded")
 }
 
 func (p *vault) renewCreds(ctx context.Context, id CredsID, validate ValidateFunc, updated UpdatedFunc) error {
