@@ -61,25 +61,14 @@ publishing:
         sec-by-def-public-image-exception: enabled
   - type: Azure
     source: S3
+    source_china: S3-China
     config: gardenlinux
+    config_china: gardenlinux-cn
     storage_container: gardenlinux
     resource_group: community-gallery
     gallery: gardenlinux_community_gallery
     region: westeurope
-    image_prefix: gardenlinux-nvme
-    image_description: Garden Linux - a Linux for containers, based on Debian
-    image_eula: https://github.com/gardenlinux/gardenlinux/blob/main/LICENSE.md
-    image_release_note: https://github.com/gardenlinux/gardenlinux/releases
-    image_publisher: GardenLinux
-    image_offer: gardenlinux
-    image_sku_prefix: gardenlinux_nvme
-  - type: Azure
-    source: S3-China
-    config: gardenlinux-cn
-    storage_container: gardenlinux
-    resource_group: community-gallery
-    gallery: gardenlinux_community_gallery
-    region: chinanorth3
+    region_china: chinanorth3
     image_prefix: gardenlinux-nvme
     image_description: Garden Linux - a Linux for containers, based on Debian
     image_eula: https://github.com/gardenlinux/gardenlinux/blob/main/LICENSE.md

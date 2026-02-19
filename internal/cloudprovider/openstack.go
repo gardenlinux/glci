@@ -362,6 +362,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	sourceChina := source
 	if p.pubCfg.SourceChina != "" {
 		sourceChina = sources[p.pubCfg.SourceChina]
+		ctx = log.WithValues(ctx, "sourceChinaType", sourceChina.Type(), "sourceChinaRepo", sourceChina.Repository())
 	}
 
 	imagesClients := p.clients()
