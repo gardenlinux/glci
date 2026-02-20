@@ -332,7 +332,7 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 
 	_, ecsClients := p.clients()
 	images := make(map[string]string, len(ecsClients))
-	publishImages := parallel.NewLimitedActivitySync(ctx, 12)
+	publishImages := parallel.NewLimitedActivitySync(ctx, 7)
 	for toRegion := range ecsClients {
 		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
