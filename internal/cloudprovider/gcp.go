@@ -162,6 +162,10 @@ func (p *gcp) clients() (*storage.Client, *compute.ImagesClient) {
 	return p.storageClient, p.imagesClient
 }
 
+func (*gcp) ImageSuffix() string {
+	return ".gcpimage.tar.gz"
+}
+
 func (*gcp) imageName(cname, version, committish string) string {
 	cname = hsh.Hash(fnv.New64(), cname)
 	version = strings.ReplaceAll(version, ".", "-")
@@ -177,10 +181,6 @@ func (*gcp) architecture(arch gl.Architecture) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown architecture %s", arch)
 	}
-}
-
-func (*gcp) ImageSuffix() string {
-	return ".gcpimage.tar.gz"
 }
 
 func (p *gcp) CanPublish(manifest *gl.Manifest) bool {
@@ -202,41 +202,6 @@ func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
 	}
 
 	return gcpOutput.Project != "" && gcpOutput.Image != "", nil
-}
-
-func (p *gcp) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	gcpOutput, err := publishingOutput[gcpPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-	var ownOutput gcpPublishingOutput
-	ownOutput, err = publishingOutput[gcpPublishingOutput](own)
-	if err != nil {
-		return nil, err
-	}
-
-	if gcpOutput.Project != "" || gcpOutput.Image != "" {
-		return nil, errors.New("cannot add publishing output to existing publishing output")
-	}
-
-	return &ownOutput, nil
-}
-
-func (p *gcp) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	_, err := publishingOutput[gcpPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-
-	return nil, nil
 }
 
 func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,

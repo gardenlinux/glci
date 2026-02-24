@@ -77,7 +77,6 @@ publishing:
     config: gardenlinux
     config_china: gardenlinux-cn
     region: eu-central-1
-    regions: [ eu-central-1, eu-west-1 ]
     region_china: cn-northwest-1
     image_tags:
       static_tags:

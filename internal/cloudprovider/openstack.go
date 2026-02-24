@@ -224,6 +224,10 @@ func (p *openstack) clients() map[string]*gophercloud.ServiceClient {
 	return p.imagesClients
 }
 
+func (*openstack) ImageSuffix() string {
+	return ".vmdk"
+}
+
 func (*openstack) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
@@ -260,12 +264,12 @@ func (*openstack) architecture(arch gl.Architecture) (string, error) {
 	}
 }
 
-func (*openstack) ImageSuffix() string {
-	return ".vmdk"
-}
-
 func (p *openstack) CanPublish(manifest *gl.Manifest) bool {
 	if !p.isConfigured() {
+		return false
+	}
+
+	if manifest.Platform != "openstack" && manifest.Platform != "openstackbaremeral" {
 		return false
 	}
 
@@ -290,41 +294,6 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 	}
 
 	return len(openstackOutput.Images) > 0, nil
-}
-
-func (p *openstack) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	openstackOutput, err := publishingOutput[openstackPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-	var ownOutput openstackPublishingOutput
-	ownOutput, err = publishingOutput[openstackPublishingOutput](own)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(openstackOutput.Images) > 0 {
-		return nil, errors.New("cannot add publishing output to existing publishing output")
-	}
-
-	return &ownOutput, nil
-}
-
-func (p *openstack) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	_, err := publishingOutput[openstackPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-
-	return nil, nil
 }
 
 func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,

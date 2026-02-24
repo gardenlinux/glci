@@ -466,6 +466,10 @@ func (p *azure) clients(china bool) (*azblob.Client, *armsubscriptions.Client, *
 	return p.storageClient, p.subscriptionsClient, p.imagesClient, p.galleryImagesClient, p.galleryImageVersionsClient, p.galleriesClient, p.communityGalleryImageVersionsClient
 }
 
+func (*azure) ImageSuffix() string {
+	return ".vhd"
+}
+
 func (*azure) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
@@ -497,10 +501,6 @@ func (*azure) sku(base, cname string, bios bool) string {
 	return fmt.Sprintf("%s-%s", base, cname)
 }
 
-func (*azure) ImageSuffix() string {
-	return ".vhd"
-}
-
 func (p *azure) CanPublish(manifest *gl.Manifest) bool {
 	if !p.isConfigured() {
 		return false
@@ -520,41 +520,6 @@ func (p *azure) IsPublished(manifest *gl.Manifest) (bool, error) {
 	}
 
 	return len(azureOutput.Images) > 0, nil
-}
-
-func (p *azure) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	azureOutput, err := publishingOutput[azurePublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-	var ownOutput azurePublishingOutput
-	ownOutput, err = publishingOutput[azurePublishingOutput](own)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(azureOutput.Images) > 0 {
-		return nil, errors.New("cannot add publishing output to existing publishing output")
-	}
-
-	return &ownOutput, nil
-}
-
-func (p *azure) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	_, err := publishingOutput[azurePublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-
-	return nil, nil
 }
 
 func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,

@@ -60,161 +60,119 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 	}
 
 	glciVer := glciVersion(ctx)
-	publications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors)*2)
-	pubMap := make(map[string][]int, len(flavorsConfig.Flavors))
-	fetchManifests := parallel.NewActivitySync(ctx)
 
+	publications := make([]cloudprovider.Publication, len(flavorsConfig.Flavors))
 	expandCommit := sync.Once{}
-	for _, flavor := range flavorsConfig.Flavors {
-		found := false
+	fetchManifests := parallel.NewActivitySync(ctx)
+	for i, flavor := range flavorsConfig.Flavors {
+		fetchManifests.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
+			ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
-		for _, target := range targets {
-			if target.Type() != flavor.Platform {
-				continue
+			log.Info(ctx, "Retrieving manifest")
+			manifest, er := cloudprovider.GetManifest(ctx, manifestSource, manifestKey)
+			if er != nil {
+				return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, er)
 			}
-			found = true
-			origCommit := commit
-
-			fetchManifests.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
-				manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, origCommit)
-				ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
-
-				log.Info(ctx, "Retrieving manifest")
-				manifest, er := cloudprovider.GetManifest(ctx, manifestSource, manifestKey)
-				if er != nil {
-					return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, er)
-				}
-				if manifest.Version != version {
-					return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavor.Cname, manifest.Version)
-				}
-				if manifest.BuildCommittish != origCommit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != origCommit {
-					return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
-				}
-				expandCommit.Do(func() {
-					commit = manifest.BuildCommittish
-				})
-
-				if !target.CanPublish(manifest) {
-					return nil, nil
-				}
-
-				log.Debug(ctx, "Retrieving target manifest")
-				var targetManifest *gl.Manifest
-				targetManifest, er = cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
-				_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
-				if er != nil && !ok {
-					return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, er)
-				}
-				if targetManifest != nil {
-					if targetManifest.Version != version {
-						return nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavor.Cname, targetManifest.Version)
-					}
-					if targetManifest.BuildCommittish != commit {
-						return nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavor.Cname,
-							targetManifest.BuildCommittish)
-					}
-
-					if !target.CanPublish(targetManifest) {
-						return nil, errors.New("target manifest does not correspond to source manifest")
-					}
-
-					manifest = targetManifest
-				}
-
-				publication := cloudprovider.Publication{
-					Cname:    flavor.Cname,
-					Manifest: manifest,
-					Target:   target,
-				}
-
-				return func() error {
-					publications = append(publications, publication)
-					pubMap[publication.Cname] = append(pubMap[publication.Cname], len(publications)-1)
-
-					return nil
-				}, nil
+			if manifest.Version != version {
+				return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavor.Cname, manifest.Version)
+			}
+			if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
+				return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
+			}
+			expandCommit.Do(func() {
+				commit = manifest.BuildCommittish
 			})
-		}
 
-		if !found {
-			return fmt.Errorf("no publishing target for %s", flavor.Cname)
-		}
+			log.Debug(ctx, "Retrieving target manifest")
+			var targetManifest *gl.Manifest
+			targetManifest, er = cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
+			_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
+			if er != nil && !ok {
+				return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, er)
+			}
+			if targetManifest != nil {
+				if targetManifest.Version != version {
+					return nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavor.Cname, targetManifest.Version)
+				}
+				if targetManifest.BuildCommittish != commit {
+					return nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavor.Cname,
+						targetManifest.BuildCommittish)
+				}
+
+				manifest = targetManifest
+			}
+
+			for _, target := range targets {
+				if target.CanPublish(manifest) {
+					return func() error {
+						publications[i] = cloudprovider.Publication{
+							Cname:    flavor.Cname,
+							Manifest: manifest,
+							Target:   target,
+						}
+
+						return nil
+					}, nil
+				}
+			}
+
+			return nil, fmt.Errorf("no publishing target for %s", flavor.Cname)
+		})
 	}
 	err = fetchManifests.Wait()
 	if err != nil {
 		return err
 	}
 
-	cdPublications := make([]cloudprovider.Publication, 0, len(flavorsConfig.Flavors))
-	for _, j := range pubMap {
-		cdPublications = append(cdPublications, publications[j[0]])
-	}
-
 	var descriptor *ocm.ComponentDescriptor
-	descriptor, err = ocm.BuildComponentDescriptor(ctx, manifestSource, cdPublications, ocmTarget, aliasesConfig, glciVer, version, commit)
+	descriptor, err = ocm.BuildComponentDescriptor(ctx, manifestSource, publications, ocmTarget, aliasesConfig, glciVer, version, commit)
 	if err != nil {
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
 
-	if len(publications) > 0 {
-		log.Info(ctx, "Publishing images", "count", len(publications))
-	} else {
-		log.Info(ctx, "Nothing to publish")
-	}
-
-	publishPublications := parallel.NewActivitySync(ctx)
-	for _, publication := range publications {
-		publishPublications.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+	log.Info(ctx, "Publishing images", "count", len(publications))
+	publishPublications := parallel.NewActivity(ctx)
+	for i, publication := range publications {
+		publishPublications.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 			uptime := execTime(ctx)
 			if uptime != 0 && uptime.Hours() > 5 {
-				return nil, errors.New("publishing taking too long, restart GLCI to resume")
+				return errors.New("publishing taking too long, restart GLCI to resume")
 			}
 
 			isPublished, er := publication.Target.IsPublished(publication.Manifest)
 			if er != nil {
-				return nil, fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
+				return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, err)
 			}
 			if isPublished {
 				log.Info(ctx, "Already published, skipping")
-				return nil, nil
+				return nil
 			}
-			ctx = task.WithDomain(ctx, publication.Target.CanRollback())
-			ctx = task.WithBatch(ctx, publication.Cname)
-			ctx = task.WithUndeadMode(ctx, true)
+			ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, publication.Cname), true), publication.Target.CanRollback())
 
 			log.Info(ctx, "Publishing image")
-			var output cloudprovider.PublishingOutput
-			output, er = publication.Target.Publish(ctx, publication.Cname, publication.Manifest, sources)
+			publication.Manifest.PublishedImageMetadata, er = publication.Target.Publish(ctx, publication.Cname, publication.Manifest,
+				sources)
 			if er != nil {
-				return nil, fmt.Errorf("cannot publish %s to %s: %w", publication.Cname, publication.Target.Type(), er)
+				return fmt.Errorf("cannot publish %s to %s: %w", publication.Cname, publication.Target.Type(), er)
 			}
 
-			return func() error {
-				publication.Manifest = publications[pubMap[publication.Cname][0]].Manifest
-				output, er = publication.Target.AddOwnPublishingOutput(publication.Manifest.PublishedImageMetadata, output)
-				if er != nil {
-					return fmt.Errorf("cannot add publishing output for %s: %w", publication.Cname, er)
-				}
-				publication.Manifest.PublishedImageMetadata = output
-				if glciVer != "" {
-					publication.Manifest.GLCIVersion = glciVer
-				}
-				for _, i := range pubMap[publication.Cname] {
-					publications[i].Manifest = publication.Manifest
-				}
+			if glciVer != "" {
+				publication.Manifest.GLCIVersion = glciVer
+			}
 
-				log.Info(ctx, "Updating manifest")
-				manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
-				task.RemoveCompleted(ctx, publication.Cname)
-				er = cloudprovider.PutManifest(ctx, manifestTarget, manifestKey, publication.Manifest)
-				if er != nil {
-					return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, er)
-				}
+			log.Info(ctx, "Updating manifest")
+			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
+			task.RemoveCompleted(ctx, publication.Cname)
+			er = cloudprovider.PutManifest(ctx, manifestTarget, manifestKey, publication.Manifest)
+			if er != nil {
+				return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, er)
+			}
 
-				return nil
-			}, nil
+			publications[i] = publication
+			return nil
 		})
 	}
 	err = publishPublications.Wait()
@@ -229,12 +187,8 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 	}
 
 	if !omitComponentDescritpr {
-		for i, publication := range cdPublications {
-			cdPublications[i].Manifest = publications[pubMap[publication.Cname][0]].Manifest
-		}
-
 		log.Debug(ctx, "Finalizing component descriptor")
-		err = ocm.AddPublicationOutput(descriptor, cdPublications)
+		err = ocm.AddPublicationOutput(descriptor, publications)
 		if err != nil {
 			return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
 		}
