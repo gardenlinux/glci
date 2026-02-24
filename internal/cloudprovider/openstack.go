@@ -233,7 +233,7 @@ func (*openstack) variant(platform, variant string) (openstackVariant, error) {
 		switch platform {
 		case "openstack":
 			return openstackVariantVMware, nil
-		case "openstackbaremetal", "metal,openstackbaremetal":
+		case "openstackbaremetal":
 			return openstackVariantMetal, nil
 		default:
 		}
