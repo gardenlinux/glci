@@ -358,6 +358,10 @@ func (p *aws) tgtClients(china bool) *ec2.Client {
 	return p.tgtEC2Client
 }
 
+func (*aws) ImageSuffix() string {
+	return ".raw"
+}
+
 func (*aws) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
@@ -480,10 +484,6 @@ func (p *aws) PutObject(ctx context.Context, key string, object io.Reader) error
 	return nil
 }
 
-func (*aws) ImageSuffix() string {
-	return ".raw"
-}
-
 func (p *aws) CanPublish(manifest *gl.Manifest) bool {
 	if !p.isConfigured() {
 		return false
@@ -503,41 +503,6 @@ func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
 	}
 
 	return len(awsOutput.Images) > 0, nil
-}
-
-func (p *aws) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	awsOutput, err := publishingOutput[awsPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-	var ownOutput awsPublishingOutput
-	ownOutput, err = publishingOutput[awsPublishingOutput](own)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(awsOutput.Images) > 0 {
-		return nil, errors.New("cannot add publishing output to existing publishing output")
-	}
-
-	return &ownOutput, nil
-}
-
-func (p *aws) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	_, err := publishingOutput[awsPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-
-	return nil, nil
 }
 
 func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error,

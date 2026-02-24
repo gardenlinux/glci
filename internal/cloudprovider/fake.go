@@ -41,6 +41,10 @@ func (*fake) SetOCMConfig(_ context.Context, _ credsprovider.CredsSource, _ map[
 	return nil
 }
 
+func (*fake) ImageSuffix() string {
+	return ".fake"
+}
+
 func (*fake) Repository() string {
 	return "fake"
 }
@@ -65,24 +69,12 @@ func (*fake) PutObject(_ context.Context, _ string, _ io.Reader) error {
 	return nil
 }
 
-func (*fake) ImageSuffix() string {
-	return ".fake"
-}
-
-func (*fake) CanPublish(_ *gl.Manifest) bool {
-	return true
+func (*fake) CanPublish(manifest *gl.Manifest) bool {
+	return manifest.Platform == "fake"
 }
 
 func (*fake) IsPublished(_ *gl.Manifest) (bool, error) {
 	return false, nil
-}
-
-func (*fake) AddOwnPublishingOutput(output, _ PublishingOutput) (PublishingOutput, error) {
-	return output, nil
-}
-
-func (*fake) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
-	return output, nil
 }
 
 func (p *fake) Publish(_ context.Context, _ string, _ *gl.Manifest, _ map[string]ArtifactSource) (PublishingOutput, error) {

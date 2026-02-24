@@ -222,12 +222,12 @@ func (p *aliyun) clients() (*oss.Client, map[string]*client.Client) {
 	return p.ossClient, p.ecsClients
 }
 
-func (*aliyun) imageName(cname, version, committish string) string {
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
-}
-
 func (*aliyun) ImageSuffix() string {
 	return ".qcow2"
+}
+
+func (*aliyun) imageName(cname, version, committish string) string {
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
 func (p *aliyun) CanPublish(manifest *gl.Manifest) bool {
@@ -249,41 +249,6 @@ func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
 	}
 
 	return len(aliyunOutput.Images) > 0, nil
-}
-
-func (p *aliyun) AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	aliyunOutput, err := publishingOutput[aliyunPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-	var ownOutput aliyunPublishingOutput
-	ownOutput, err = publishingOutput[aliyunPublishingOutput](own)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(aliyunOutput.Images) > 0 {
-		return nil, errors.New("cannot add publishing output to existing publishing output")
-	}
-
-	return &ownOutput, nil
-}
-
-func (p *aliyun) RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error) {
-	if !p.isConfigured() {
-		return nil, errors.New("config not set")
-	}
-
-	_, err := publishingOutput[aliyunPublishingOutput](output)
-	if err != nil {
-		return nil, err
-	}
-
-	return nil, nil
 }
 
 func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,

@@ -116,8 +116,6 @@ type PublishingTarget interface {
 	ImageSuffix() string
 	CanPublish(manifest *gl.Manifest) bool
 	IsPublished(manifest *gl.Manifest) (bool, error)
-	AddOwnPublishingOutput(output, own PublishingOutput) (PublishingOutput, error)
-	RemoveOwnPublishingOutput(output PublishingOutput) (PublishingOutput, error)
 	Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
 	Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource, steamroll bool) error
 	Close() error
@@ -213,7 +211,8 @@ func (e KeyNotFoundError) Error() string {
 }
 
 func platform(cname string) string {
-	return strings.SplitN(cname, "-", 2)[0]
+	p, _, _ := strings.Cut(cname, "-")
+	return p
 }
 
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
