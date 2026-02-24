@@ -28,7 +28,7 @@ ARG version=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o glci \
     -ldflags "-X main.version=${version}" github.com/gardenlinux/glci/cmd
 
-FROM docker.io/library/debian:forky-20260202-slim
+FROM docker.io/library/debian:forky-20260223-slim
 WORKDIR /
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
