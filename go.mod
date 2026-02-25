@@ -37,7 +37,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/wandb/parallel v0.2.3
 	golang.org/x/oauth2 v0.35.0
-	google.golang.org/api v0.268.0
+	google.golang.org/api v0.269.0
 	oras.land/oras-go/v2 v2.6.0
 )
 
