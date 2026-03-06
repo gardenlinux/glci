@@ -26,6 +26,7 @@ type CredsSource interface {
 type CredsID struct {
 	Type   string
 	Config string
+	Role   string
 }
 
 // ValidateFunc is a callback function that checks whether the credentials work correctly.

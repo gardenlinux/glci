@@ -169,6 +169,7 @@ func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.C
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   p.Type() + "_storage",
 		Config: p.pubCfg.Config,
+		Role:   "target",
 	}, func(ctx context.Context, creds map[string]any) error {
 		return p.createStorageClients(ctx, creds, false)
 	})
@@ -180,6 +181,7 @@ func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.C
 		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type() + "_storage",
 			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
 		}, func(ctx context.Context, creds map[string]any) error {
 			return p.createStorageClients(ctx, creds, true)
 		})
@@ -191,6 +193,7 @@ func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.C
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   p.Type(),
 		Config: p.pubCfg.Config,
+		Role:   "target",
 	}, func(ctx context.Context, creds map[string]any) error {
 		return p.createClients(ctx, creds, false)
 	})
@@ -202,6 +205,7 @@ func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.C
 		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type() + "_china",
 			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
 		}, func(ctx context.Context, creds map[string]any) error {
 			return p.createClients(ctx, creds, true)
 		})
@@ -1410,11 +1414,13 @@ func (p *azure) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type() + "_storage",
 			Config: p.pubCfg.Config,
+			Role:   "target",
 		})
 
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
+			Role:   "target",
 		})
 	}
 
@@ -1422,11 +1428,13 @@ func (p *azure) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type() + "_storage",
 			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
 		})
 
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type() + "_china",
 			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
 		})
 	}
 

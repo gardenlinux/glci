@@ -72,6 +72,7 @@ func (p *aws) SetStateConfig(ctx context.Context, credsSource credsprovider.Cred
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   p.Type(),
 		Config: p.stateCfg.Config,
+		Role:   "state",
 	}, p.createClients)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials: %w", err)
@@ -212,6 +213,7 @@ func (p *aws) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.stateCfg.Config,
+			Role:   "state",
 		})
 	}
 

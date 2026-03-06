@@ -72,6 +72,7 @@ func (p *oci) SetOCMConfig(ctx context.Context, credsSource credsprovider.CredsS
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType()),
 		Config: p.ociCfg.Config,
+		Role:   "oci",
 	}, p.createClients)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.ociCfg.Config, err)
@@ -283,6 +284,7 @@ func (p *oci) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType()),
 			Config: p.ociCfg.Config,
+			Role:   "oci",
 		})
 	}
 

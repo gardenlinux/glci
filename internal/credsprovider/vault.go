@@ -235,13 +235,13 @@ func (p *vault) processWatchEvent(ctx context.Context, event vaultWatchEvent) er
 		var creds vaultCreds
 		creds, ok = p.activeCreds[owner]
 		if !ok {
-			return fmt.Errorf("inconsistent internal state for secret %s: credentials %s/%s not active", event.key, owner.Type,
-				owner.Config)
+			return fmt.Errorf("inconsistent internal state for secret %s: credentials %s/%s/%s not active", event.key, owner.Type,
+				owner.Config, owner.Role)
 		}
 
 		err = p.validateAndAnnounceNewCreds(ctx, creds)
 		if err != nil {
-			return fmt.Errorf("cannot update credentials %s/%s: %w", owner.Type, owner.Config, err)
+			return fmt.Errorf("cannot update credentials %s/%s/%s: %w", owner.Type, owner.Config, owner.Role, err)
 		}
 	}
 
@@ -268,7 +268,7 @@ func (p *vault) reestablishVault(ctx context.Context) error {
 	for id, creds := range inactiveCreds {
 		err = p.renewCreds(ctx, id, creds.validate, creds.updated)
 		if err != nil {
-			return fmt.Errorf("cannot renew credentials %s/%s: %w", id.Type, id.Config, err)
+			return fmt.Errorf("cannot renew credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 		}
 	}
 
@@ -325,11 +325,11 @@ func (*vault) secretKeys(id CredsID) []string {
 		return []string{
 			fmt.Sprintf("se-alicloud-%s/creds/glci", id.Config),
 		}
-	case "AWS", "AWS_src":
+	case "AWS":
 		return []string{
 			fmt.Sprintf("se-aws-%s/creds/glci", id.Config),
 		}
-	case "AWS_china", "AWS_src_china":
+	case "AWS_china":
 		return []string{
 			fmt.Sprintf("se-aws-%s/data/creds/glci", id.Config),
 		}
@@ -381,7 +381,7 @@ func (p *vault) AcquireValidatedCreds(ctx context.Context, id CredsID, validate 
 
 	creds, ok := p.activeCreds[id]
 	if ok {
-		ctx = log.WithValues(ctx, "credsType", id.Type, "credsConfig", id.Config)
+		ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Role)
 
 		creds.validate = validate
 		creds.updated = updated
@@ -389,7 +389,7 @@ func (p *vault) AcquireValidatedCreds(ctx context.Context, id CredsID, validate 
 
 		err = p.validateAndAnnounceNewCreds(ctx, creds)
 		if err != nil {
-			return fmt.Errorf("cannot update credentials %s/%s: %w", id.Type, id.Config, err)
+			return fmt.Errorf("cannot update credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 		}
 
 		return nil
@@ -397,7 +397,7 @@ func (p *vault) AcquireValidatedCreds(ctx context.Context, id CredsID, validate 
 
 	err = p.renewCreds(ctx, id, validate, updated)
 	if err != nil {
-		return fmt.Errorf("cannot renew credentials %s/%s: %w", id.Type, id.Config, err)
+		return fmt.Errorf("cannot renew credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 	}
 
 	return nil
@@ -446,7 +446,7 @@ func (*vault) validateCreds(ctx context.Context, validate ValidateFunc, data map
 }
 
 func (p *vault) renewCreds(ctx context.Context, id CredsID, validate ValidateFunc, updated UpdatedFunc) error {
-	ctx = log.WithValues(ctx, "credsType", id.Type, "credsConfig", id.Config)
+	ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Role)
 
 	keys := p.secretKeys(id)
 	for _, key := range keys {
@@ -467,7 +467,7 @@ func (p *vault) renewCreds(ctx context.Context, id CredsID, validate ValidateFun
 
 	err := p.validateAndAnnounceNewCreds(ctx, creds)
 	if err != nil {
-		return fmt.Errorf("cannot update credentials %s/%s: %w", id.Type, id.Config, err)
+		return fmt.Errorf("cannot update credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 	}
 
 	return nil
@@ -477,8 +477,8 @@ func (p *vault) acquireSecret(ctx context.Context, key string, owner CredsID) er
 	secret, ok := p.activeSecrets[key]
 	if ok {
 		if slices.Contains(secret.owners, owner) {
-			return fmt.Errorf("inconsistent internal state for secret %s: secret already owned by credentials %s/%s", key, owner.Type,
-				owner.Config)
+			return fmt.Errorf("inconsistent internal state for secret %s: secret already owned by credentials %s/%s/%s", key, owner.Type,
+				owner.Config, owner.Role)
 		}
 		secret.owners = append(secret.owners, owner)
 		p.activeSecrets[key] = secret
