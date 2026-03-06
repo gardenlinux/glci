@@ -61,7 +61,13 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			if er != nil {
 				_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
 				if ok && manifestTarget != manifestSource {
-					return nil, nil
+					return func() error {
+						publications[i] = cloudprovider.Publication{
+							Cname: flavor.Cname,
+						}
+
+						return nil
+					}, nil
 				}
 				return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, er)
 			}
@@ -101,7 +107,8 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	removePublications := parallel.NewLimitedActivity(ctx, 7)
 	for i, publication := range publications {
 		if publication.Manifest == nil {
-			log.Info(ctx, "Already removed, skipping")
+			lctx := log.WithValues(ctx, "cname", publication.Cname)
+			log.Info(lctx, "Already removed, skipping")
 			continue
 		}
 
