@@ -96,6 +96,7 @@ func (p *gcp) SetTargetConfig(ctx context.Context, credsSource credsprovider.Cre
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   p.Type(),
 		Config: p.pubCfg.Config,
+		Role:   "target",
 	}, p.createClients)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
@@ -602,6 +603,7 @@ func (p *gcp) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
+			Role:   "target",
 		})
 	}
 

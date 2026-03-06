@@ -108,7 +108,7 @@ func (p *aws) SetSourceConfig(ctx context.Context, credsSource credsprovider.Cre
 		return errors.New("missing bucket")
 	}
 
-	credsType := p.Type() + "_src"
+	credsType := p.Type()
 	if strings.HasPrefix(p.srcCfg.Region, "cn-") {
 		credsType += "_china"
 	}
@@ -116,6 +116,7 @@ func (p *aws) SetSourceConfig(ctx context.Context, credsSource credsprovider.Cre
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   credsType,
 		Config: p.srcCfg.Config,
+		Role:   "source",
 	}, p.createSrcClients)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.srcCfg.Config, err)
@@ -178,6 +179,7 @@ func (p *aws) SetTargetConfig(ctx context.Context, credsSource credsprovider.Cre
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   p.Type(),
 		Config: p.pubCfg.Config,
+		Role:   "target",
 	}, func(ctx context.Context, creds map[string]any) error {
 		return p.createTgtClients(ctx, creds, false)
 	})
@@ -189,6 +191,7 @@ func (p *aws) SetTargetConfig(ctx context.Context, credsSource credsprovider.Cre
 		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type() + "_china",
 			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
 		}, func(ctx context.Context, creds map[string]any) error {
 			return p.createTgtClients(ctx, creds, true)
 		})
@@ -1158,7 +1161,7 @@ func (p *aws) deleteSnapshot(ctx context.Context, snapshot, region string, steam
 
 func (p *aws) Close() error {
 	if p.srcCfg.Config != "" {
-		credsType := p.Type() + "_src"
+		credsType := p.Type()
 		if strings.HasPrefix(p.srcCfg.Region, "cn-") {
 			credsType += "_china"
 		}
@@ -1166,6 +1169,7 @@ func (p *aws) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   credsType,
 			Config: p.srcCfg.Config,
+			Role:   "source",
 		})
 	}
 
@@ -1173,6 +1177,7 @@ func (p *aws) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
+			Role:   "target",
 		})
 	}
 
@@ -1180,6 +1185,7 @@ func (p *aws) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type() + "_china",
 			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
 		})
 	}
 

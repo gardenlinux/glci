@@ -139,6 +139,7 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: config.Config,
+			Role:   "target",
 		}, func(ctx context.Context, creds map[string]any) error {
 			return p.createClients(ctx, config, creds)
 		})
@@ -582,6 +583,7 @@ func (p *openstack) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: config.Config,
+			Role:   "target",
 		})
 	}
 

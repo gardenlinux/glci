@@ -94,6 +94,7 @@ func (p *aliyun) SetTargetConfig(ctx context.Context, credsSource credsprovider.
 	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
 		Type:   p.Type(),
 		Config: p.pubCfg.Config,
+		Role:   "target",
 	}, p.createClients)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
@@ -758,6 +759,7 @@ func (p *aliyun) Close() error {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
+			Role:   "target",
 		})
 	}
 
