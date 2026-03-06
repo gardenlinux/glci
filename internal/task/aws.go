@@ -113,13 +113,6 @@ func (p *aws) createClients(ctx context.Context, rawCreds map[string]any) error 
 	return nil
 }
 
-func (p *aws) clients() *s3.Client {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.s3Client
-}
-
 func (p *aws) SetID(id string) {
 	p.key = "state_" + id + ".json"
 }
@@ -129,12 +122,13 @@ func (p *aws) Load() ([]byte, error) {
 		return nil, errors.New("config or ID not set")
 	}
 
-	s3Client := p.clients()
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
 	defer cancel()
 
-	r, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+	r, err := p.s3Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &p.stateCfg.Bucket,
 		Key:    &p.key,
 	})
@@ -168,12 +162,13 @@ func (p *aws) Save(state []byte) error {
 		return errors.New("config or ID not set")
 	}
 
-	s3Client := p.clients()
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
 	defer cancel()
 
-	_, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := p.s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:          &p.stateCfg.Bucket,
 		Key:             &p.key,
 		Body:            bytes.NewReader(state),
@@ -192,12 +187,13 @@ func (p *aws) Clear() error {
 		return errors.New("config or ID not set")
 	}
 
-	s3Client := p.clients()
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
 	defer cancel()
 
-	_, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	_, err := p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: &p.stateCfg.Bucket,
 		Key:    &p.key,
 	})
