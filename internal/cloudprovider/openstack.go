@@ -270,7 +270,7 @@ func (p *openstack) CanPublish(manifest *gl.Manifest) bool {
 		return false
 	}
 
-	if manifest.Platform != "openstack" && manifest.Platform != "openstackbaremeral" {
+	if manifest.Platform != "openstack" && manifest.Platform != "openstackbaremetal" {
 		return false
 	}
 
