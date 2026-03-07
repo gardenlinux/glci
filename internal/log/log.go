@@ -1,4 +1,4 @@
-package log
+package log //nolint:revive // The package name is perfectly fine.
 
 import (
 	"context"
