@@ -93,11 +93,6 @@ linters:
       - name: unchecked-type-assertion
         arguments:
           - accept-ignored-assertion-result: true
-      - name: var-naming
-        arguments:
-        - []
-        - []
-        - [ skip-package-name-checks: true ]
     tagliatelle:
       case:
         rules:
