@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	cloud.google.com/go/compute v1.56.0
-	cloud.google.com/go/storage v1.60.0
+	cloud.google.com/go/storage v1.61.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7 v7.3.0
