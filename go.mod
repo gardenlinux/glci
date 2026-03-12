@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	cloud.google.com/go/compute v1.56.0
-	cloud.google.com/go/storage v1.60.0
+	cloud.google.com/go/storage v1.61.2
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7 v7.3.0
@@ -37,7 +37,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/wandb/parallel v0.2.3
 	golang.org/x/oauth2 v0.36.0
-	google.golang.org/api v0.269.0
+	google.golang.org/api v0.271.0
 	oras.land/oras-go/v2 v2.6.0
 )
 
