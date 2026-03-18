@@ -19,6 +19,10 @@ flavors:
   - platform: OpenStack
     cname: openstackbaremetal-gardener_prod-amd64
   - platform: AWS
+    cname: aws-gardener_fips_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_fips_prod-arm64
+  - platform: AWS
     cname: aws-gardener_prod_usi-amd64
   - platform: AWS
     cname: aws-gardener_prod_usi-arm64
