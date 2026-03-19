@@ -6,6 +6,10 @@ flavors:
     cname: aws-gardener_prod-amd64
   - platform: AWS
     cname: aws-gardener_prod-arm64
+  - platform: AWS
+    cname: aws-gardener_fips_prod-amd64
+  - platform: AWS
+    cname: aws-gardener_fips_prod-arm64
   - platform: Azure
     cname: azure-gardener_prod-amd64
   - platform: Azure
@@ -19,13 +23,13 @@ flavors:
   - platform: OpenStack
     cname: openstack-gardener-metal_prod-amd64
   - platform: AWS
-    cname: aws-gardener_fips_prod-amd64
-  - platform: AWS
-    cname: aws-gardener_fips_prod-arm64
-  - platform: AWS
     cname: aws-gardener_prod_usi-amd64
   - platform: AWS
     cname: aws-gardener_prod_usi-arm64
+  - platform: AWS
+    cname: aws-gardener_fips_prod_usi-amd64
+  - platform: AWS
+    cname: aws-gardener_fips_prod_usi-arm64
   - platform: Azure
     cname: azure-gardener_prod_usi-amd64
   - platform: Azure
