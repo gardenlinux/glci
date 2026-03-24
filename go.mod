@@ -19,7 +19,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.12
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.12
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.295.0
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.2
 	github.com/aws/smithy-go v1.24.2
 	github.com/go-logr/logr v1.4.3
 	github.com/go-logr/zerologr v1.2.3
@@ -58,7 +58,7 @@ require (
 	github.com/alibabacloud-go/debug v1.0.1 // indirect
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.9 // indirect
 	github.com/aliyun/credentials-go v1.4.12 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.7 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.20 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.20 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.20 // indirect
