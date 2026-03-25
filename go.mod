@@ -27,7 +27,7 @@ require (
 	github.com/goccy/go-yaml v1.19.2
 	github.com/gophercloud/gophercloud/v2 v2.11.1
 	github.com/hashicorp/vault/api v1.22.0
-	github.com/hashicorp/vault/api/auth/approle v0.11.0
+	github.com/hashicorp/vault/api/auth/approle v0.12.0
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
 	github.com/opencontainers/go-digest v1.0.0
