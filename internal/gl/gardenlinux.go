@@ -14,6 +14,7 @@ type Manifest struct {
 	Version                string          `yaml:"version"`
 	BuildCommittish        string          `yaml:"build_committish"`
 	GLCIVersion            string          `yaml:"glci_version,omitzero"`
+	MinVersionForUpdate    string          `yaml:"min_version_for_update,omitzero"`
 	Architecture           Architecture    `yaml:"architecture"`
 	Platform               string          `yaml:"platform"`
 	PlatformVariant        string          `yaml:"platform_variant,omitzero"`
