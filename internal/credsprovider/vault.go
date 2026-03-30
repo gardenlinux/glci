@@ -102,7 +102,7 @@ func (p *vault) isConfigured() bool {
 }
 
 func (p *vault) SetCredsConfig(ctx context.Context, cfg map[string]any) error {
-	err := setConfig(cfg, &p.credsCfg)
+	err := parseConfig(cfg, &p.credsCfg)
 	if err != nil {
 		return err
 	}

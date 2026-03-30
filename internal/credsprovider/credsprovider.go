@@ -51,7 +51,7 @@ func registerCredsSource(nf newCredsSourceFunc) {
 	sources[nf().Type()] = nf
 }
 
-func setConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
+func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
