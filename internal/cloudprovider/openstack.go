@@ -400,15 +400,18 @@ func (*openstack) createImage(ctx context.Context, imageClient *gophercloud.Serv
 	switch variant {
 	case openstackVariantVMware:
 		properties = map[string]string{
-			"hypervisor_type":    "vmware",
-			"hw_disk_bus":        "scsi",
-			"hw_firmware_type":   "uefi",
-			"hw_vif_model":       "vmxnet3",
-			"vmware_adaptertype": "paraVirtual",
-			"vmware_disktype":    "streamOptimized",
-			"vmware_ostype":      "debian10_64Guest",
+			"hw_firmware_type":          "uefi",
+			"hw_supported_disk_buses":   "scsi,virtio",
+			"hw_supported_scsi_models":  "virtio-scsi,vmpvscsi",
+			"hw_supported_vif_models":   "virtio,vmxnet3",
+			"hw_video_ram":              "16",
+			"hw_vif_multiqueue_enabled": "true",
+			"hw_vm_mode":                "hvm",
+			"vmware:hv_enabled":         "true",
+			"vmware_disktype":           "streamOptimized",
+			"vmware_ostype":             "debian10_64Guest",
 		}
-		visibility = images.ImageVisibilityPublic
+		visibility = images.ImageVisibilityPrivate
 	case openstackVariantMetal:
 		properties = map[string]string{
 			"hypervisor_type":  "baremetal",
