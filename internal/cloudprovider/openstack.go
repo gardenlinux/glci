@@ -411,7 +411,7 @@ func (*openstack) createImage(ctx context.Context, imageClient *gophercloud.Serv
 			"vmware_disktype":           "streamOptimized",
 			"vmware_ostype":             "debian10_64Guest",
 		}
-		visibility = images.ImageVisibilityPrivate
+		visibility = images.ImageVisibilityPublic
 	case openstackVariantMetal:
 		properties = map[string]string{
 			"hypervisor_type":  "baremetal",
