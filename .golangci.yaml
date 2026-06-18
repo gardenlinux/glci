@@ -1,9 +1,4 @@
 version: "2"
-run:
-  modules-download-mode: readonly
-issues:
-  max-issues-per-linter: 0
-  max-same-issues: 0
 
 linters:
   default: all
@@ -15,12 +10,14 @@ linters:
   - dupl
   - dupword
   - err113
+  - exhaustive
   - exhaustruct
   - funcorder
   - funlen
   - gocognit
   - goconst
   - gocyclo
+  - gomodguard
   - interfacebloat
   - ireturn
   - lll
@@ -29,19 +26,23 @@ linters:
   - nestif
   - nilnil
   - nlreturn
-  - nolintlint
+  - unparam
   - varnamelen
   - wrapcheck
   - wsl
   - wsl_v5
   settings:
+    gocritic:
+      disabled-checks:
+      - regexpMust
     gosec:
       config:
         G301: "0755"
         G302: "0644"
         G306: "0644"
       excludes:
-        - G117
+      - G204
+      - G304
     govet:
       enable-all: true
       disable:
@@ -72,6 +73,8 @@ linters:
         - allowed-packages:
           - github.com/onsi/ginkgo/v2
           - github.com/onsi/gomega
+      - name: enforce-switch-style
+        disabled: true
       - name: flag-parameter
         disabled: true
       - name: function-length
@@ -103,17 +106,6 @@ linters:
           avro: snake
           header: snake
           mapstructure: snake
-  exclusions:
-    rules:
-    - path: internal/cloudprovider/.+\.go
-      linters:
-      - gochecknoinits
-    - path: internal/credsprovider/.+\.go
-      linters:
-      - gochecknoinits
-    - path: internal/task/.+\.go
-      linters:
-      - gochecknoinits
 
 formatters:
   enable:
@@ -135,3 +127,10 @@ formatters:
       max-len: 140
       shorten-comments: true
       reformat-tags: false
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+run:
+  modules-download-mode: readonly

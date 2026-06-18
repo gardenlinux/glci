@@ -28,6 +28,7 @@ const (
 	repoSuffix = "/component-descriptors/" + gl.GardenLinuxRepo
 )
 
+//nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	registerOCMTarget(func() OCMTarget {
 		return &oci{}

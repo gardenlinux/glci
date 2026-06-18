@@ -9,6 +9,7 @@ import (
 	"github.com/gardenlinux/glci/internal/credsprovider"
 )
 
+//nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	registerStatePersistor(func() StatePersistor {
 		return &file{}

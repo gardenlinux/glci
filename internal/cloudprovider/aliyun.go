@@ -24,6 +24,7 @@ import (
 	"github.com/gardenlinux/glci/internal/task"
 )
 
+//nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	env.Clean("OSS_")
 	env.Clean("ALIBABA_")

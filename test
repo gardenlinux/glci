@@ -1,3 +1,48 @@
-#!/bin/sh
+#!/bin/bash
+set -euo pipefail
 
-exec go run github.com/onsi/ginkgo/v2/ginkgo -r --race --randomize-suites --randomize-all
+[ "$(uname -s)" = "Linux" ] || {
+  printf "Tests require Linux\n" >&2
+  exit 1
+}
+
+failfast="-failfast"
+cover=false
+for arg in "$@"; do
+  case "$arg" in
+    --ci) failfast="" ;;
+    cover) cover=true ;;
+  esac
+done
+
+if [ "$cover" = true ]; then
+  coverdir=$(mktemp -d)
+  trap 'rm -rf "$coverdir"' EXIT
+
+  go test -coverprofile="$coverdir/all.out" -count=1 -timeout 60s ./... >/dev/null 2>&1
+
+  awk '
+    NR==1 { next }
+    {
+      pkg = $1
+      sub(/:[0-9].*/, "", pkg)
+      sub(/.*gardenlinux\/glci\//, "", pkg)
+      sub(/\/[^\/]*$/, "", pkg)
+      total[pkg] += $2
+      if ($3 > 0) covered[pkg] += $2
+    }
+    END {
+      all_total = 0; all_covered = 0
+      for (p in total) {
+        printf "pkg %-30s %.1f%% of statements\n", p, covered[p]*100/total[p]
+        all_total += total[p]
+        all_covered += covered[p]
+      }
+      printf "tot %-30s %.1f%% of statements\n", "Total", all_covered*100/all_total
+    }
+  ' "$coverdir/all.out" | sort | sed 's/^pkg //; s/^tot /\n/'
+
+  exit
+fi
+
+go test -json -race -shuffle=on -count=1 -timeout 60s $failfast ./... 2>&1 | go tool gotestfmt

@@ -1,5 +1,4 @@
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.4 AS builder
-ARG TARGETOS
 ARG TARGETARCH
 
 RUN export DEBIAN_FRONTEND=noninteractive && \
@@ -25,8 +24,8 @@ COPY go.sum go.sum
 COPY cmd/ cmd/
 COPY internal/ internal/
 ARG version=dev
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o glci \
-    -ldflags "-X main.version=${version}" github.com/gardenlinux/glci/cmd
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -trimpath -buildvcs=false -o glci \
+    -ldflags "-s -w -X main.version=${version}" github.com/gardenlinux/glci/cmd
 
 FROM docker.io/library/debian:forky-20260610-slim
 WORKDIR /
@@ -54,3 +53,4 @@ COPY glci_integration_test.yaml glci_integration_test.yaml
 COPY glci_dev.yaml glci_dev.yaml
 
 USER 65532:65532
+

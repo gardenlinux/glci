@@ -20,6 +20,7 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 )
 
+//nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	env.Clean("VAULT_")
 

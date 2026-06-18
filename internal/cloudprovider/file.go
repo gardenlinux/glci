@@ -10,6 +10,7 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 )
 
+//nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	registerOCMTarget(func() OCMTarget {
 		return &file{}
