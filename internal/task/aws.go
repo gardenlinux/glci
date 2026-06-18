@@ -21,6 +21,7 @@ import (
 	"github.com/gardenlinux/glci/internal/env"
 )
 
+//nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	env.Clean("AWS_")
 	env.Clean("_X_AMZN_")

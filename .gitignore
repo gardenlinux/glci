@@ -1,5 +1,8 @@
 *.test
+.claude
+.DS_Store
 .idea
+.lint.*
 .vscode
 *.swp
 *.swo
