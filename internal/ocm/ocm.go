@@ -205,6 +205,12 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 				Value: glciVersion,
 			})
 		}
+		if publication.Manifest.MinVersionForUpdate != "" {
+			labels = append(labels, componentDescriptorlabel{
+				Name:  "gardenlinux.org/inplace/min-version-for-update",
+				Value: publication.Manifest.MinVersionForUpdate,
+			})
+		}
 
 		packageVersions := getPackageVersions(packages[i], aliases)
 		if len(packageVersions) > 0 {
