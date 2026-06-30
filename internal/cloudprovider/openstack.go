@@ -27,9 +27,6 @@ import (
 func init() {
 	env.Clean("OS_")
 
-	registerPublishingTarget(func() PublishingTarget {
-		return &openstack{}
-	})
 	module.RegisterImpl(PublishingTargetCategory, "OpenStack", func(b *module.Base) PublishingTarget {
 		return &openstack{
 			base: b,
@@ -79,32 +76,6 @@ func (p *openstack) isConfigured() bool {
 	imagesClients := p.clients()
 
 	return len(imagesClients) > 0
-}
-
-func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
-	sources map[string]ArtifactSource,
-) error {
-	p.credsSource = credsSource
-
-	err := p.Configure(cfg)
-	if err != nil {
-		return err
-	}
-
-	var ok bool
-	p.source, ok = sources[p.pubCfg.Source]
-	if !ok {
-		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
-	}
-
-	if p.pubCfg.SourceChina != "" {
-		p.sourceChina, ok = sources[p.pubCfg.SourceChina]
-		if !ok {
-			return fmt.Errorf("unknown source %s", p.pubCfg.SourceChina)
-		}
-	}
-
-	return p.Start(ctx)
 }
 
 type openstackTaskState struct {
@@ -578,10 +549,6 @@ func (p *openstack) Configure(rawCfg map[string]any) error {
 
 	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(rs))
 
-	if p.base == nil {
-		return nil
-	}
-
 	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
@@ -624,10 +591,6 @@ func (p *openstack) Start(ctx context.Context) error {
 }
 
 func (p *openstack) Stop() error {
-	return p.Close()
-}
-
-func (p *openstack) Close() error {
 	for _, config := range p.pubCfg.Configs {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),

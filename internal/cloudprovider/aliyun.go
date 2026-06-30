@@ -30,9 +30,6 @@ func init() {
 	env.Clean("OSS_")
 	env.Clean("ALIBABA_")
 
-	registerPublishingTarget(func() PublishingTarget {
-		return &aliyun{}
-	})
 	module.RegisterImpl(PublishingTargetCategory, "Aliyun", func(b *module.Base) PublishingTarget {
 		return &aliyun{
 			base: b,
@@ -68,25 +65,6 @@ func (p *aliyun) isConfigured() bool {
 	ossClient, ecsClients := p.clients()
 
 	return ossClient != nil && len(ecsClients) > 0
-}
-
-func (p *aliyun) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
-	sources map[string]ArtifactSource,
-) error {
-	p.credsSource = credsSource
-
-	err := p.Configure(cfg)
-	if err != nil {
-		return err
-	}
-
-	var ok bool
-	p.source, ok = sources[p.pubCfg.Source]
-	if !ok {
-		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
-	}
-
-	return p.Start(ctx)
 }
 
 type aliyunTaskState struct {
@@ -760,10 +738,6 @@ func (p *aliyun) Configure(rawCfg map[string]any) error {
 		}
 	}
 
-	if p.base == nil {
-		return nil
-	}
-
 	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
@@ -795,10 +769,6 @@ func (p *aliyun) Start(ctx context.Context) error {
 }
 
 func (p *aliyun) Stop() error {
-	return p.Close()
-}
-
-func (p *aliyun) Close() error {
 	if p.pubCfg.Config != "" {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),

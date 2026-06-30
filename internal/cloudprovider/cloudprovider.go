@@ -10,7 +10,6 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/goccy/go-yaml"
 
-	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/task"
@@ -31,41 +30,16 @@ var PublishingTargetCategory = module.NewCategory[PublishingTarget]()
 //nolint:gochecknoglobals // Required for automatic registration.
 var OCMTargetCategory = module.NewCategory[OCMTarget]()
 
-//nolint:gochecknoglobals // Required for automatic registration.
-var (
-	sources = make(map[string]newArtifactSourceFunc)
-	targets = make(map[string]newPublishingTargetFunc)
-	ocms    = make(map[string]newOCMTargetFunc)
-)
-
 // ArtifactSource is a source of artifacts which can retrieve arbitrary objects as well as retrieve and publish manifests.
 type ArtifactSource interface {
 	module.Module
 
 	Type() string
-	SetSourceConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any) error
 	Repository() string
 	GetObjectURL(ctx context.Context, key string) (string, error)
 	GetObjectSize(ctx context.Context, key string) (int64, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, object io.Reader) error
-	Close() error
-}
-
-// NewArtifactSource returns a new ArtifactSource of a given type.
-func NewArtifactSource(typ string) (ArtifactSource, error) {
-	nf, ok := sources[typ]
-	if !ok {
-		return nil, fmt.Errorf("artifact source %s is not supported", typ)
-	}
-
-	return nf(), nil
-}
-
-type newArtifactSourceFunc func() ArtifactSource
-
-func registerArtifactSource(nf newArtifactSourceFunc) {
-	sources[nf().Type()] = nf
 }
 
 // GetManifest retrieves a manifest from an artifact source.
@@ -131,35 +105,16 @@ type PublishingTarget interface {
 	module.Module
 
 	Type() string
-	SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any,
-		sources map[string]ArtifactSource) error
 	ImageSuffix() string
 	CanPublish(manifest *gardenlinux.Manifest) bool
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
 	Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
-	Close() error
 	task.RollbackHandler
 }
 
 // PublishingOutput is an opaque representation of the result of a publishing operation.
 type PublishingOutput any
-
-// NewPublishingTarget returns a new PublishingTarget of a given type.
-func NewPublishingTarget(typ string) (PublishingTarget, error) {
-	nf, ok := targets[typ]
-	if !ok {
-		return nil, fmt.Errorf("publishing target %s is not supported", typ)
-	}
-
-	return nf(), nil
-}
-
-type newPublishingTargetFunc func() PublishingTarget
-
-func registerPublishingTarget(nf newPublishingTargetFunc) {
-	targets[nf().Type()] = nf
-}
 
 func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
 	var output PUBOUT
@@ -193,27 +148,9 @@ type OCMTarget interface {
 	module.Module
 
 	Type() string
-	SetOCMConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any) error
 	OCMType() string
 	OCMRepositoryBase() string
 	PublishComponentDescriptor(ctx context.Context, version string, descriptor []byte) error
-	Close() error
-}
-
-// NewOCMTarget returns a new OCMTarget of a given type.
-func NewOCMTarget(typ string) (OCMTarget, error) {
-	nf, ok := ocms[typ]
-	if !ok {
-		return nil, fmt.Errorf("OCM target %s is not supported", typ)
-	}
-
-	return nf(), nil
-}
-
-type newOCMTargetFunc func() OCMTarget
-
-func registerOCMTarget(nf newOCMTargetFunc) {
-	ocms[nf().Type()] = nf
 }
 
 // Publication represents the act of publishing an image including what is being published where and what the result is.

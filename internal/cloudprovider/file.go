@@ -6,16 +6,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
-	registerOCMTarget(func() OCMTarget {
-		return &file{}
-	})
 	module.RegisterImpl(OCMTargetCategory, "File", func(b *module.Base) OCMTarget {
 		return &file{
 			base: b,
@@ -42,20 +38,8 @@ func (p *file) isConfigured() bool {
 	return p.fileCfg.File != ""
 }
 
-func (p *file) SetOCMConfig(_ context.Context, _ credsprovider.CredsSource, cfg map[string]any) error {
-	return p.Configure(cfg)
-}
-
 func (*file) OCMType() string {
-	t, err := NewOCMTarget("OCI")
-	if err != nil {
-		return ""
-	}
-	defer func() {
-		_ = t.Close()
-	}()
-
-	return t.OCMType()
+	return (*oci)(nil).OCMType()
 }
 
 func (p *file) OCMRepositoryBase() string {
@@ -94,10 +78,6 @@ func (*file) Start(_ context.Context) error {
 	return nil
 }
 
-func (p *file) Stop() error {
-	return p.Close()
-}
-
-func (*file) Close() error {
+func (*file) Stop() error {
 	return nil
 }

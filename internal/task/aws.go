@@ -27,9 +27,6 @@ func init() {
 	env.Clean("AWS_")
 	env.Clean("_X_AMZN_")
 
-	registerStatePersistor(func() StatePersistor {
-		return &aws{}
-	})
 	module.RegisterImpl(Category, "AWS", func(b *module.Base) StatePersistor {
 		return &aws{
 			base: b,
@@ -60,17 +57,6 @@ type awsStateConfig struct {
 
 func (p *aws) isConfigured() bool {
 	return p.stateCfg.Bucket != "" && p.key != ""
-}
-
-func (p *aws) SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
-	p.credsSource = credsSource
-
-	err := p.Configure(cfg)
-	if err != nil {
-		return err
-	}
-
-	return p.Start(ctx)
 }
 
 type awsCredentials struct {
@@ -211,10 +197,6 @@ func (p *aws) Configure(rawCfg map[string]any) error {
 		return errors.New("missing bucket")
 	}
 
-	if p.base == nil {
-		return nil
-	}
-
 	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
@@ -241,10 +223,6 @@ func (p *aws) Start(ctx context.Context) error {
 }
 
 func (p *aws) Stop() error {
-	return p.Close()
-}
-
-func (p *aws) Close() error {
 	if p.stateCfg.Config != "" {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),

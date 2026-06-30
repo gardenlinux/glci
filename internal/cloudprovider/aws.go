@@ -37,18 +37,12 @@ func init() {
 	env.Clean("AWS_")
 	env.Clean("_X_AMZN_")
 
-	registerArtifactSource(func() ArtifactSource {
-		return &awsSource{}
-	})
 	module.RegisterImpl(ArtifactSourceCategory, "AWS", func(b *module.Base) ArtifactSource {
 		return &awsSource{
 			base: b,
 		}
 	})
 
-	registerPublishingTarget(func() PublishingTarget {
-		return &awsTarget{}
-	})
 	module.RegisterImpl(PublishingTargetCategory, "AWS", func(b *module.Base) PublishingTarget {
 		return &awsTarget{
 			base: b,
@@ -118,43 +112,6 @@ func (p *awsTarget) isConfigured() bool {
 	ec2Client := p.tgtClients(false)
 
 	return ec2Client != nil
-}
-
-func (p *awsSource) SetSourceConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
-	p.credsSource = credsSource
-
-	err := p.Configure(cfg)
-	if err != nil {
-		return err
-	}
-
-	return p.Start(ctx)
-}
-
-func (p *awsTarget) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
-	sources map[string]ArtifactSource,
-) error {
-	p.credsSource = credsSource
-
-	err := p.Configure(cfg)
-	if err != nil {
-		return err
-	}
-
-	var ok bool
-	p.source, ok = sources[p.pubCfg.Source]
-	if !ok {
-		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
-	}
-
-	if p.pubCfg.SourceChina != "" {
-		p.sourceChina, ok = sources[p.pubCfg.SourceChina]
-		if !ok {
-			return fmt.Errorf("unknown source %s", p.pubCfg.SourceChina)
-		}
-	}
-
-	return p.Start(ctx)
 }
 
 type awsTaskState struct {
@@ -1130,10 +1087,6 @@ func (p *awsSource) Configure(rawCfg map[string]any) error {
 		return errors.New("missing bucket")
 	}
 
-	if p.base == nil {
-		return nil
-	}
-
 	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
@@ -1165,10 +1118,6 @@ func (p *awsSource) Start(ctx context.Context) error {
 }
 
 func (p *awsSource) Stop() error {
-	return p.Close()
-}
-
-func (p *awsSource) Close() error {
 	if p.srcCfg.Config != "" {
 		credsType := p.Type()
 		if strings.HasPrefix(p.srcCfg.Region, "cn-") {
@@ -1218,10 +1167,6 @@ func (p *awsTarget) Configure(rawCfg map[string]any) error {
 		}
 
 		p.enableChina = true
-	}
-
-	if p.base == nil {
-		return nil
 	}
 
 	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
@@ -1277,10 +1222,6 @@ func (p *awsTarget) Start(ctx context.Context) error {
 }
 
 func (p *awsTarget) Stop() error {
-	return p.Close()
-}
-
-func (p *awsTarget) Close() error {
 	if p.pubCfg.Config != "" {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),
