@@ -12,12 +12,12 @@ import (
 	"github.com/gardenlinux/glci/internal/log"
 )
 
-func removeCmd() *cobra.Command {
+func unpublishCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "remove",
-		Short: "remove a Garden Linux release from cloud providers",
+		Use:   "unpublish",
+		Short: "Unpublish a Garden Linux release from cloud providers",
 		Args:  cobra.NoArgs,
-		RunE:  cli.RunFunc(remove),
+		RunE:  cli.RunFunc(unpublish),
 	}
 
 	c.Flags().StringP("version", "v", "", "release version")
@@ -27,7 +27,7 @@ func removeCmd() *cobra.Command {
 	return c
 }
 
-func remove(ctx context.Context, cfg *viper.Viper, _ []string) error {
+func unpublish(ctx context.Context, cfg *viper.Viper, _ []string) error {
 	log.Info(ctx, "GLCI", "version", version)
 
 	g, err := glci.New(cfg.AllSettings())
@@ -44,7 +44,7 @@ func remove(ctx context.Context, cfg *viper.Viper, _ []string) error {
 		_ = stop()
 	}()
 
-	err = g.Publisher.Remove(ctx, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
+	err = g.Publisher.Unpublish(ctx, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
 	if err != nil {
 		return err
 	}

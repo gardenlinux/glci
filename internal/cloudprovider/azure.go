@@ -1086,7 +1086,7 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 	return nil
 }
 
-func (p *azure) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *azure) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}

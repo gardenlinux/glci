@@ -569,7 +569,7 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	return nil
 }
 
-func (p *aliyun) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}

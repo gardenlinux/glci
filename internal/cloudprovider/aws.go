@@ -914,7 +914,7 @@ func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, chin
 	return nil
 }
 
-func (p *awsTarget) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
