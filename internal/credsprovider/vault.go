@@ -25,15 +25,6 @@ import (
 func init() {
 	env.Clean("VAULT_")
 
-	registerCredsSource(func() CredsSource {
-		return &vault{
-			activeCreds:   make(map[CredsID]vaultCreds),
-			activeSecrets: make(map[string]vaultSecret),
-			events:        make(chan vaultWatchEvent),
-			closeCh:       make(chan struct{}),
-			errCh:         make(chan struct{}),
-		}
-	})
 	module.RegisterImpl(Category, "Vault", func(b *module.Base) CredsSource {
 		return &vault{
 			base:          b,
@@ -113,15 +104,6 @@ func (p *vault) ensureNoError() error {
 
 func (p *vault) isConfigured() bool {
 	return p.credsCfg.Server != ""
-}
-
-func (p *vault) SetCredsConfig(ctx context.Context, cfg map[string]any) error {
-	err := p.Configure(cfg)
-	if err != nil {
-		return err
-	}
-
-	return p.Start(ctx)
 }
 
 func (p *vault) maintain(ctx context.Context) error {
@@ -648,10 +630,6 @@ func (p *vault) Start(ctx context.Context) error {
 }
 
 func (p *vault) Stop() error {
-	return p.Close()
-}
-
-func (p *vault) Close() error {
 	p.closeMtx.Lock()
 	defer p.closeMtx.Unlock()
 

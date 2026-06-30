@@ -14,19 +14,14 @@ import (
 //nolint:gochecknoglobals // Required for automatic registration.
 var Category = module.NewCategory[CredsSource]()
 
-//nolint:gochecknoglobals // Required for automatic registration.
-var sources = make(map[string]newCredsSourceFunc)
-
 // CredsSource is a source of credentials.
 type CredsSource interface {
 	module.Module
 
 	Type() string
-	SetCredsConfig(ctx context.Context, config map[string]any) error
 	AcquireCreds(ctx context.Context, id CredsID, updated UpdatedFunc) error
 	AcquireValidatedCreds(ctx context.Context, id CredsID, validate ValidateFunc, updated UpdatedFunc) error
 	ReleaseCreds(id CredsID)
-	Close() error
 }
 
 // CredsID is an identifier consisting of the type of credential and the specific configuration within that type.
@@ -41,22 +36,6 @@ type ValidateFunc func(ctx context.Context, creds map[string]any) (bool, error)
 
 // UpdatedFunc is a callback function that is invoked when credentials are updated.
 type UpdatedFunc func(ctx context.Context, creds map[string]any) error
-
-// NewCredsSource returns a new CredsSource of a given type.
-func NewCredsSource(typ string) (CredsSource, error) {
-	nf, ok := sources[typ]
-	if !ok {
-		return nil, fmt.Errorf("credentialss source %s is not supported", typ)
-	}
-
-	return nf(), nil
-}
-
-type newCredsSourceFunc func() CredsSource
-
-func registerCredsSource(nf newCredsSourceFunc) {
-	sources[nf().Type()] = nf
-}
 
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)

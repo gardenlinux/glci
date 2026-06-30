@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-viper/mapstructure/v2"
 
-	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/parallel"
@@ -28,36 +27,15 @@ type (
 //nolint:gochecknoglobals // Required for automatic registration.
 var Category = module.NewCategory[StatePersistor]()
 
-//nolint:gochecknoglobals // Required for automatic registration.
-var persistors = make(map[string]newStatePersistorFunc)
-
 // StatePersistor is anything that can load and save task state.
 type StatePersistor interface {
 	module.Module
 
 	Type() string
-	SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any) error
 	SetID(id string)
 	Load() ([]byte, error)
 	Save(state []byte) error
 	Clear() error
-	Close() error
-}
-
-// NewStatePersistor returns a new StatePersistor of a given type.
-func NewStatePersistor(typ string) (StatePersistor, error) {
-	nf, ok := persistors[typ]
-	if !ok {
-		return nil, fmt.Errorf("state persistor %s is not supported", typ)
-	}
-
-	return nf(), nil
-}
-
-type newStatePersistorFunc func() StatePersistor
-
-func registerStatePersistor(nf newStatePersistorFunc) {
-	persistors[nf().Type()] = nf
 }
 
 type taskSet struct {

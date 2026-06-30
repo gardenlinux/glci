@@ -31,9 +31,6 @@ const (
 
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
-	registerOCMTarget(func() OCMTarget {
-		return &oci{}
-	})
 	module.RegisterImpl(OCMTargetCategory, "OCI", func(b *module.Base) OCMTarget {
 		return &oci{
 			base: b,
@@ -62,17 +59,6 @@ type ociOCMConfig struct {
 
 func (p *oci) isConfigured() bool {
 	return p.repo != nil
-}
-
-func (p *oci) SetOCMConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
-	p.credsSource = credsSource
-
-	err := p.Configure(cfg)
-	if err != nil {
-		return err
-	}
-
-	return p.Start(ctx)
 }
 
 type ociCredentials struct {
@@ -286,10 +272,6 @@ func (p *oci) Configure(rawCfg map[string]any) error {
 		return errors.New("missing repository")
 	}
 
-	if p.base == nil {
-		return nil
-	}
-
 	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
@@ -316,10 +298,6 @@ func (p *oci) Start(ctx context.Context) error {
 }
 
 func (p *oci) Stop() error {
-	return p.Close()
-}
-
-func (p *oci) Close() error {
 	if p.ociCfg.Config != "" {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType()),
