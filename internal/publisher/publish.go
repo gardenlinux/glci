@@ -1,4 +1,4 @@
-package glci
+package publisher
 
 import (
 	"context"
@@ -6,52 +6,34 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
-	"github.com/gardenlinux/glci/internal/credsprovider"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ocm"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
-// Publish publishes a release to all cloud providers specified in the flavors and publishing configurations.
-func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, aliasesConfig AliasesConfig, version,
-	commit string, omitComponentDescritpr bool,
-) error {
+// Publish publishes a release to all configured cloud providers.
+func (p *Publisher) Publish(ctx context.Context, version, commit string, omitComponentDescritpr bool) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
-	log.Debug(ctx, "Loading configuration")
-	credsSource, manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadConfig(ctx, publishingConfig)
-	if err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
-	}
-	defer func() {
-		_ = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
-		_ = manifestSource.Close()
-		_ = manifestTarget.Close()
-	}()
-	ctx = task.WithStatePersistor(ctx, state, id(version, commit))
-
-	err = publish(ctx, flavorsConfig, aliasesConfig, credsSource, manifestSource, manifestTarget, sources, targets, ocmTarget, state,
-		version, commit, omitComponentDescritpr)
-	perr := task.PersistorError(ctx)
-	if perr != nil {
+	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
+	err := p.publish(ctx, version, commit, omitComponentDescritpr)
+	stateErr := task.PersistorError(ctx)
+	if stateErr != nil {
 		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
 		if err == nil {
-			err = perr
+			err = stateErr
 		}
 	}
 	return err
 }
 
-func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig AliasesConfig, credsSource credsprovider.CredsSource,
-	manifestSource, manifestTarget cloudprovider.ArtifactSource, sources map[string]cloudprovider.ArtifactSource,
-	targets []cloudprovider.PublishingTarget, ocmTarget cloudprovider.OCMTarget, state task.StatePersistor, version, commit string,
-	omitComponentDescritpr bool,
-) error {
-	rollbackHandlers := make([]task.RollbackHandler, 0, len(targets))
-	for _, target := range targets {
+func (p *Publisher) publish(ctx context.Context, version, commit string, omitComponentDescritpr bool) error {
+	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
+	for _, target := range p.targets {
 		rollbackHandlers = append(rollbackHandlers, target)
 	}
 	err := task.Rollback(ctx, rollbackHandlers)
@@ -59,18 +41,18 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 		return fmt.Errorf("cannot roll back: %w", err)
 	}
 
-	glciVer := glciVersion(ctx)
+	glciVer := cli.Version(ctx)
 
-	publications := make([]cloudprovider.Publication, len(flavorsConfig.Flavors))
+	publications := make([]cloudprovider.Publication, len(p.flavors))
 	expandCommit := sync.Once{}
 	fetchManifests := parallel.NewActivitySync(ctx)
-	for i, flavor := range flavorsConfig.Flavors {
+	for i, flavor := range p.flavors {
 		fetchManifests.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
 			ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
 			log.Info(ctx, "Retrieving manifest")
-			manifest, er := cloudprovider.GetManifest(ctx, manifestSource, manifestKey)
+			manifest, er := cloudprovider.GetManifest(ctx, p.manifestSource, manifestKey)
 			if er != nil {
 				return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, er)
 			}
@@ -85,8 +67,8 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			})
 
 			log.Debug(ctx, "Retrieving target manifest")
-			var targetManifest *gl.Manifest
-			targetManifest, er = cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
+			var targetManifest *gardenlinux.Manifest
+			targetManifest, er = cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
 			_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
 			if er != nil && !ok {
 				return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavor.Cname, er)
@@ -103,7 +85,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 				manifest = targetManifest
 			}
 
-			for _, target := range targets {
+			for _, target := range p.targets {
 				if target.CanPublish(manifest) {
 					return func() error {
 						publications[i] = cloudprovider.Publication{
@@ -126,7 +108,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 	}
 
 	var descriptor *ocm.ComponentDescriptor
-	descriptor, err = ocm.BuildComponentDescriptor(ctx, manifestSource, publications, ocmTarget, aliasesConfig, glciVer, version, commit)
+	descriptor, err = ocm.BuildComponentDescriptor(ctx, p.manifestSource, publications, p.ocmTarget, p.aliases, glciVer, version, commit)
 	if err != nil {
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
@@ -137,7 +119,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 		publishPublications.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
-			uptime := execTime(ctx)
+			uptime := cli.ExecTime(ctx)
 			if uptime != 0 && uptime.Hours() > 5 {
 				return errors.New("publishing taking too long, restart GLCI to resume")
 			}
@@ -153,8 +135,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, publication.Cname), true), publication.Target.CanRollback())
 
 			log.Info(ctx, "Publishing image")
-			publication.Manifest.PublishedImageMetadata, er = publication.Target.Publish(ctx, publication.Cname, publication.Manifest,
-				sources)
+			publication.Manifest.PublishedImageMetadata, er = publication.Target.Publish(ctx, publication.Cname, publication.Manifest)
 			if er != nil {
 				return fmt.Errorf("cannot publish %s to %s: %w", publication.Cname, publication.Target.Type(), er)
 			}
@@ -166,7 +147,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			log.Info(ctx, "Updating manifest")
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
 			task.RemoveCompleted(ctx, publication.Cname)
-			er = cloudprovider.PutManifest(ctx, manifestTarget, manifestKey, publication.Manifest)
+			er = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, publication.Manifest)
 			if er != nil {
 				return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, er)
 			}
@@ -181,9 +162,9 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 	}
 
 	task.Clear(ctx)
-	perr := task.PersistorError(ctx)
-	if perr != nil {
-		return fmt.Errorf("cannot maintain state: %w", perr)
+	stateErr := task.PersistorError(ctx)
+	if stateErr != nil {
+		return fmt.Errorf("cannot maintain state: %w", stateErr)
 	}
 
 	if !omitComponentDescritpr {
@@ -199,20 +180,18 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			return fmt.Errorf("invalid component descriptor: %w", err)
 		}
 
-		ctx = log.WithValues(ctx, "ocmRepoBase", ocmTarget.OCMRepositoryBase())
+		ctx = log.WithValues(ctx, "ocmRepoBase", p.ocmTarget.OCMRepositoryBase())
 		log.Info(ctx, "Publishing component descriptor")
-		err = ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
+		err = p.ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
 		if err != nil {
 			return fmt.Errorf("cannot publish component descriptor: %w", err)
 		}
 	}
 
-	log.Debug(ctx, "Closing sources and targets")
-	err = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
-	if err != nil {
-		return fmt.Errorf("cannot close sources and targets: %w", err)
-	}
-
 	log.Info(ctx, "Publishing completed successfully")
 	return nil
+}
+
+func id(version, commit string) string {
+	return fmt.Sprintf("%s-%.8s", version, commit)
 }

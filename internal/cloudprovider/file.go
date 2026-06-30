@@ -8,12 +8,18 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	registerOCMTarget(func() OCMTarget {
 		return &file{}
+	})
+	module.RegisterImpl(OCMTargetCategory, "File", func(b *module.Base) OCMTarget {
+		return &file{
+			base: b,
+		}
 	})
 }
 
@@ -22,6 +28,8 @@ func (*file) Type() string {
 }
 
 type file struct {
+	base *module.Base
+
 	fileCfg fileOCMConfig
 }
 
@@ -35,12 +43,7 @@ func (p *file) isConfigured() bool {
 }
 
 func (p *file) SetOCMConfig(_ context.Context, _ credsprovider.CredsSource, cfg map[string]any) error {
-	err := parseConfig(cfg, &p.fileCfg)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return p.Configure(cfg)
 }
 
 func (*file) OCMType() string {
@@ -72,6 +75,27 @@ func (p *file) PublishComponentDescriptor(ctx context.Context, _ string, descrip
 	}
 
 	return nil
+}
+
+func (p *file) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.fileCfg)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (*file) Configurables() []module.Configurable {
+	return nil
+}
+
+func (*file) Start(_ context.Context) error {
+	return nil
+}
+
+func (p *file) Stop() error {
+	return p.Close()
 }
 
 func (*file) Close() error {

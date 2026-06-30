@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/gardenlinux/glci/internal/cmd"
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/glci"
 	"github.com/gardenlinux/glci/internal/log"
 )
@@ -16,7 +17,7 @@ func removeCmd() *cobra.Command {
 		Use:   "remove",
 		Short: "remove a Garden Linux release from cloud providers",
 		Args:  cobra.NoArgs,
-		RunE:  cmd.RunFunc(remove),
+		RunE:  cli.RunFunc(remove),
 	}
 
 	c.Flags().StringP("version", "v", "", "release version")
@@ -26,13 +27,27 @@ func removeCmd() *cobra.Command {
 	return c
 }
 
-func remove(ctx context.Context, cfg *viper.Viper) error {
+func remove(ctx context.Context, cfg *viper.Viper, _ []string) error {
 	log.Info(ctx, "GLCI", "version", version)
 
-	flavorsCfg, publishingCfg, _, err := loadConfig(ctx, cfg)
+	g, err := glci.New(cfg.AllSettings())
 	if err != nil {
 		return err
 	}
 
-	return glci.Remove(ctx, flavorsCfg, publishingCfg, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
+	var stop func() error
+	stop, err = g.Start(ctx, g.Publisher)
+	if err != nil {
+		return fmt.Errorf("cannot start publisher: %w", err)
+	}
+	defer func() {
+		_ = stop()
+	}()
+
+	err = g.Publisher.Remove(ctx, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("steamroll"))
+	if err != nil {
+		return err
+	}
+
+	return stop()
 }

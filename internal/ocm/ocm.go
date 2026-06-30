@@ -11,14 +11,14 @@ import (
 	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 const (
 	componentProvider = "SAP SE"
-	githubRepoURL     = "https://" + gl.GardenLinuxRepo
+	githubRepoURL     = "https://" + gardenlinux.GardenLinuxRepo
 )
 
 // ComponentDescriptor is an OCM data structure that Gardener consumes.
@@ -116,7 +116,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			ConfiguredVersion: "v2",
 		},
 		Component: componentDescriptorComponent{
-			Name:    gl.GardenLinuxRepo,
+			Name:    gardenlinux.GardenLinuxRepo,
 			Version: version,
 			Labels: []componentDescriptorlabel{
 				{
@@ -179,13 +179,13 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	}
 
 	for i, publication := range publications {
-		var imagePath gl.S3ReleaseFile
+		var imagePath gardenlinux.S3ReleaseFile
 		imagePath, err = publication.Manifest.PathBySuffix(publication.Target.ImageSuffix())
 		if err != nil {
 			return nil, fmt.Errorf("missing image for %s: %w", publication.Cname, err)
 		}
 
-		var rootfsPath gl.S3ReleaseFile
+		var rootfsPath gardenlinux.S3ReleaseFile
 		rootfsPath, err = publication.Manifest.PathBySuffix(".tar")
 		if err != nil {
 			return nil, fmt.Errorf("missing rootfs for %s: %w", publication.Cname, err)
@@ -280,7 +280,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	return descriptor, nil
 }
 
-func getPackages(ctx context.Context, source cloudprovider.ArtifactSource, manifest *gl.Manifest) ([]nameVersion, error) {
+func getPackages(ctx context.Context, source cloudprovider.ArtifactSource, manifest *gardenlinux.Manifest) ([]nameVersion, error) {
 	log.Debug(ctx, "Getting packages")
 
 	manifestPath, err := manifest.PathBySuffix(".manifest")

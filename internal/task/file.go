@@ -7,12 +7,18 @@ import (
 	"os"
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
+	"github.com/gardenlinux/glci/internal/module"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	registerStatePersistor(func() StatePersistor {
 		return &file{}
+	})
+	module.RegisterImpl(Category, "File", func(b *module.Base) StatePersistor {
+		return &file{
+			base: b,
+		}
 	})
 }
 
@@ -21,6 +27,8 @@ func (*file) Type() string {
 }
 
 type file struct {
+	base *module.Base
+
 	key string
 }
 
@@ -28,7 +36,7 @@ func (p *file) isConfigured() bool {
 	return p.key != ""
 }
 
-func (*file) SetStateConfig(_ context.Context, _ credsprovider.CredsSource, _ any) error {
+func (*file) SetStateConfig(_ context.Context, _ credsprovider.CredsSource, _ map[string]any) error {
 	return nil
 }
 
@@ -76,6 +84,22 @@ func (p *file) Clear() error {
 	}
 
 	return nil
+}
+
+func (*file) Configure(_ map[string]any) error {
+	return nil
+}
+
+func (*file) Configurables() []module.Configurable {
+	return nil
+}
+
+func (*file) Start(_ context.Context) error {
+	return nil
+}
+
+func (p *file) Stop() error {
+	return p.Close()
 }
 
 func (*file) Close() error {

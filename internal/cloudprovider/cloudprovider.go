@@ -11,9 +11,25 @@ import (
 	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
+	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/task"
 )
+
+// ArtifactSourceCategory is the module framework registry for ArtifactSource implementations.
+//
+//nolint:gochecknoglobals // Required for automatic registration.
+var ArtifactSourceCategory = module.NewCategory[ArtifactSource]()
+
+// PublishingTargetCategory is the module framework registry for PublishingTarget implementations.
+//
+//nolint:gochecknoglobals // Required for automatic registration.
+var PublishingTargetCategory = module.NewCategory[PublishingTarget]()
+
+// OCMTargetCategory is the module framework registry for OCMTarget implementations.
+//
+//nolint:gochecknoglobals // Required for automatic registration.
+var OCMTargetCategory = module.NewCategory[OCMTarget]()
 
 //nolint:gochecknoglobals // Required for automatic registration.
 var (
@@ -24,6 +40,8 @@ var (
 
 // ArtifactSource is a source of artifacts which can retrieve arbitrary objects as well as retrieve and publish manifests.
 type ArtifactSource interface {
+	module.Module
+
 	Type() string
 	SetSourceConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any) error
 	Repository() string
@@ -51,7 +69,7 @@ func registerArtifactSource(nf newArtifactSourceFunc) {
 }
 
 // GetManifest retrieves a manifest from an artifact source.
-func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gl.Manifest, error) {
+func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gardenlinux.Manifest, error) {
 	body, err := source.GetObject(ctx, key)
 	if err != nil {
 		return nil, err
@@ -66,7 +84,7 @@ func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gl.Ma
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	manifest := &gl.Manifest{}
+	manifest := &gardenlinux.Manifest{}
 	var decoder *mapstructure.Decoder
 	decoder, err = mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		Result:  manifest,
@@ -89,7 +107,7 @@ func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gl.Ma
 }
 
 // PutManifest stores a manifest into an ArtifactSource.
-func PutManifest(ctx context.Context, source ArtifactSource, key string, manifest *gl.Manifest) error {
+func PutManifest(ctx context.Context, source ArtifactSource, key string, manifest *gardenlinux.Manifest) error {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	defer func() {
@@ -110,14 +128,16 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 
 // PublishingTarget is a target onto which GLCI can publish Garden Linux images.
 type PublishingTarget interface {
+	module.Module
+
 	Type() string
 	SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any,
 		sources map[string]ArtifactSource) error
 	ImageSuffix() string
-	CanPublish(manifest *gl.Manifest) bool
-	IsPublished(manifest *gl.Manifest) (bool, error)
-	Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error)
-	Remove(ctx context.Context, manifest *gl.Manifest, sources map[string]ArtifactSource, steamroll bool) error
+	CanPublish(manifest *gardenlinux.Manifest) bool
+	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
+	Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
+	Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	Close() error
 	task.RollbackHandler
 }
@@ -159,7 +179,7 @@ func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
 	return output, nil
 }
 
-func publishingOutputFromManifest[PUBOUT any](manifest *gl.Manifest) (PUBOUT, error) {
+func publishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest) (PUBOUT, error) {
 	output, err := publishingOutput[PUBOUT](manifest.PublishedImageMetadata)
 	if err != nil {
 		return output, fmt.Errorf("invalid published image metadata in manifest: %w", err)
@@ -170,6 +190,8 @@ func publishingOutputFromManifest[PUBOUT any](manifest *gl.Manifest) (PUBOUT, er
 
 // OCMTarget is a target onto which GLCI can publish an OCM component descriptor.
 type OCMTarget interface {
+	module.Module
+
 	Type() string
 	SetOCMConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any) error
 	OCMType() string
@@ -197,7 +219,7 @@ func registerOCMTarget(nf newOCMTargetFunc) {
 // Publication represents the act of publishing an image including what is being published where and what the result is.
 type Publication struct {
 	Cname    string
-	Manifest *gl.Manifest
+	Manifest *gardenlinux.Manifest
 	Target   PublishingTarget
 }
 

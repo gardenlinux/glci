@@ -1,8 +1,9 @@
-package log //nolint:revive // The package name is perfectly fine.
+package log //nolint:revive,nolintlint // The package name is perfectly fine.
 
 import (
 	"context"
 	"io"
+	"os"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zerologr"
@@ -41,7 +42,7 @@ func Info(ctx context.Context, msg string, keysAndValues ...any) {
 	logr.FromContextOrDiscard(ctx).Info(msg, keysAndValues...)
 }
 
-// Debug logs a debug message that shouldn'e be necessary under normal circumstances.
+// Debug logs a debug message that is not necessary under normal circumstances.
 func Debug(ctx context.Context, msg string, keysAndValues ...any) {
 	logr.FromContextOrDiscard(ctx).V(1).Info(msg, keysAndValues...)
 }
@@ -54,4 +55,13 @@ func Error(ctx context.Context, err error, keysAndValues ...any) {
 // ErrorMsg logs a message with the severity of an error.
 func ErrorMsg(ctx context.Context, msg string, keysAndValues ...any) {
 	logr.FromContextOrDiscard(ctx).Error(nil, msg, keysAndValues...)
+}
+
+// ErrorAnyway logs an error using the context's logger if available, falling back to stderr.
+func ErrorAnyway(ctx context.Context, err error, keysAndValues ...any) {
+	logger := logr.FromContextOrDiscard(ctx)
+	if logger.GetSink() == nil {
+		logger = zerologr.New(new(zerolog.New(os.Stderr).Level(zerolog.ErrorLevel)))
+	}
+	logger.Error(err, "", keysAndValues...)
 }

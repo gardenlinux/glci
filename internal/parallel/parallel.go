@@ -18,7 +18,7 @@ func WithInlineMode(ctx context.Context, inline bool) context.Context {
 	return context.WithValue(ctx, ctxkInline{}, inline)
 }
 
-// Activity is a parallel activity that can swawn goroutines and wait for them.
+// Activity is a parallel activity that can spawn goroutines and wait for them.
 type Activity interface {
 	Go(f ActivityFunc)
 	Wait() error
@@ -70,7 +70,7 @@ func (a *parallelActivity) Go(f ActivityFunc) {
 }
 
 func (a *parallelActivity) Wait() error {
-	return printErrs(a.ctx, a.exec.Wait())
+	return reportErrs(a.ctx, a.exec.Wait())
 }
 
 type inlineActivity struct {
@@ -87,10 +87,10 @@ func (a *inlineActivity) Go(f ActivityFunc) {
 }
 
 func (a *inlineActivity) Wait() error {
-	return printErrs(a.ctx, parallel.CombineErrors(a.errs...))
+	return reportErrs(a.ctx, parallel.CombineErrors(a.errs...))
 }
 
-// ActivitySync is a parallel activity that can swawn goroutines, sync them, and wait for them.
+// ActivitySync is a parallel activity that can spawn goroutines, sync them, and wait for them.
 type ActivitySync interface {
 	Go(f ActivitySyncFunc)
 	Wait() error
@@ -155,7 +155,7 @@ func (a *parallelActivitySync) Go(f ActivitySyncFunc) {
 }
 
 func (a *parallelActivitySync) Wait() error {
-	return printErrs(a.ctx, a.exec.Wait())
+	return reportErrs(a.ctx, a.exec.Wait())
 }
 
 type inlineActivitySync struct {
@@ -180,10 +180,10 @@ func (a *inlineActivitySync) Go(f ActivitySyncFunc) {
 }
 
 func (a *inlineActivitySync) Wait() error {
-	return printErrs(a.ctx, parallel.CombineErrors(a.errs...))
+	return reportErrs(a.ctx, parallel.CombineErrors(a.errs...))
 }
 
-func printErrs(ctx context.Context, err error) error {
+func reportErrs(ctx context.Context, err error) error {
 	if err != nil {
 		terr, ok := errors.AsType[parallel.MultiError](err)
 		if ok {

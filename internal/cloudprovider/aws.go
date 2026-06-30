@@ -24,8 +24,9 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
@@ -37,24 +38,51 @@ func init() {
 	env.Clean("_X_AMZN_")
 
 	registerArtifactSource(func() ArtifactSource {
-		return &aws{}
+		return &awsSource{}
+	})
+	module.RegisterImpl(ArtifactSourceCategory, "AWS", func(b *module.Base) ArtifactSource {
+		return &awsSource{
+			base: b,
+		}
 	})
 
 	registerPublishingTarget(func() PublishingTarget {
-		return &aws{}
+		return &awsTarget{}
+	})
+	module.RegisterImpl(PublishingTargetCategory, "AWS", func(b *module.Base) PublishingTarget {
+		return &awsTarget{
+			base: b,
+		}
 	})
 }
 
-func (*aws) Type() string {
+func (*awsSource) Type() string {
 	return "AWS"
 }
 
-type aws struct {
-	srcCfg            awsSourceConfig
+func (*awsTarget) Type() string {
+	return "AWS"
+}
+
+type awsSource struct {
+	base *module.Base
+
+	credsSource credsprovider.CredsSource
+
+	srcCfg      awsSourceConfig
+	clientsMtx  sync.RWMutex
+	srcS3Client *s3.Client
+}
+
+type awsTarget struct {
+	base *module.Base
+
+	credsSource credsprovider.CredsSource
+	source      ArtifactSource
+	sourceChina ArtifactSource
+
 	pubCfg            awsPublishingConfig
-	credsSource       credsprovider.CredsSource
 	clientsMtx        sync.RWMutex
-	srcS3Client       *s3.Client
 	tgtEC2Client      *ec2.Client
 	tgtEC2ClientChina *ec2.Client
 	regions           []string
@@ -86,122 +114,47 @@ type awsImageTags struct {
 	StaticTags                   map[string]string `mapstructure:"static_tags,omitempty"`
 }
 
-func (p *aws) isConfigured() bool {
+func (p *awsTarget) isConfigured() bool {
 	ec2Client := p.tgtClients(false)
 
 	return ec2Client != nil
 }
 
-func (p *aws) SetSourceConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
+func (p *awsSource) SetSourceConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.srcCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.srcCfg.Config == "":
-		return errors.New("missing config")
-	case p.srcCfg.Region == "":
-		return errors.New("missing region")
-	case p.srcCfg.Bucket == "":
-		return errors.New("missing bucket")
-	}
-
-	credsType := p.Type()
-	if strings.HasPrefix(p.srcCfg.Region, "cn-") {
-		credsType += "_china"
-	}
-
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   credsType,
-		Config: p.srcCfg.Config,
-		Role:   "source",
-	}, p.createSrcClients)
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.srcCfg.Config, err)
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
-func (p *aws) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
+func (p *awsTarget) SetTargetConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any,
 	sources map[string]ArtifactSource,
 ) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.pubCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.pubCfg.Source == "":
-		return errors.New("missing source")
-	case p.pubCfg.Config == "":
-		return errors.New("missing config")
-	case p.pubCfg.Region == "":
-		return errors.New("missing region")
-	}
-
-	_, ok := sources[p.pubCfg.Source]
+	var ok bool
+	p.source, ok = sources[p.pubCfg.Source]
 	if !ok {
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	if len(p.pubCfg.Regions) > 0 {
-		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
-			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
+	if p.pubCfg.SourceChina != "" {
+		p.sourceChina, ok = sources[p.pubCfg.SourceChina]
+		if !ok {
+			return fmt.Errorf("unknown source %s", p.pubCfg.SourceChina)
 		}
 	}
 
-	if p.pubCfg.ConfigChina != "" {
-		if p.pubCfg.RegionChina == "" {
-			return errors.New("missing region")
-		}
-
-		if p.pubCfg.SourceChina != "" {
-			_, ok = sources[p.pubCfg.SourceChina]
-			if !ok {
-				return fmt.Errorf("unknown source %s", p.pubCfg.SourceChina)
-			}
-		}
-
-		if len(p.pubCfg.RegionsChina) > 0 {
-			if !slices.Contains(p.pubCfg.RegionsChina, p.pubCfg.RegionChina) {
-				return fmt.Errorf("region %s missing from list of regions", p.pubCfg.RegionChina)
-			}
-		}
-
-		p.enableChina = true
-	}
-
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   p.Type(),
-		Config: p.pubCfg.Config,
-		Role:   "target",
-	}, func(ctx context.Context, creds map[string]any) error {
-		return p.createTgtClients(ctx, creds, false)
-	})
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
-	}
-
-	if p.enableChina {
-		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type() + "_china",
-			Config: p.pubCfg.ConfigChina,
-			Role:   "target",
-		}, func(ctx context.Context, creds map[string]any) error {
-			return p.createTgtClients(ctx, creds, true)
-		})
-		if err != nil {
-			return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.ConfigChina, err)
-		}
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
 type awsTaskState struct {
@@ -229,7 +182,7 @@ type awsCredentials struct {
 	SessionToken string `mapstructure:"session_token"`
 }
 
-func (p *aws) createSrcClients(ctx context.Context, rawCreds map[string]any) error {
+func (p *awsSource) createSrcClients(ctx context.Context, rawCreds map[string]any) error {
 	var creds awsCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
@@ -255,7 +208,7 @@ func (p *aws) createSrcClients(ctx context.Context, rawCreds map[string]any) err
 	return nil
 }
 
-func (p *aws) createTgtClients(ctx context.Context, rawCreds map[string]any, china bool) error {
+func (p *awsTarget) createTgtClients(ctx context.Context, rawCreds map[string]any, china bool) error {
 	var creds awsCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
@@ -320,7 +273,7 @@ func (p *aws) createTgtClients(ctx context.Context, rawCreds map[string]any, chi
 	return nil
 }
 
-func (*aws) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, error) {
+func (*awsTarget) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, error) {
 	log.Debug(ctx, "Listing available regions")
 	r, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
 	if err != nil {
@@ -344,14 +297,14 @@ func overrideRegion(region string) func(o *ec2.Options) {
 	}
 }
 
-func (p *aws) srcClients() *s3.Client {
+func (p *awsSource) srcClients() *s3.Client {
 	p.clientsMtx.RLock()
 	defer p.clientsMtx.RUnlock()
 
 	return p.srcS3Client
 }
 
-func (p *aws) tgtClients(china bool) *ec2.Client {
+func (p *awsTarget) tgtClients(china bool) *ec2.Client {
 	p.clientsMtx.RLock()
 	defer p.clientsMtx.RUnlock()
 
@@ -362,30 +315,30 @@ func (p *aws) tgtClients(china bool) *ec2.Client {
 	return p.tgtEC2Client
 }
 
-func (*aws) ImageSuffix() string {
+func (*awsTarget) ImageSuffix() string {
 	return ".raw"
 }
 
-func (*aws) imageName(cname, version, committish string) string {
+func (*awsTarget) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
-func (*aws) architecture(arch gl.Architecture) (ec2types.ArchitectureValues, error) {
+func (*awsTarget) architecture(arch gardenlinux.Architecture) (ec2types.ArchitectureValues, error) {
 	switch arch {
-	case gl.ArchitectureAMD64:
+	case gardenlinux.ArchitectureAMD64:
 		return ec2types.ArchitectureValuesX8664, nil
-	case gl.ArchitectureARM64:
+	case gardenlinux.ArchitectureARM64:
 		return ec2types.ArchitectureValuesArm64, nil
 	default:
 		return "", fmt.Errorf("unknown architecture %s", arch)
 	}
 }
 
-func (p *aws) Repository() string {
+func (p *awsSource) Repository() string {
 	return p.srcCfg.Bucket
 }
 
-func (p *aws) GetObjectURL(ctx context.Context, key string) (string, error) {
+func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error) {
 	s3Client := p.srcClients()
 
 	if s3Client == nil {
@@ -408,7 +361,7 @@ func (p *aws) GetObjectURL(ctx context.Context, key string) (string, error) {
 	return presigned.URL, nil
 }
 
-func (p *aws) GetObjectSize(ctx context.Context, key string) (int64, error) {
+func (p *awsSource) GetObjectSize(ctx context.Context, key string) (int64, error) {
 	s3Client := p.srcClients()
 
 	if s3Client == nil {
@@ -438,7 +391,7 @@ func (p *aws) GetObjectSize(ctx context.Context, key string) (int64, error) {
 	return *r.ContentLength, nil
 }
 
-func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+func (p *awsSource) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	s3Client := p.srcClients()
 
 	if s3Client == nil {
@@ -465,7 +418,7 @@ func (p *aws) GetObject(ctx context.Context, key string) (io.ReadCloser, error) 
 	return r.Body, nil
 }
 
-func (p *aws) PutObject(ctx context.Context, key string, object io.Reader) error {
+func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader) error {
 	s3Client := p.srcClients()
 
 	if s3Client == nil {
@@ -488,7 +441,7 @@ func (p *aws) PutObject(ctx context.Context, key string, object io.Reader) error
 	return nil
 }
 
-func (p *aws) CanPublish(manifest *gl.Manifest) bool {
+func (p *awsTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
 	if !p.isConfigured() {
 		return false
 	}
@@ -496,7 +449,7 @@ func (p *aws) CanPublish(manifest *gl.Manifest) bool {
 	return manifest.Platform == "aws"
 }
 
-func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
+func (p *awsTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
@@ -509,8 +462,7 @@ func (p *aws) IsPublished(manifest *gl.Manifest) (bool, error) {
 	return len(awsOutput.Images) > 0, nil
 }
 
-func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput, error,
-) {
+func (p *awsTarget) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
@@ -523,12 +475,9 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
 	}
 
-	source := sources[p.pubCfg.Source]
-	ctx = log.WithValues(ctx, "sourceType", source.Type(), "sourceRepo", source.Repository())
-	sourceChina := source
+	ctx = log.WithValues(ctx, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
 	if p.pubCfg.SourceChina != "" {
-		sourceChina = sources[p.pubCfg.SourceChina]
-		ctx = log.WithValues(ctx, "sourceChinaType", sourceChina.Type(), "sourceChinaRepo", sourceChina.Repository())
+		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
 	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
@@ -546,7 +495,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 
 	var requireUEFI, secureBoot bool
 	var uefiData *string
-	requireUEFI, secureBoot, uefiData, err = p.prepareSecureBoot(ctx, source, manifest)
+	requireUEFI, secureBoot, uefiData, err = p.prepareSecureBoot(ctx, p.source, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("cannot prepare secureboot: %w", err)
 	}
@@ -559,7 +508,7 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
-		images, er := p.publish(ctx, source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, false)
+		images, er := p.publish(ctx, p.source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, false)
 		if er != nil {
 			return nil, er
 		}
@@ -574,7 +523,12 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 		publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			ctx = log.WithValues(ctx, "cloud", "china")
 
-			images, er := p.publish(ctx, sourceChina, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, true)
+			source := p.sourceChina
+			if source == nil {
+				source = p.source
+			}
+
+			images, er := p.publish(ctx, source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, true)
 			if er != nil {
 				return nil, er
 			}
@@ -596,8 +550,8 @@ func (p *aws) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}, nil
 }
 
-func (p *aws) publish(ctx context.Context, source ArtifactSource, key, image string, tags []ec2types.Tag, arch ec2types.ArchitectureValues,
-	requireUEFI bool, uefiData *string, china bool,
+func (p *awsTarget) publish(ctx context.Context, source ArtifactSource, key, image string, tags []ec2types.Tag,
+	arch ec2types.ArchitectureValues, requireUEFI bool, uefiData *string, china bool,
 ) ([]awsPublishedImage, error) {
 	cld := "public"
 	region := p.pubCfg.Region
@@ -689,7 +643,7 @@ func (p *aws) publish(ctx context.Context, source ArtifactSource, key, image str
 	return outputImages, nil
 }
 
-func (p *aws) prepareTags(manifest *gl.Manifest) []ec2types.Tag {
+func (p *awsTarget) prepareTags(manifest *gardenlinux.Manifest) []ec2types.Tag {
 	tags := make([]ec2types.Tag, 0, 2+len(p.pubCfg.ImageTags.StaticTags))
 
 	for k, v := range p.pubCfg.ImageTags.StaticTags {
@@ -716,7 +670,8 @@ func (p *aws) prepareTags(manifest *gl.Manifest) []ec2types.Tag {
 	return tags
 }
 
-func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, bool, *string, error) {
+func (*awsTarget) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gardenlinux.Manifest) (bool, bool, *string, error,
+) {
 	var uefiData *string
 
 	if manifest.SecureBoot {
@@ -747,7 +702,7 @@ func (*aws) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 	return manifest.RequireUEFI, manifest.SecureBoot, uefiData, nil
 }
 
-func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, image string, china bool) (string, error) {
+func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, key, image string, china bool) (string, error) {
 	bucket := source.Repository()
 	ctx = log.WithValues(ctx, "key", key)
 
@@ -820,7 +775,7 @@ func (p *aws) importSnapshot(ctx context.Context, source ArtifactSource, key, im
 	return snapshot, nil
 }
 
-func (p *aws) attachTags(ctx context.Context, obj string, tags []ec2types.Tag, china bool) error {
+func (p *awsTarget) attachTags(ctx context.Context, obj string, tags []ec2types.Tag, china bool) error {
 	ec2Client := p.tgtClients(china)
 
 	log.Debug(ctx, "Attaching tags", "object", obj)
@@ -835,7 +790,7 @@ func (p *aws) attachTags(ctx context.Context, obj string, tags []ec2types.Tag, c
 	return nil
 }
 
-func (p *aws) registerImage(ctx context.Context, snapshot, image string, arch ec2types.ArchitectureValues, requireUEFI bool,
+func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, arch ec2types.ArchitectureValues, requireUEFI bool,
 	uefiData *string, china bool,
 ) (string, error) {
 	params := ec2.RegisterImageInput{
@@ -884,7 +839,7 @@ func (p *aws) registerImage(ctx context.Context, snapshot, image string, arch ec
 	return imageID, nil
 }
 
-func (p *aws) copyImage(ctx context.Context, image, imageID, region, toRegion string, china bool) (string, error) {
+func (p *awsTarget) copyImage(ctx context.Context, image, imageID, region, toRegion string, china bool) (string, error) {
 	ec2Client := p.tgtClients(china)
 
 	log.Info(ctx, "Copying image")
@@ -909,7 +864,7 @@ func (p *aws) copyImage(ctx context.Context, image, imageID, region, toRegion st
 	return toImageID, nil
 }
 
-func (p *aws) waitForImage(ctx context.Context, imageID, region string, china bool) error {
+func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, china bool) error {
 	ec2Client := p.tgtClients(china)
 
 	var state ec2types.ImageState
@@ -937,7 +892,7 @@ func (p *aws) waitForImage(ctx context.Context, imageID, region string, china bo
 	return nil
 }
 
-func (p *aws) makePublic(ctx context.Context, imageID, region string, china bool) error {
+func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, china bool) error {
 	ec2Client := p.tgtClients(china)
 
 	log.Debug(ctx, "Adding launch permission to image")
@@ -959,7 +914,7 @@ func (p *aws) makePublic(ctx context.Context, imageID, region string, china bool
 	return nil
 }
 
-func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+func (p *awsTarget) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -994,7 +949,7 @@ func (p *aws) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]Ar
 	return deregisterImages.Wait()
 }
 
-func (p *aws) deregisterImage(ctx context.Context, imageID, region string, steamroll, china bool) error {
+func (p *awsTarget) deregisterImage(ctx context.Context, imageID, region string, steamroll, china bool) error {
 	ec2Client := p.tgtClients(china)
 
 	log.Info(ctx, "Deregistering image")
@@ -1027,7 +982,7 @@ func (p *aws) deregisterImage(ctx context.Context, imageID, region string, steam
 	return nil
 }
 
-func (p *aws) CanRollback() string {
+func (p *awsTarget) CanRollback() string {
 	if !p.isConfigured() {
 		return ""
 	}
@@ -1035,7 +990,7 @@ func (p *aws) CanRollback() string {
 	return "aws"
 }
 
-func (p *aws) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+func (p *awsTarget) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -1093,7 +1048,7 @@ func (p *aws) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 	return rollbackTasks.Wait()
 }
 
-func (p *aws) deleteSnapshotFromImportTask(ctx context.Context, importTaskID, region string, steamroll, china bool) error {
+func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTaskID, region string, steamroll, china bool) error {
 	ec2Client := p.tgtClients(china)
 
 	log.Debug(ctx, "Determining snapshot")
@@ -1141,7 +1096,7 @@ func (p *aws) deleteSnapshotFromImportTask(ctx context.Context, importTaskID, re
 	return p.deleteSnapshot(ctx, snapshot, region, steamroll, china)
 }
 
-func (p *aws) deleteSnapshot(ctx context.Context, snapshot, region string, steamroll, china bool) error {
+func (p *awsTarget) deleteSnapshot(ctx context.Context, snapshot, region string, steamroll, china bool) error {
 	ec2Client := p.tgtClients(china)
 
 	log.Info(ctx, "Deleting snapshot")
@@ -1160,7 +1115,60 @@ func (p *aws) deleteSnapshot(ctx context.Context, snapshot, region string, steam
 	return nil
 }
 
-func (p *aws) Close() error {
+func (p *awsSource) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.srcCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.srcCfg.Config == "":
+		return errors.New("missing config")
+	case p.srcCfg.Region == "":
+		return errors.New("missing region")
+	case p.srcCfg.Bucket == "":
+		return errors.New("missing bucket")
+	}
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	return nil
+}
+
+func (*awsSource) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *awsSource) Start(ctx context.Context) error {
+	credsType := p.Type()
+	if strings.HasPrefix(p.srcCfg.Region, "cn-") {
+		credsType += "_china"
+	}
+
+	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   credsType,
+		Config: p.srcCfg.Config,
+		Role:   "source",
+	}, p.createSrcClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.srcCfg.Config, err)
+	}
+
+	return nil
+}
+
+func (p *awsSource) Stop() error {
+	return p.Close()
+}
+
+func (p *awsSource) Close() error {
 	if p.srcCfg.Config != "" {
 		credsType := p.Type()
 		if strings.HasPrefix(p.srcCfg.Region, "cn-") {
@@ -1174,6 +1182,105 @@ func (p *aws) Close() error {
 		})
 	}
 
+	return nil
+}
+
+func (p *awsTarget) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.pubCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case p.pubCfg.Config == "":
+		return errors.New("missing config")
+	case p.pubCfg.Region == "":
+		return errors.New("missing region")
+	}
+
+	if len(p.pubCfg.Regions) > 0 {
+		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
+			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
+		}
+	}
+
+	if p.pubCfg.ConfigChina != "" {
+		if p.pubCfg.RegionChina == "" {
+			return errors.New("missing region")
+		}
+
+		if len(p.pubCfg.RegionsChina) > 0 {
+			if !slices.Contains(p.pubCfg.RegionsChina, p.pubCfg.RegionChina) {
+				return fmt.Errorf("region %s missing from list of regions", p.pubCfg.RegionChina)
+			}
+		}
+
+		p.enableChina = true
+	}
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	if err != nil {
+		return fmt.Errorf("cannot register source: %w", err)
+	}
+
+	if p.pubCfg.SourceChina != "" {
+		err = module.RegisterRef[ArtifactSource](p.base, p, &p.sourceChina, p.pubCfg.SourceChina)
+		if err != nil {
+			return fmt.Errorf("cannot register source: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (*awsTarget) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *awsTarget) Start(ctx context.Context) error {
+	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.pubCfg.Config,
+		Role:   "target",
+	}, func(ctx context.Context, creds map[string]any) error {
+		return p.createTgtClients(ctx, creds, false)
+	})
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
+	}
+
+	if p.enableChina {
+		err = p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+			Type:   p.Type() + "_china",
+			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
+		}, func(ctx context.Context, creds map[string]any) error {
+			return p.createTgtClients(ctx, creds, true)
+		})
+		if err != nil {
+			return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.ConfigChina, err)
+		}
+	}
+
+	return nil
+}
+
+func (p *awsTarget) Stop() error {
+	return p.Close()
+}
+
+func (p *awsTarget) Close() error {
 	if p.pubCfg.Config != "" {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
 			Type:   p.Type(),

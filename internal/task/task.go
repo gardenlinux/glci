@@ -11,6 +11,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/parallel"
 )
 
@@ -22,15 +23,20 @@ type (
 	ctxkUndead struct{}
 )
 
+// Category is the module framework registry for StatePersistor implementations.
+//
 //nolint:gochecknoglobals // Required for automatic registration.
-var (
-	persistors = make(map[string]newStatePersistorFunc)
-)
+var Category = module.NewCategory[StatePersistor]()
+
+//nolint:gochecknoglobals // Required for automatic registration.
+var persistors = make(map[string]newStatePersistorFunc)
 
 // StatePersistor is anything that can load and save task state.
 type StatePersistor interface {
+	module.Module
+
 	Type() string
-	SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, config any) error
+	SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, config map[string]any) error
 	SetID(id string)
 	Load() ([]byte, error)
 	Save(state []byte) error
@@ -418,7 +424,7 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 	return nil
 }
 
-func parseConfig[CONFIG any](cfg any, config *CONFIG) error {
+func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)

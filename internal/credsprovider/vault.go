@@ -18,6 +18,7 @@ import (
 	"github.com/gardenlinux/glci/internal/ch"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -33,6 +34,16 @@ func init() {
 			errCh:         make(chan struct{}),
 		}
 	})
+	module.RegisterImpl(Category, "Vault", func(b *module.Base) CredsSource {
+		return &vault{
+			base:          b,
+			activeCreds:   make(map[CredsID]vaultCreds),
+			activeSecrets: make(map[string]vaultSecret),
+			events:        make(chan vaultWatchEvent),
+			closeCh:       make(chan struct{}),
+			errCh:         make(chan struct{}),
+		}
+	})
 }
 
 func (*vault) Type() string {
@@ -40,6 +51,8 @@ func (*vault) Type() string {
 }
 
 type vault struct {
+	base *module.Base
+
 	credsCfg       vaultConfig
 	vaultClient    *api.Client
 	vaultSecret    *api.Secret
@@ -103,40 +116,12 @@ func (p *vault) isConfigured() bool {
 }
 
 func (p *vault) SetCredsConfig(ctx context.Context, cfg map[string]any) error {
-	err := parseConfig(cfg, &p.credsCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	c := api.DefaultConfig()
-	c.Address = p.credsCfg.Server
-
-	p.vaultClient, err = api.NewClient(c)
-	if err != nil {
-		return fmt.Errorf("cannot create client: %w", err)
-	}
-
-	if p.credsCfg.Namespace != "" {
-		p.vaultClient.SetNamespace(p.credsCfg.Namespace)
-	}
-
-	err = p.reestablishVault(ctx)
-	if err != nil {
-		return err
-	}
-
-	p.maintainExec = parallel.ErrGroup(parallel.Limited(ctx, 1))
-	p.maintainExec.Go(func(ctx context.Context) error {
-		err = p.maintain(ctx)
-		if err != nil {
-			log.Error(ctx, err)
-			p.err = err
-			close(p.errCh)
-		}
-		return err
-	})
-
-	return nil
+	return p.Start(ctx)
 }
 
 func (p *vault) maintain(ctx context.Context) error {
@@ -615,6 +600,55 @@ func (p *vault) deactivateSecret(key string, secret vaultSecret) {
 	secret.watcher.Stop()
 
 	delete(p.activeSecrets, key)
+}
+
+func (p *vault) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.credsCfg)
+	if err != nil {
+		return err
+	}
+
+	c := api.DefaultConfig()
+	c.Address = p.credsCfg.Server
+
+	p.vaultClient, err = api.NewClient(c)
+	if err != nil {
+		return fmt.Errorf("cannot create client: %w", err)
+	}
+
+	if p.credsCfg.Namespace != "" {
+		p.vaultClient.SetNamespace(p.credsCfg.Namespace)
+	}
+
+	return nil
+}
+
+func (*vault) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *vault) Start(ctx context.Context) error {
+	err := p.reestablishVault(ctx)
+	if err != nil {
+		return err
+	}
+
+	p.maintainExec = parallel.ErrGroup(parallel.Limited(ctx, 1))
+	p.maintainExec.Go(func(ctx context.Context) error {
+		err = p.maintain(ctx)
+		if err != nil {
+			log.Error(ctx, err)
+			p.err = err
+			close(p.errCh)
+		}
+		return err
+	})
+
+	return nil
+}
+
+func (p *vault) Stop() error {
+	return p.Close()
 }
 
 func (p *vault) Close() error {

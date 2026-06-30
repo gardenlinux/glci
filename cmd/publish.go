@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/gardenlinux/glci/internal/cmd"
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/glci"
 	"github.com/gardenlinux/glci/internal/log"
 )
@@ -16,7 +17,7 @@ func publishCmd() *cobra.Command {
 		Use:   "publish",
 		Short: "Publish a Garden Linux release to cloud providers",
 		Args:  cobra.NoArgs,
-		RunE:  cmd.RunFunc(publish),
+		RunE:  cli.RunFunc(publish),
 	}
 
 	c.Flags().StringP("version", "v", "", "release version")
@@ -26,14 +27,27 @@ func publishCmd() *cobra.Command {
 	return c
 }
 
-func publish(ctx context.Context, cfg *viper.Viper) error {
+func publish(ctx context.Context, cfg *viper.Viper, _ []string) error {
 	log.Info(ctx, "GLCI", "version", version)
 
-	flavorsCfg, publishingCfg, aliasesCfg, err := loadConfig(ctx, cfg)
+	g, err := glci.New(cfg.AllSettings())
 	if err != nil {
 		return err
 	}
 
-	return glci.Publish(ctx, flavorsCfg, publishingCfg, aliasesCfg, cfg.GetString("version"), cfg.GetString("commit"),
-		cfg.GetBool("omit-component-descriptor"))
+	var stop func() error
+	stop, err = g.Start(ctx, g.Publisher)
+	if err != nil {
+		return fmt.Errorf("cannot start publisher: %w", err)
+	}
+	defer func() {
+		_ = stop()
+	}()
+
+	err = g.Publisher.Publish(ctx, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("omit-component-descriptor"))
+	if err != nil {
+		return err
+	}
+
+	return stop()
 }

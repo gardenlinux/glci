@@ -1,4 +1,4 @@
-package glci
+package publisher
 
 import (
 	"context"
@@ -6,35 +6,24 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
-// Remove removes a release from all cloud providers specified in the flavors and publishing configurations.
-func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, version, commit string,
-	steamroll bool,
-) error {
+// Remove removes a release from all configured cloud providers.
+func (p *Publisher) Remove(ctx context.Context, version, commit string, steamroll bool) error {
 	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
 
-	log.Debug(ctx, "Loading configuration")
-	credsSource, manifestSource, manifestTarget, sources, targets, ocmTarget, state, err := loadConfig(ctx, publishingConfig)
-	if err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
-	}
-	defer func() {
-		_ = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
-		_ = manifestSource.Close()
-		_ = manifestTarget.Close()
-	}()
-	ctx = task.WithStatePersistor(ctx, state, id(version, commit))
+	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
 
-	rollbackHandlers := make([]task.RollbackHandler, 0, len(targets))
-	for _, target := range targets {
+	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
+	for _, target := range p.targets {
 		rollbackHandlers = append(rollbackHandlers, target)
 	}
-	err = task.Rollback(ctx, rollbackHandlers)
+	err := task.Rollback(ctx, rollbackHandlers)
 	if err != nil {
 		return fmt.Errorf("cannot roll back: %w", err)
 	}
@@ -46,21 +35,21 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 		return fmt.Errorf("cannot maintain state: %w", err)
 	}
 
-	glciVer := glciVersion(ctx)
+	glciVer := cli.Version(ctx)
 
-	publications := make([]cloudprovider.Publication, len(flavorsConfig.Flavors))
+	publications := make([]cloudprovider.Publication, len(p.flavors))
 	expandCommit := sync.Once{}
 	fetchManifests := parallel.NewActivitySync(ctx)
-	for i, flavor := range flavorsConfig.Flavors {
+	for i, flavor := range p.flavors {
 		fetchManifests.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
 			ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 
 			log.Info(ctx, "Retrieving manifest")
-			manifest, er := cloudprovider.GetManifest(ctx, manifestTarget, manifestKey)
+			manifest, er := cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
 			if er != nil {
 				_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
-				if ok && manifestTarget != manifestSource {
+				if ok && p.manifestTarget != p.manifestSource {
 					return func() error {
 						publications[i] = cloudprovider.Publication{
 							Cname: flavor.Cname,
@@ -81,7 +70,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 				commit = manifest.BuildCommittish
 			})
 
-			for _, target := range targets {
+			for _, target := range p.targets {
 				if target.CanPublish(manifest) {
 					return func() error {
 						publications[i] = cloudprovider.Publication{
@@ -125,7 +114,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 			}
 
 			log.Info(ctx, "Removing image")
-			er = publication.Target.Remove(ctx, publication.Manifest, sources, steamroll)
+			er = publication.Target.Remove(ctx, publication.Manifest, steamroll)
 			if er != nil {
 				return fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), er)
 			}
@@ -137,7 +126,7 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 
 			log.Info(ctx, "Updating manifest")
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
-			er = cloudprovider.PutManifest(ctx, manifestTarget, manifestKey, publication.Manifest)
+			er = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, publication.Manifest)
 			if er != nil {
 				return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, er)
 			}
@@ -149,12 +138,6 @@ func Remove(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig P
 	err = removePublications.Wait()
 	if err != nil {
 		return err
-	}
-
-	log.Debug(ctx, "Closing sources and targets")
-	err = closeSourcesAndTargetsAndPersistors(credsSource, sources, targets, ocmTarget, state)
-	if err != nil {
-		return fmt.Errorf("cannot close sources and targets: %w", err)
 	}
 
 	log.Info(ctx, "Removing completed successfully")

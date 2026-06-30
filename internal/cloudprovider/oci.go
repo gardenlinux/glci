@@ -20,18 +20,24 @@ import (
 	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 )
 
 const (
-	repoSuffix = "/component-descriptors/" + gl.GardenLinuxRepo
+	repoSuffix = "/component-descriptors/" + gardenlinux.GardenLinuxRepo
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	registerOCMTarget(func() OCMTarget {
 		return &oci{}
+	})
+	module.RegisterImpl(OCMTargetCategory, "OCI", func(b *module.Base) OCMTarget {
+		return &oci{
+			base: b,
+		}
 	})
 }
 
@@ -40,10 +46,13 @@ func (*oci) Type() string {
 }
 
 type oci struct {
-	ociCfg      ociOCMConfig
+	base *module.Base
+
 	credsSource credsprovider.CredsSource
-	clientsMtx  sync.RWMutex
-	repo        *remote.Repository
+
+	ociCfg     ociOCMConfig
+	clientsMtx sync.RWMutex
+	repo       *remote.Repository
 }
 
 type ociOCMConfig struct {
@@ -58,28 +67,12 @@ func (p *oci) isConfigured() bool {
 func (p *oci) SetOCMConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.ociCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.ociCfg.Config == "":
-		return errors.New("missing config")
-	case p.ociCfg.Repository == "":
-		return errors.New("missing repository")
-	}
-
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType()),
-		Config: p.ociCfg.Config,
-		Role:   "oci",
-	}, p.createClients)
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.ociCfg.Config, err)
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
 type ociCredentials struct {
@@ -278,6 +271,52 @@ func (p *oci) PublishComponentDescriptor(ctx context.Context, version string, de
 	}
 
 	return nil
+}
+
+func (p *oci) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.ociCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.ociCfg.Config == "":
+		return errors.New("missing config")
+	case p.ociCfg.Repository == "":
+		return errors.New("missing repository")
+	}
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	return nil
+}
+
+func (*oci) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *oci) Start(ctx context.Context) error {
+	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType()),
+		Config: p.ociCfg.Config,
+		Role:   "oci",
+	}, p.createClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.ociCfg.Config, err)
+	}
+
+	return nil
+}
+
+func (p *oci) Stop() error {
+	return p.Close()
 }
 
 func (p *oci) Close() error {
