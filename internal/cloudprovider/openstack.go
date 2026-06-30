@@ -431,7 +431,7 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	return nil
 }
 
-func (p *openstack) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}

@@ -137,7 +137,7 @@ type PublishingTarget interface {
 	CanPublish(manifest *gardenlinux.Manifest) bool
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
 	Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
-	Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
+	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	Close() error
 	task.RollbackHandler
 }

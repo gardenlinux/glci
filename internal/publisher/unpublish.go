@@ -13,9 +13,9 @@ import (
 	"github.com/gardenlinux/glci/internal/task"
 )
 
-// Remove removes a release from all configured cloud providers.
-func (p *Publisher) Remove(ctx context.Context, version, commit string, steamroll bool) error {
-	ctx = log.WithValues(ctx, "op", "remove", "version", version, "commit", commit)
+// Unpublish unpublishes a release from all configured cloud providers.
+func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steamroll bool) error {
+	ctx = log.WithValues(ctx, "op", "unpublish", "version", version, "commit", commit)
 
 	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
 
@@ -92,16 +92,16 @@ func (p *Publisher) Remove(ctx context.Context, version, commit string, steamrol
 		return err
 	}
 
-	log.Info(ctx, "Removing images", "count", len(publications))
-	removePublications := parallel.NewLimitedActivity(ctx, 7)
+	log.Info(ctx, "Unpublishing images", "count", len(publications))
+	unpublishPublications := parallel.NewLimitedActivity(ctx, 7)
 	for i, publication := range publications {
 		if publication.Manifest == nil {
 			lctx := log.WithValues(ctx, "cname", publication.Cname)
-			log.Info(lctx, "Already removed, skipping")
+			log.Info(lctx, "Already unpublished, skipping")
 			continue
 		}
 
-		removePublications.Go(func(ctx context.Context) error {
+		unpublishPublications.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
 
 			isPublished, er := publication.Target.IsPublished(publication.Manifest)
@@ -109,14 +109,14 @@ func (p *Publisher) Remove(ctx context.Context, version, commit string, steamrol
 				return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, er)
 			}
 			if !isPublished {
-				log.Info(ctx, "Already removed, skipping")
+				log.Info(ctx, "Already unpublished, skipping")
 				return nil
 			}
 
-			log.Info(ctx, "Removing image")
-			er = publication.Target.Remove(ctx, publication.Manifest, steamroll)
+			log.Info(ctx, "Unpublishing image")
+			er = publication.Target.Unpublish(ctx, publication.Manifest, steamroll)
 			if er != nil {
-				return fmt.Errorf("cannot remove %s from %s: %w", publication.Cname, publication.Target.Type(), er)
+				return fmt.Errorf("cannot unpublish %s from %s: %w", publication.Cname, publication.Target.Type(), er)
 			}
 			publication.Manifest.PublishedImageMetadata = nil
 
@@ -135,11 +135,11 @@ func (p *Publisher) Remove(ctx context.Context, version, commit string, steamrol
 			return nil
 		})
 	}
-	err = removePublications.Wait()
+	err = unpublishPublications.Wait()
 	if err != nil {
 		return err
 	}
 
-	log.Info(ctx, "Removing completed successfully")
+	log.Info(ctx, "Unpublishing completed successfully")
 	return nil
 }

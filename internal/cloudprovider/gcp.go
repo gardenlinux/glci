@@ -489,7 +489,7 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	return nil
 }
 
-func (p *gcp) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *gcp) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
