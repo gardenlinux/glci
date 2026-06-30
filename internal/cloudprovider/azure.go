@@ -24,8 +24,9 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
@@ -38,6 +39,11 @@ func init() {
 	registerPublishingTarget(func() PublishingTarget {
 		return &azure{}
 	})
+	module.RegisterImpl(PublishingTargetCategory, "Azure", func(b *module.Base) PublishingTarget {
+		return &azure{
+			base: b,
+		}
+	})
 }
 
 func (*azure) Type() string {
@@ -45,8 +51,13 @@ func (*azure) Type() string {
 }
 
 type azure struct {
+	base *module.Base
+
+	credsSource credsprovider.CredsSource
+	source      ArtifactSource
+	sourceChina ArtifactSource
+
 	pubCfg                                   azurePublishingConfig
-	credsSource                              credsprovider.CredsSource
 	clientsMtx                               sync.RWMutex
 	storageClient                            *azblob.Client
 	storageClientChina                       *azblob.Client
@@ -101,121 +112,25 @@ func (p *azure) SetTargetConfig(ctx context.Context, credsSource credsprovider.C
 ) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.pubCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.pubCfg.Source == "":
-		return errors.New("missing source")
-	case p.pubCfg.Config == "":
-		return errors.New("missing config")
-	case p.pubCfg.StorageContainer == "":
-		return errors.New("missing storage container")
-	case p.pubCfg.ResourceGroup == "":
-		return errors.New("missing resource group")
-	case p.pubCfg.Gallery == "":
-		return errors.New("missing gallery")
-	case p.pubCfg.Region == "":
-		return errors.New("missing region")
-	case p.pubCfg.ImagePrefix == "":
-		return errors.New("missing image prefix")
-	case p.pubCfg.ImageDescription == "":
-		return errors.New("missing image description")
-	case p.pubCfg.ImageEULA == "":
-		return errors.New("missing image EULA")
-	case p.pubCfg.ImageReleaseNote == "":
-		return errors.New("missing image release note")
-	case p.pubCfg.ImagePublisher == "":
-		return errors.New("missing image publisher")
-	case p.pubCfg.ImageOffer == "":
-		return errors.New("missing image offer")
-	case p.pubCfg.ImageSKUPrefix == "":
-		return errors.New("missing image SKU prefix")
-	}
-
-	_, ok := sources[p.pubCfg.Source]
+	var ok bool
+	p.source, ok = sources[p.pubCfg.Source]
 	if !ok {
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	if len(p.pubCfg.Regions) > 0 {
-		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
-			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
+	if p.pubCfg.SourceChina != "" {
+		p.sourceChina, ok = sources[p.pubCfg.SourceChina]
+		if !ok {
+			return fmt.Errorf("unknown source %s", p.pubCfg.SourceChina)
 		}
 	}
 
-	if p.pubCfg.ConfigChina != "" {
-		if p.pubCfg.RegionChina == "" {
-			return errors.New("missing region")
-		}
-
-		if p.pubCfg.SourceChina != "" {
-			_, ok = sources[p.pubCfg.SourceChina]
-			if !ok {
-				return fmt.Errorf("unknown source %s", p.pubCfg.SourceChina)
-			}
-		}
-
-		if len(p.pubCfg.RegionsChina) > 0 {
-			if !slices.Contains(p.pubCfg.RegionsChina, p.pubCfg.RegionChina) {
-				return fmt.Errorf("region %s missing from list of regions", p.pubCfg.RegionChina)
-			}
-		}
-
-		p.enableChina = true
-	}
-
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   p.Type() + "_storage",
-		Config: p.pubCfg.Config,
-		Role:   "target",
-	}, func(ctx context.Context, creds map[string]any) error {
-		return p.createStorageClients(ctx, creds, false)
-	})
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
-	}
-
-	if p.enableChina {
-		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type() + "_storage",
-			Config: p.pubCfg.ConfigChina,
-			Role:   "target",
-		}, func(ctx context.Context, creds map[string]any) error {
-			return p.createStorageClients(ctx, creds, true)
-		})
-		if err != nil {
-			return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.ConfigChina, err)
-		}
-	}
-
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   p.Type(),
-		Config: p.pubCfg.Config,
-		Role:   "target",
-	}, func(ctx context.Context, creds map[string]any) error {
-		return p.createClients(ctx, creds, false)
-	})
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
-	}
-
-	if p.enableChina {
-		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type() + "_china",
-			Config: p.pubCfg.ConfigChina,
-			Role:   "target",
-		}, func(ctx context.Context, creds map[string]any) error {
-			return p.createClients(ctx, creds, true)
-		})
-		if err != nil {
-			return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.ConfigChina, err)
-		}
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
 type azureTaskState struct {
@@ -487,11 +402,11 @@ func (*azure) version(version string) (string, error) {
 	return ver.String(), nil
 }
 
-func (*azure) architecture(arch gl.Architecture) (armcompute.Architecture, error) {
+func (*azure) architecture(arch gardenlinux.Architecture) (armcompute.Architecture, error) {
 	switch arch {
-	case gl.ArchitectureAMD64:
+	case gardenlinux.ArchitectureAMD64:
 		return armcompute.ArchitectureX64, nil
-	case gl.ArchitectureARM64:
+	case gardenlinux.ArchitectureARM64:
 		return armcompute.ArchitectureArm64, nil
 	default:
 		return "", fmt.Errorf("unknown architecture %s", arch)
@@ -506,7 +421,7 @@ func (*azure) sku(base, cname string, bios bool) string {
 	return fmt.Sprintf("%s-%s", base, cname)
 }
 
-func (p *azure) CanPublish(manifest *gl.Manifest) bool {
+func (p *azure) CanPublish(manifest *gardenlinux.Manifest) bool {
 	if !p.isConfigured() {
 		return false
 	}
@@ -514,7 +429,7 @@ func (p *azure) CanPublish(manifest *gl.Manifest) bool {
 	return manifest.Platform == "azure"
 }
 
-func (p *azure) IsPublished(manifest *gl.Manifest) (bool, error) {
+func (p *azure) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
@@ -527,9 +442,7 @@ func (p *azure) IsPublished(manifest *gl.Manifest) (bool, error) {
 	return len(azureOutput.Images) > 0, nil
 }
 
-func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
-	error,
-) {
+func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
@@ -542,12 +455,9 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
 	}
 
-	source := sources[p.pubCfg.Source]
-	ctx = log.WithValues(ctx, "sourceType", source.Type(), "sourceRepo", source.Repository())
-	sourceChina := source
+	ctx = log.WithValues(ctx, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
 	if p.pubCfg.SourceChina != "" {
-		sourceChina = sources[p.pubCfg.SourceChina]
-		ctx = log.WithValues(ctx, "sourceChinaType", sourceChina.Type(), "sourceChinaRepo", sourceChina.Repository())
+		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
 	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
@@ -555,7 +465,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	if err != nil {
 		return nil, fmt.Errorf("invalid version %s: %w", manifest.Version, err)
 	}
-	var imagePath gl.S3ReleaseFile
+	var imagePath gardenlinux.S3ReleaseFile
 	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
@@ -569,7 +479,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 
 	var requireUEFI, secureBoot bool
 	var pk, kek, db string
-	requireUEFI, secureBoot, pk, kek, db, err = p.prepareSecureBoot(ctx, source, manifest)
+	requireUEFI, secureBoot, pk, kek, db, err = p.prepareSecureBoot(ctx, p.source, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("cannot prepare secureboot: %w", err)
 	}
@@ -583,7 +493,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 	publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
-		images, er := p.publish(ctx, cname, source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
+		images, er := p.publish(ctx, cname, p.source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
 		if er != nil {
 			return nil, er
 		}
@@ -598,7 +508,12 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gl.Manifest
 		publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
 			ctx = log.WithValues(ctx, "cloud", "china")
 
-			images, er := p.publish(ctx, cname, sourceChina, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db,
+			source := p.sourceChina
+			if source == nil {
+				source = p.source
+			}
+
+			images, er := p.publish(ctx, cname, source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db,
 				true)
 			if er != nil {
 				return nil, er
@@ -776,8 +691,8 @@ func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource
 	return outputImages, nil
 }
 
-func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, bool, string, string, string,
-	error,
+func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gardenlinux.Manifest) (bool, bool, string, string,
+	string, error,
 ) {
 	var pk, kek, db string
 
@@ -1171,7 +1086,7 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 	return nil
 }
 
-func (p *azure) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+func (p *azure) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -1408,6 +1323,145 @@ func (p *azure) Rollback(ctx context.Context, tasks map[string]task.Task) error 
 		}
 	}
 	return rollbackTasks.Wait()
+}
+
+func (p *azure) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.pubCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case p.pubCfg.Config == "":
+		return errors.New("missing config")
+	case p.pubCfg.StorageContainer == "":
+		return errors.New("missing storage container")
+	case p.pubCfg.ResourceGroup == "":
+		return errors.New("missing resource group")
+	case p.pubCfg.Gallery == "":
+		return errors.New("missing gallery")
+	case p.pubCfg.Region == "":
+		return errors.New("missing region")
+	case p.pubCfg.ImagePrefix == "":
+		return errors.New("missing image prefix")
+	case p.pubCfg.ImageDescription == "":
+		return errors.New("missing image description")
+	case p.pubCfg.ImageEULA == "":
+		return errors.New("missing image EULA")
+	case p.pubCfg.ImageReleaseNote == "":
+		return errors.New("missing image release note")
+	case p.pubCfg.ImagePublisher == "":
+		return errors.New("missing image publisher")
+	case p.pubCfg.ImageOffer == "":
+		return errors.New("missing image offer")
+	case p.pubCfg.ImageSKUPrefix == "":
+		return errors.New("missing image SKU prefix")
+	}
+
+	if len(p.pubCfg.Regions) > 0 {
+		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
+			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
+		}
+	}
+
+	if p.pubCfg.ConfigChina != "" {
+		if p.pubCfg.RegionChina == "" {
+			return errors.New("missing region")
+		}
+
+		if len(p.pubCfg.RegionsChina) > 0 {
+			if !slices.Contains(p.pubCfg.RegionsChina, p.pubCfg.RegionChina) {
+				return fmt.Errorf("region %s missing from list of regions", p.pubCfg.RegionChina)
+			}
+		}
+
+		p.enableChina = true
+	}
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	if err != nil {
+		return fmt.Errorf("cannot register source: %w", err)
+	}
+
+	if p.pubCfg.SourceChina != "" {
+		err = module.RegisterRef[ArtifactSource](p.base, p, &p.sourceChina, p.pubCfg.SourceChina)
+		if err != nil {
+			return fmt.Errorf("cannot register source: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (*azure) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *azure) Start(ctx context.Context) error {
+	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type() + "_storage",
+		Config: p.pubCfg.Config,
+		Role:   "target",
+	}, func(ctx context.Context, creds map[string]any) error {
+		return p.createStorageClients(ctx, creds, false)
+	})
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
+	}
+
+	if p.enableChina {
+		err = p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+			Type:   p.Type() + "_storage",
+			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
+		}, func(ctx context.Context, creds map[string]any) error {
+			return p.createStorageClients(ctx, creds, true)
+		})
+		if err != nil {
+			return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.ConfigChina, err)
+		}
+	}
+
+	err = p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.pubCfg.Config,
+		Role:   "target",
+	}, func(ctx context.Context, creds map[string]any) error {
+		return p.createClients(ctx, creds, false)
+	})
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
+	}
+
+	if p.enableChina {
+		err = p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+			Type:   p.Type() + "_china",
+			Config: p.pubCfg.ConfigChina,
+			Role:   "target",
+		}, func(ctx context.Context, creds map[string]any) error {
+			return p.createClients(ctx, creds, true)
+		})
+		if err != nil {
+			return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.ConfigChina, err)
+		}
+	}
+
+	return nil
+}
+
+func (p *azure) Stop() error {
+	return p.Close()
 }
 
 func (p *azure) Close() error {

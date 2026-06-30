@@ -5,15 +5,22 @@ import (
 	"fmt"
 
 	"github.com/go-viper/mapstructure/v2"
+
+	"github.com/gardenlinux/glci/internal/module"
 )
 
+// Category is the module framework registry for CredsSource implementations.
+//
 //nolint:gochecknoglobals // Required for automatic registration.
-var (
-	sources = make(map[string]newCredsSourceFunc)
-)
+var Category = module.NewCategory[CredsSource]()
+
+//nolint:gochecknoglobals // Required for automatic registration.
+var sources = make(map[string]newCredsSourceFunc)
 
 // CredsSource is a source of credentials.
 type CredsSource interface {
+	module.Module
+
 	Type() string
 	SetCredsConfig(ctx context.Context, config map[string]any) error
 	AcquireCreds(ctx context.Context, id CredsID, updated UpdatedFunc) error

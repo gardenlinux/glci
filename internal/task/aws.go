@@ -19,6 +19,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
+	"github.com/gardenlinux/glci/internal/module"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -29,6 +30,11 @@ func init() {
 	registerStatePersistor(func() StatePersistor {
 		return &aws{}
 	})
+	module.RegisterImpl(Category, "AWS", func(b *module.Base) StatePersistor {
+		return &aws{
+			base: b,
+		}
+	})
 }
 
 func (*aws) Type() string {
@@ -36,11 +42,14 @@ func (*aws) Type() string {
 }
 
 type aws struct {
-	stateCfg    awsStateConfig
-	key         string
+	base *module.Base
+
 	credsSource credsprovider.CredsSource
-	clientsMtx  sync.RWMutex
-	s3Client    *s3.Client
+
+	stateCfg   awsStateConfig
+	key        string
+	clientsMtx sync.RWMutex
+	s3Client   *s3.Client
 }
 
 type awsStateConfig struct {
@@ -53,33 +62,15 @@ func (p *aws) isConfigured() bool {
 	return p.stateCfg.Bucket != "" && p.key != ""
 }
 
-func (p *aws) SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg any) error {
+func (p *aws) SetStateConfig(ctx context.Context, credsSource credsprovider.CredsSource, cfg map[string]any) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.stateCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.stateCfg.Config == "":
-		return errors.New("missing config")
-	case p.stateCfg.Region == "":
-		return errors.New("missing region")
-	case p.stateCfg.Bucket == "":
-		return errors.New("missing bucket")
-	}
-
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   p.Type(),
-		Config: p.stateCfg.Config,
-		Role:   "state",
-	}, p.createClients)
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials: %w", err)
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
 type awsCredentials struct {
@@ -203,6 +194,54 @@ func (p *aws) Clear() error {
 	}
 
 	return nil
+}
+
+func (p *aws) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.stateCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.stateCfg.Config == "":
+		return errors.New("missing config")
+	case p.stateCfg.Region == "":
+		return errors.New("missing region")
+	case p.stateCfg.Bucket == "":
+		return errors.New("missing bucket")
+	}
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	return nil
+}
+
+func (*aws) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *aws) Start(ctx context.Context) error {
+	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.stateCfg.Config,
+		Role:   "state",
+	}, p.createClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials: %w", err)
+	}
+
+	return nil
+}
+
+func (p *aws) Stop() error {
+	return p.Close()
 }
 
 func (p *aws) Close() error {

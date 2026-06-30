@@ -1,4 +1,4 @@
-package gl
+package gardenlinux
 
 import (
 	"fmt"

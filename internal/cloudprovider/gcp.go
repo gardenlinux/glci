@@ -21,9 +21,10 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -40,6 +41,11 @@ func init() {
 	registerPublishingTarget(func() PublishingTarget {
 		return &gcp{}
 	})
+	module.RegisterImpl(PublishingTargetCategory, "GCP", func(b *module.Base) PublishingTarget {
+		return &gcp{
+			base: b,
+		}
+	})
 }
 
 func (*gcp) Type() string {
@@ -47,8 +53,12 @@ func (*gcp) Type() string {
 }
 
 type gcp struct {
+	base *module.Base
+
+	credsSource credsprovider.CredsSource
+	source      ArtifactSource
+
 	pubCfg        gcpPublishingConfig
-	credsSource   credsprovider.CredsSource
 	clientsMtx    sync.RWMutex
 	storageClient *storage.Client
 	imagesClient  *compute.ImagesClient
@@ -73,37 +83,18 @@ func (p *gcp) SetTargetConfig(ctx context.Context, credsSource credsprovider.Cre
 ) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.pubCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.pubCfg.Source == "":
-		return errors.New("missing source")
-	case p.pubCfg.Config == "":
-		return errors.New("missing config")
-	case p.pubCfg.Project == "":
-		return errors.New("missing project")
-	case p.pubCfg.Bucket == "":
-		return errors.New("missing bucket")
-	}
-
-	_, ok := sources[p.pubCfg.Source]
+	var ok bool
+	p.source, ok = sources[p.pubCfg.Source]
 	if !ok {
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   p.Type(),
-		Config: p.pubCfg.Config,
-		Role:   "target",
-	}, p.createClients)
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
 type gcpTaskState struct {
@@ -174,18 +165,18 @@ func (*gcp) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
-func (*gcp) architecture(arch gl.Architecture) (string, error) {
+func (*gcp) architecture(arch gardenlinux.Architecture) (string, error) {
 	switch arch {
-	case gl.ArchitectureAMD64:
+	case gardenlinux.ArchitectureAMD64:
 		return "X86_64", nil
-	case gl.ArchitectureARM64:
+	case gardenlinux.ArchitectureARM64:
 		return "ARM64", nil
 	default:
 		return "", fmt.Errorf("unknown architecture %s", arch)
 	}
 }
 
-func (p *gcp) CanPublish(manifest *gl.Manifest) bool {
+func (p *gcp) CanPublish(manifest *gardenlinux.Manifest) bool {
 	if !p.isConfigured() {
 		return false
 	}
@@ -193,7 +184,7 @@ func (p *gcp) CanPublish(manifest *gl.Manifest) bool {
 	return manifest.Platform == "gcp"
 }
 
-func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
+func (p *gcp) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
@@ -206,9 +197,7 @@ func (p *gcp) IsPublished(manifest *gl.Manifest) (bool, error) {
 	return gcpOutput.Project != "" && gcpOutput.Image != "", nil
 }
 
-func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
-	error,
-) {
+func (p *gcp) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
@@ -231,13 +220,12 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
 	}
-	source := sources[p.pubCfg.Source]
-	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", source.Type(), "sourceRepo", source.Repository(),
+	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository(),
 		"project", p.pubCfg.Project)
 
 	var secureBoot bool
 	var pk, kek, db string
-	secureBoot, pk, kek, db, err = p.prepareSecureBoot(ctx, source, manifest)
+	secureBoot, pk, kek, db, err = p.prepareSecureBoot(ctx, p.source, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("cannot prepare secureboot: %w", err)
 	}
@@ -245,7 +233,7 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 
 	ctx = task.Begin(ctx, "publish/"+image, &gcpTaskState{})
 	var blob, blobURL string
-	blob, blobURL, err = p.uploadBlob(ctx, source, imagePath.S3Key, image)
+	blob, blobURL, err = p.uploadBlob(ctx, p.source, imagePath.S3Key, image)
 	if err != nil {
 		return nil, task.Fail(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
 	}
@@ -272,7 +260,9 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gl.Manifest, 
 	}, nil
 }
 
-func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gl.Manifest) (bool, string, string, string, error) {
+func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manifest *gardenlinux.Manifest) (bool, string, string, string,
+	error,
+) {
 	var pk, kek, db string
 
 	if manifest.SecureBoot {
@@ -499,7 +489,7 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	return nil
 }
 
-func (p *gcp) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+func (p *gcp) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -597,6 +587,61 @@ func (p *gcp) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 		}
 	}
 	return rollbackTasks.Wait()
+}
+
+func (p *gcp) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.pubCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case p.pubCfg.Config == "":
+		return errors.New("missing config")
+	case p.pubCfg.Project == "":
+		return errors.New("missing project")
+	case p.pubCfg.Bucket == "":
+		return errors.New("missing bucket")
+	}
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	if err != nil {
+		return fmt.Errorf("cannot register source: %w", err)
+	}
+
+	return nil
+}
+
+func (*gcp) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *gcp) Start(ctx context.Context) error {
+	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.pubCfg.Config,
+		Role:   "target",
+	}, p.createClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
+	}
+
+	return nil
+}
+
+func (p *gcp) Stop() error {
+	return p.Close()
 }
 
 func (p *gcp) Close() error {

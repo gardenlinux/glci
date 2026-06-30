@@ -1,26 +1,28 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
-	"github.com/gardenlinux/glci/internal/cmd"
-	"github.com/gardenlinux/glci/internal/glci"
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
 )
 
-func main() {
-	var exitCode int
-	defer func() {
-		os.Exit(exitCode)
-	}()
+var version = "dev"
 
-	mainCmd, cfg, err := cmd.Setup("glci", func(c *cobra.Command) {
+func main() {
+	os.Exit(run())
+}
+
+func run() int {
+	mainCmd, cmdCtx, err := cli.Setup("glci", func(c *cobra.Command) {
 		c.Use = "glci"
 		c.Short = "GLCI - Garden Linux continuous integration"
 		c.Version = version
@@ -28,27 +30,29 @@ func main() {
 		c.PersistentFlags().Bool("glacial", false, "disable all parallelism")
 		c.PersistentFlags().String("config-file", "", "path to configuration file")
 		c.AddCommand(publishCmd(), removeCmd())
+	}, func(ctx context.Context, cfg *viper.Viper) (context.Context, error) {
+		ctx = log.Setup(ctx, cfg.GetBool("debug"), false, os.Stderr)
+		if cfg.GetBool("glacial") {
+			ctx = parallel.WithInlineMode(ctx, true)
+		}
+		ctx = cli.WithVersion(ctx, version)
+		ctx = cli.WithStart(ctx, cli.StartTime())
+		return ctx, nil
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
-		exitCode = 1
-		return
+		return 1
 	}
 
-	ctx, stop := signal.NotifyContext(log.Setup(mainCmd.Context(), cfg.GetBool("debug"), false, os.Stderr), syscall.SIGTERM,
-		syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
+	ctx, stop := signal.NotifyContext(mainCmd.Context(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stop()
 
-	if cfg.GetBool("glacial") {
-		ctx = parallel.WithInlineMode(ctx, true)
+	err = mainCmd.ExecuteContext(ctx)
+	ctx = cmdCtx()
+	if err != nil {
+		log.ErrorAnyway(ctx, err)
+		return 1
 	}
 
-	ctx = glci.WithVersion(ctx, version)
-	ctx = glci.WithStart(ctx, cmd.StartTime())
-	err = mainCmd.ExecuteContext(ctx)
-	if err != nil {
-		log.Error(ctx, err)
-		exitCode = 1
-		return
-	}
+	return 0
 }

@@ -16,8 +16,9 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -29,6 +30,11 @@ func init() {
 	registerPublishingTarget(func() PublishingTarget {
 		return &openstack{}
 	})
+	module.RegisterImpl(PublishingTargetCategory, "OpenStack", func(b *module.Base) PublishingTarget {
+		return &openstack{
+			base: b,
+		}
+	})
 }
 
 func (*openstack) Type() string {
@@ -36,8 +42,13 @@ func (*openstack) Type() string {
 }
 
 type openstack struct {
+	base *module.Base
+
+	credsSource credsprovider.CredsSource
+	source      ArtifactSource
+	sourceChina ArtifactSource
+
 	pubCfg        openstackPublishingConfig
-	credsSource   credsprovider.CredsSource
 	clientsMtx    sync.RWMutex
 	imagesClients map[string]*gophercloud.ServiceClient
 }
@@ -75,81 +86,25 @@ func (p *openstack) SetTargetConfig(ctx context.Context, credsSource credsprovid
 ) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.pubCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.pubCfg.Source == "":
-		return errors.New("missing source")
-	case len(p.pubCfg.Configs) == 0:
-		return errors.New("missing configs")
-	}
-
-	_, ok := sources[p.pubCfg.Source]
+	var ok bool
+	p.source, ok = sources[p.pubCfg.Source]
 	if !ok {
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
+
 	if p.pubCfg.SourceChina != "" {
-		_, ok = sources[p.pubCfg.SourceChina]
+		p.sourceChina, ok = sources[p.pubCfg.SourceChina]
 		if !ok {
-			return fmt.Errorf("unknown source %s", p.pubCfg.Source)
+			return fmt.Errorf("unknown source %s", p.pubCfg.SourceChina)
 		}
 	}
 
-	cs := make(map[string]struct{}, len(p.pubCfg.Configs))
-	rs := make(map[string]struct{})
-	for _, config := range p.pubCfg.Configs {
-		_, ok = cs[config.Config]
-		switch {
-		case config.Config == "":
-			return errors.New("invalid config")
-		case ok:
-			return fmt.Errorf("duplicate config %s", config.Config)
-		case config.Endpoint == "":
-			return fmt.Errorf("missing endpoint for config %s", config.Config)
-		case strings.Count(config.Endpoint, "{region}") != 1:
-			return fmt.Errorf("invalid endpoint for config %s", config.Config)
-		case config.Domain == "":
-			return fmt.Errorf("missing domain for config %s", config.Config)
-		case config.Project == "":
-			return fmt.Errorf("missing project for config %s", config.Config)
-		case len(config.Regions) == 0:
-			return fmt.Errorf("missing regions for config %s", config.Config)
-		}
-
-		cs[config.Config] = struct{}{}
-		for _, r := range config.Regions {
-			_, ok = rs[r]
-			if ok {
-				return fmt.Errorf("duplicate region %s", r)
-			}
-			rs[r] = struct{}{}
-		}
-	}
-
-	func() {
-		p.clientsMtx.Lock()
-		defer p.clientsMtx.Unlock()
-
-		p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(rs))
-	}()
-
-	for _, config := range p.pubCfg.Configs {
-		err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type(),
-			Config: config.Config,
-			Role:   "target",
-		}, func(ctx context.Context, creds map[string]any) error {
-			return p.createClients(ctx, config, creds)
-		})
-		if err != nil {
-			return fmt.Errorf("cannot acquire credentials for config %s: %w", config.Config, err)
-		}
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
 type openstackTaskState struct {
@@ -255,18 +210,18 @@ func (*openstack) variant(platform, variant string) (openstackVariant, error) {
 	}
 }
 
-func (*openstack) architecture(arch gl.Architecture) (string, error) {
+func (*openstack) architecture(arch gardenlinux.Architecture) (string, error) {
 	switch arch {
-	case gl.ArchitectureAMD64:
+	case gardenlinux.ArchitectureAMD64:
 		return "AMD64", nil
-	case gl.ArchitectureARM64:
+	case gardenlinux.ArchitectureARM64:
 		return "ARM64", nil
 	default:
 		return "", fmt.Errorf("unknown architecture %s", arch)
 	}
 }
 
-func (p *openstack) CanPublish(manifest *gl.Manifest) bool {
+func (p *openstack) CanPublish(manifest *gardenlinux.Manifest) bool {
 	if !p.isConfigured() {
 		return false
 	}
@@ -279,7 +234,7 @@ func (p *openstack) CanPublish(manifest *gl.Manifest) bool {
 	return err == nil
 }
 
-func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
+func (p *openstack) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
@@ -298,9 +253,7 @@ func (p *openstack) IsPublished(manifest *gl.Manifest) (bool, error) {
 	return len(openstackOutput.Images) > 0, nil
 }
 
-func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
-	error,
-) {
+func (p *openstack) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
@@ -316,7 +269,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	}
 
 	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
-	var imagePath gl.S3ReleaseFile
+	var imagePath gardenlinux.S3ReleaseFile
 	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
@@ -326,14 +279,11 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
 	}
-	source := sources[p.pubCfg.Source]
-	ctx = log.WithValues(ctx, "image", image, "variant", variant, "architecture", arch, "sourceType", source.Type(),
-		"sourceRepo", source.Repository())
+	ctx = log.WithValues(ctx, "image", image, "variant", variant, "architecture", arch, "sourceType", p.source.Type(),
+		"sourceRepo", p.source.Repository())
 
-	sourceChina := source
 	if p.pubCfg.SourceChina != "" {
-		sourceChina = sources[p.pubCfg.SourceChina]
-		ctx = log.WithValues(ctx, "sourceChinaType", sourceChina.Type(), "sourceChinaRepo", sourceChina.Repository())
+		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
 	}
 
 	imagesClients := p.clients()
@@ -342,9 +292,9 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 	for _, config := range p.pubCfg.Configs {
 		for _, region := range config.Regions {
 			imageClient := imagesClients[region]
-			src := source
-			if strings.HasPrefix(region, "ap-cn-") {
-				src = sourceChina
+			source := p.source
+			if strings.HasPrefix(region, "ap-cn-") && p.sourceChina != nil {
+				source = p.sourceChina
 			}
 
 			publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
@@ -353,7 +303,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gl.Mani
 				ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{
 					Region: region,
 				})
-				imageID, er := p.createImage(ctx, imageClient, src, imagePath.S3Key, image, variant)
+				imageID, er := p.createImage(ctx, imageClient, source, imagePath.S3Key, image, variant)
 				if er != nil {
 					return nil, task.Fail(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
 				}
@@ -481,7 +431,7 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	return nil
 }
 
-func (p *openstack) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+func (p *openstack) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -580,6 +530,101 @@ func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) er
 		}
 	}
 	return rollbackTasks.Wait()
+}
+
+func (p *openstack) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.pubCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case len(p.pubCfg.Configs) == 0:
+		return errors.New("missing configs")
+	}
+
+	cs := make(map[string]struct{}, len(p.pubCfg.Configs))
+	rs := make(map[string]struct{})
+	for _, config := range p.pubCfg.Configs {
+		_, ok := cs[config.Config]
+		switch {
+		case config.Config == "":
+			return errors.New("invalid config")
+		case ok:
+			return fmt.Errorf("duplicate config %s", config.Config)
+		case config.Endpoint == "":
+			return fmt.Errorf("missing endpoint for config %s", config.Config)
+		case strings.Count(config.Endpoint, "{region}") != 1:
+			return fmt.Errorf("invalid endpoint for config %s", config.Config)
+		case config.Domain == "":
+			return fmt.Errorf("missing domain for config %s", config.Config)
+		case config.Project == "":
+			return fmt.Errorf("missing project for config %s", config.Config)
+		case len(config.Regions) == 0:
+			return fmt.Errorf("missing regions for config %s", config.Config)
+		}
+
+		cs[config.Config] = struct{}{}
+		for _, r := range config.Regions {
+			_, ok = rs[r]
+			if ok {
+				return fmt.Errorf("duplicate region %s", r)
+			}
+			rs[r] = struct{}{}
+		}
+	}
+
+	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(rs))
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	if err != nil {
+		return fmt.Errorf("cannot register source: %w", err)
+	}
+
+	if p.pubCfg.SourceChina != "" {
+		err = module.RegisterRef[ArtifactSource](p.base, p, &p.sourceChina, p.pubCfg.SourceChina)
+		if err != nil {
+			return fmt.Errorf("cannot register source: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (*openstack) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *openstack) Start(ctx context.Context) error {
+	for _, config := range p.pubCfg.Configs {
+		err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+			Type:   p.Type(),
+			Config: config.Config,
+			Role:   "target",
+		}, func(ctx context.Context, creds map[string]any) error {
+			return p.createClients(ctx, config, creds)
+		})
+		if err != nil {
+			return fmt.Errorf("cannot acquire credentials for config %s: %w", config.Config, err)
+		}
+	}
+
+	return nil
+}
+
+func (p *openstack) Stop() error {
+	return p.Close()
 }
 
 func (p *openstack) Close() error {

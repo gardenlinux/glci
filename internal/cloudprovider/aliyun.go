@@ -17,8 +17,9 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/gl"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
@@ -32,6 +33,11 @@ func init() {
 	registerPublishingTarget(func() PublishingTarget {
 		return &aliyun{}
 	})
+	module.RegisterImpl(PublishingTargetCategory, "Aliyun", func(b *module.Base) PublishingTarget {
+		return &aliyun{
+			base: b,
+		}
+	})
 }
 
 func (*aliyun) Type() string {
@@ -39,11 +45,15 @@ func (*aliyun) Type() string {
 }
 
 type aliyun struct {
-	pubCfg      aliyunPublishingConfig
+	base *module.Base
+
 	credsSource credsprovider.CredsSource
-	clientsMtx  sync.RWMutex
-	ossClient   *oss.Client
-	ecsClients  map[string]*client.Client
+	source      ArtifactSource
+
+	pubCfg     aliyunPublishingConfig
+	clientsMtx sync.RWMutex
+	ossClient  *oss.Client
+	ecsClients map[string]*client.Client
 }
 
 type aliyunPublishingConfig struct {
@@ -65,43 +75,18 @@ func (p *aliyun) SetTargetConfig(ctx context.Context, credsSource credsprovider.
 ) error {
 	p.credsSource = credsSource
 
-	err := parseConfig(cfg, &p.pubCfg)
+	err := p.Configure(cfg)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case p.pubCfg.Source == "":
-		return errors.New("missing source")
-	case p.pubCfg.Config == "":
-		return errors.New("missing config")
-	case p.pubCfg.Region == "":
-		return errors.New("missing region")
-	case p.pubCfg.Bucket == "":
-		return errors.New("missing bucket")
-	}
-
-	_, ok := sources[p.pubCfg.Source]
+	var ok bool
+	p.source, ok = sources[p.pubCfg.Source]
 	if !ok {
 		return fmt.Errorf("unknown source %s", p.pubCfg.Source)
 	}
 
-	if len(p.pubCfg.Regions) > 0 {
-		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
-			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
-		}
-	}
-
-	err = credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   p.Type(),
-		Config: p.pubCfg.Config,
-		Role:   "target",
-	}, p.createClients)
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
-	}
-
-	return nil
+	return p.Start(ctx)
 }
 
 type aliyunTaskState struct {
@@ -232,7 +217,7 @@ func (*aliyun) imageName(cname, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
-func (p *aliyun) CanPublish(manifest *gl.Manifest) bool {
+func (p *aliyun) CanPublish(manifest *gardenlinux.Manifest) bool {
 	if !p.isConfigured() {
 		return false
 	}
@@ -240,7 +225,7 @@ func (p *aliyun) CanPublish(manifest *gl.Manifest) bool {
 	return manifest.Platform == "ali"
 }
 
-func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
+func (p *aliyun) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
@@ -253,9 +238,7 @@ func (p *aliyun) IsPublished(manifest *gl.Manifest) (bool, error) {
 	return len(aliyunOutput.Images) > 0, nil
 }
 
-func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifest, sources map[string]ArtifactSource) (PublishingOutput,
-	error,
-) {
+func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
@@ -273,15 +256,14 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gl.Manifes
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
-	source := sources[p.pubCfg.Source]
 	region := p.pubCfg.Region
-	ctx = log.WithValues(ctx, "image", image, "sourceType", source.Type(), "sourceRepo", source.Repository())
+	ctx = log.WithValues(ctx, "image", image, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
 
 	ctx = task.Begin(ctx, "publish/"+image+"/"+region, &aliyunTaskState{
 		Region: region,
 	})
 	var blob string
-	blob, err = p.uploadBlob(ctx, source, imagePath.S3Key, image)
+	blob, err = p.uploadBlob(ctx, p.source, imagePath.S3Key, image)
 	if err != nil {
 		return nil, task.Fail(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
 	}
@@ -587,7 +569,7 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	return nil
 }
 
-func (p *aliyun) Remove(ctx context.Context, manifest *gl.Manifest, _ map[string]ArtifactSource, steamroll bool) error {
+func (p *aliyun) Remove(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
@@ -753,6 +735,67 @@ func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error
 		}
 	}
 	return rollbackTasks.Wait()
+}
+
+func (p *aliyun) Configure(rawCfg map[string]any) error {
+	err := parseConfig(rawCfg, &p.pubCfg)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case p.pubCfg.Source == "":
+		return errors.New("missing source")
+	case p.pubCfg.Config == "":
+		return errors.New("missing config")
+	case p.pubCfg.Region == "":
+		return errors.New("missing region")
+	case p.pubCfg.Bucket == "":
+		return errors.New("missing bucket")
+	}
+
+	if len(p.pubCfg.Regions) > 0 {
+		if !slices.Contains(p.pubCfg.Regions, p.pubCfg.Region) {
+			return fmt.Errorf("region %s missing from list of regions", p.pubCfg.Region)
+		}
+	}
+
+	if p.base == nil {
+		return nil
+	}
+
+	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	if err != nil {
+		return fmt.Errorf("cannot register credentials: %w", err)
+	}
+
+	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	if err != nil {
+		return fmt.Errorf("cannot register source: %w", err)
+	}
+
+	return nil
+}
+
+func (*aliyun) Configurables() []module.Configurable {
+	return nil
+}
+
+func (p *aliyun) Start(ctx context.Context) error {
+	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+		Type:   p.Type(),
+		Config: p.pubCfg.Config,
+		Role:   "target",
+	}, p.createClients)
+	if err != nil {
+		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
+	}
+
+	return nil
+}
+
+func (p *aliyun) Stop() error {
+	return p.Close()
 }
 
 func (p *aliyun) Close() error {
