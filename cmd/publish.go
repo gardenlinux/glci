@@ -22,6 +22,7 @@ func publishCmd() *cobra.Command {
 	c.Flags().StringP("version", "v", "", "release version")
 	c.Flags().StringP("commit", "c", "", "release commit(ish)")
 	c.Flags().Bool("omit-component-descriptor", false, "omit publishing a component descriptor")
+	c.Flags().Bool("omit-ns-cloud-profile", false, "omit publishing a namespaced cloud profile")
 
 	return c
 }
@@ -35,5 +36,6 @@ func publish(ctx context.Context, cfg *viper.Viper) error {
 	}
 
 	return glci.Publish(ctx, flavorsCfg, publishingCfg, aliasesCfg, cfg.GetString("version"), cfg.GetString("commit"),
-		cfg.GetBool("omit-component-descriptor"))
+		cfg.GetBool("omit-component-descriptor"),
+		cfg.GetBool("omit-ns-cloud-profile"))
 }

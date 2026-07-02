@@ -1,6 +1,7 @@
 package glci
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/gl"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/nspcpfl"
 	"github.com/gardenlinux/glci/internal/ocm"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
@@ -17,7 +19,7 @@ import (
 
 // Publish publishes a release to all cloud providers specified in the flavors and publishing configurations.
 func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, aliasesConfig AliasesConfig, version,
-	commit string, omitComponentDescritpr bool,
+	commit string, omitComponentDescritpr bool, omitNSCloudProfile bool,
 ) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
@@ -34,7 +36,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 	ctx = task.WithStatePersistor(ctx, state, id(version, commit))
 
 	err = publish(ctx, flavorsConfig, aliasesConfig, credsSource, manifestSource, manifestTarget, sources, targets, ocmTarget, state,
-		version, commit, omitComponentDescritpr)
+		version, commit, omitComponentDescritpr, omitNSCloudProfile)
 	perr := task.PersistorError(ctx)
 	if perr != nil {
 		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
@@ -48,7 +50,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig AliasesConfig, credsSource credsprovider.CredsSource,
 	manifestSource, manifestTarget cloudprovider.ArtifactSource, sources map[string]cloudprovider.ArtifactSource,
 	targets []cloudprovider.PublishingTarget, ocmTarget cloudprovider.OCMTarget, state task.StatePersistor, version, commit string,
-	omitComponentDescritpr bool,
+	omitComponentDescritpr bool, omitNSCloudProfile bool,
 ) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(targets))
 	for _, target := range targets {
@@ -204,6 +206,33 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 		err = ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
 		if err != nil {
 			return fmt.Errorf("cannot publish component descriptor: %w", err)
+		}
+	}
+
+	profiles, err := nspcpfl.BuildNSCloudProfiles(version, publications)
+	if err != nil {
+		return fmt.Errorf("error creating Namespaced Cloud Profiles %w", err)
+	}
+
+	for _, profile := range profiles {
+		profileYAML, err := nspcpfl.ToYAML(profile)
+		if err != nil {
+			return fmt.Errorf("invalid profile configuration: %w", err)
+		}
+		if !omitNSCloudProfile {
+			NSProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, profile.Name)
+			if err := manifestTarget.PutObject(ctx, NSProfileKey, bytes.NewReader(profileYAML)); err != nil {
+				return fmt.Errorf("cannot store NSCloudProfile %s: %w", profile.Name, err)
+			}
+
+			shootYAML, err := nspcpfl.BuildShootSpecYAML(version, profile)
+			if err != nil {
+				return fmt.Errorf("invalid shoot spec for %s: %w", profile.Name, err)
+			}
+			shootKey := fmt.Sprintf("meta/ShootSpec/%s/%s", version, profile.Name)
+			if err := manifestTarget.PutObject(ctx, shootKey, bytes.NewReader(shootYAML)); err != nil {
+				return fmt.Errorf("cannot store ShootSpec %s: %w", profile.Name, err)
+			}
 		}
 	}
 
