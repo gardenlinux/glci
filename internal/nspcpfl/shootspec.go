@@ -71,22 +71,27 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 			for _, arch := range v.Architectures {
 				architecture := string(arch)
 				var machineType string
+				var volumeType string
 				if platform == "aws" {
 					machineType = "a1.2xlarge"
 					if architecture == "amd64" {
 						machineType = "m5.large"
 					}
+					volumeType = "gp2"
 				} else if platform == "alicloud" {
 					machineType = "ecs.t6-c1m2.large"
+					volumeType = "cloud_efficiency"
 				} else if platform == "gcp" {
 					machineType = "n1-standard-2"
 					if architecture == "arm64" {
 						machineType = "t2a-standard-2"
 					}
+					volumeType = "pd-standard"
 				} else if platform == "converged-cloud" {
 					machineType = "m1.xsmall"
 				} else if platform == "az" {
 					machineType = "Standard_DS2_v2"
+					volumeType = "Standard_LRS"
 				}
 
 				zoneName := region + "a"
@@ -97,8 +102,8 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 					zoneName = "1"
 				}
 
-				workers = append(workers, gardencorev1beta1.Worker{
-					Name: fmt.Sprintf("gardenlinux-%s-%s-%s", major, strings.ToLower(platform), architecture),
+				worker := gardencorev1beta1.Worker{
+					Name: fmt.Sprintf("gl-%s-%s", major, architecture),
 					Machine: gardencorev1beta1.Machine{
 						Type: machineType,
 						Image: &gardencorev1beta1.ShootMachineImage{
@@ -110,7 +115,14 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 					Zones:   []string{zoneName},
 					Maximum: 2,
 					Minimum: 2,
-				})
+				}
+				if platform != "converged-cloud" {
+					worker.Volume = &gardencorev1beta1.Volume{
+						Type:       ptr(volumeType),
+						VolumeSize: "50GB",
+					}
+				}
+				workers = append(workers, worker)
 			}
 		}
 	}
@@ -131,11 +143,14 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 				Workers:              workers,
 			},
 			Kubernetes: gardencorev1beta1.Kubernetes{
-				Version: "latest",
+				Version: "1.35.5",
 			},
 			CloudProfile: &gardencorev1beta1.CloudProfileReference{
 				Name: fmt.Sprintf("gardenlinux-%s-%s", major, strings.ToLower(platform)),
 				Kind: "NamespacedCloudProfile",
+			},
+			Networking: &gardencorev1beta1.Networking{
+				Type: ptr("calico"),
 			},
 			Region: region,
 		},
@@ -145,10 +160,14 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot marshal shoot to JSON: %w", err)
 	}
-	var intermediate any
+	var intermediate map[string]any
 	if err := json.Unmarshal(jsonBytes, &intermediate); err != nil {
 		return nil, nil, fmt.Errorf("cannot unmarshal shoot JSON: %w", err)
 	}
+	if meta, ok := intermediate["metadata"].(map[string]any); ok {
+		delete(meta, "creationTimestamp")
+	}
+	delete(intermediate, "status")
 
 	shootYAML, err := yaml.Marshal(intermediate)
 	if err != nil {

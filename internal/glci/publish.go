@@ -220,7 +220,8 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			return fmt.Errorf("invalid profile configuration: %w", err)
 		}
 		if !omitNSCloudProfile {
-			NSProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, profile.Name)
+			baseName := fmt.Sprintf("gardenlinux-%s-%.8s-%s", nspcpfl.MajorVersion(version), commit, profile.Spec.Parent.Name)
+			NSProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, baseName)
 			if err := manifestTarget.PutObject(ctx, NSProfileKey, bytes.NewReader(profileYAML)); err != nil {
 				return fmt.Errorf("cannot store NSCloudProfile %s: %w", profile.Name, err)
 			}
@@ -229,7 +230,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			if err != nil {
 				return fmt.Errorf("invalid shoot spec for %s: %w", profile.Name, err)
 			}
-			shootKey := fmt.Sprintf("meta/ShootSpec/%s/%s", version, profile.Name)
+			shootKey := fmt.Sprintf("meta/ShootSpec/%s/%s", version, baseName)
 			if err := manifestTarget.PutObject(ctx, shootKey, bytes.NewReader(shootYAML)); err != nil {
 				return fmt.Errorf("cannot store ShootSpec %s: %w", profile.Name, err)
 			}

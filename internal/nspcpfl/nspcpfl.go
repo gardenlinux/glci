@@ -2,7 +2,6 @@ package nspcpfl
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 
@@ -177,10 +176,14 @@ func ToYAML(d *gardencorev1beta1.NamespacedCloudProfile) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot marshal to JSON: %w", err)
 	}
-	var intermediate any
+	var intermediate map[string]any
 	if err := json.Unmarshal(jsonBytes, &intermediate); err != nil {
 		return nil, fmt.Errorf("cannot unmarshal JSON: %w", err)
 	}
+	if meta, ok := intermediate["metadata"].(map[string]any); ok {
+		delete(meta, "creationTimestamp")
+	}
+	delete(intermediate, "status")
 	return yaml.Marshal(intermediate)
 }
 
@@ -217,32 +220,18 @@ func BuildNSCloudProfiles(version string, publications []cloudprovider.Publicati
 			return nil, fmt.Errorf("cannot build %s profile: %w", b.targetType, err)
 		}
 
-		_, err = BuildShootSpecYAML(version, profile)
-		if err != nil {
-			return nil, fmt.Errorf("cannot build shoot spec: %w", err)
-		}
-
-		profileYAML, err := ToYAML(profile)
-		if err != nil {
-			return nil, fmt.Errorf("cannot marshal %s profile: %w", b.targetType, err)
-		}
-
-		filename := strings.ToLower(b.targetType) + ".yaml"
-		if err := os.WriteFile(filename, profileYAML, 0644); err != nil {
-			return nil, fmt.Errorf("cannot write %s profile: %w", b.targetType, err)
-		}
 		profiles = append(profiles, profile)
 	}
 
 	return profiles, nil
 }
 
-func majorVersion(version string) string {
+func MajorVersion(version string) string {
 	return strings.Split(version, ".")[0]
 }
 
 func newProfile(version, provider string, rawConfig *runtime.RawExtension, architecture []string) *gardencorev1beta1.NamespacedCloudProfile {
-	major := majorVersion(version)
+	major := MajorVersion(version)
 	name := fmt.Sprintf("gardenlinux-%s-%s", major, strings.ToLower(provider))
 	return &gardencorev1beta1.NamespacedCloudProfile{
 		TypeMeta: metav1.TypeMeta{
