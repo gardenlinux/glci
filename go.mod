@@ -11,7 +11,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions/v2 v2.0.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.0
 	github.com/Masterminds/semver/v3 v3.5.0
-	github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.3
+	github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.4
 	github.com/alibabacloud-go/ecs-20140526/v7 v7.9.2
 	github.com/alibabacloud-go/tea v1.5.2
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.5.2
