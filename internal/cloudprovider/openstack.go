@@ -156,7 +156,10 @@ func (*openstack) ImageSuffix() string {
 	return ".vmdk"
 }
 
-func (*openstack) imageName(cname, version, committish string) string {
+func (p *openstack) imageName(cname, version, committish string) string {
+	if p.pubCfg.Test {
+		cname += "-test"
+	}
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
 }
 
