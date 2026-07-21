@@ -46,12 +46,8 @@ type publisherConfig struct {
 	Targets        module.SliceSlot[cloudprovider.PublishingTarget] `mapstructure:"targets"`
 	OCM            module.Slot[cloudprovider.OCMTarget]             `mapstructure:"ocm"`
 	State          module.Slot[task.StatePersistor]                 `mapstructure:"state"`
-	Flavors        flavorsConfig                                    `mapstructure:"flavors"`
+	Flavors        []Flavor                                         `mapstructure:"flavors"`
 	Aliases        map[string][]string                              `mapstructure:"aliases,omitempty"`
-}
-
-type flavorsConfig struct {
-	Flavors []Flavor `mapstructure:"flavors"`
 }
 
 // NewPublisher creates a publisher.
@@ -68,7 +64,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 		return err
 	}
 
-	p.flavors = p.cfg.Flavors.Flavors
+	p.flavors = p.cfg.Flavors
 	p.aliases = p.cfg.Aliases
 
 	if p.cfg.Credentials == nil {
