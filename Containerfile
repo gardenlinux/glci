@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.5 AS builder
 ARG TARGETARCH
 
 RUN export DEBIAN_FRONTEND=noninteractive && \
