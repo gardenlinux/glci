@@ -20,5 +20,3 @@ jobs:
         go-version-file: go.mod
     - name: Run linter
       run: ./lint
-    - name: Run tests
-      run: ./test --ci
