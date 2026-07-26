@@ -73,7 +73,7 @@ func (r *Root) Init(rawCfg map[string]any) error {
 	}
 
 	var modules []Module
-	modules, err = r.allModules()
+	modules, err = r.AllModules()
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -103,8 +103,9 @@ func (r *Root) Init(rawCfg map[string]any) error {
 	return nil
 }
 
-func (r *Root) allModules() ([]Module, error) {
-	configurables, err := graph.ReachableSet([]Configurable{r.self}, func(c Configurable) ([]Configurable, error) {
+// AllModules returns every configured module in reverse topological order.
+func (r *Root) AllModules() ([]Module, error) {
+	configurables, err := graph.ReverseTopologicalSort([]Configurable{r.self}, func(c Configurable) ([]Configurable, error) {
 		return c.Configurables(), nil
 	})
 	if err != nil {
@@ -264,7 +265,7 @@ func RegisterTypeRef[T Module](b *Base, owner Configurable, ptr *T) error {
 	b.root.refs = append(b.root.refs, refEntry{
 		owner: owner,
 		resolve: func(_ *Root, modules []Module) ([]Module, error) {
-			typeModules := filterByType[T](modules)
+			typeModules := ModulesOfType[T](modules)
 			var zero T
 			if len(typeModules) == 0 {
 				return nil, fmt.Errorf("no module of type %T", zero)
@@ -291,7 +292,7 @@ func RegisterSliceTypeRef[T Module](b *Base, owner Configurable, ptr *[]T) error
 	b.root.refs = append(b.root.refs, refEntry{
 		owner: owner,
 		resolve: func(_ *Root, modules []Module) ([]Module, error) {
-			typeModules := filterByType[T](modules)
+			typeModules := ModulesOfType[T](modules)
 
 			*ptr = typeModules
 
@@ -302,7 +303,8 @@ func RegisterSliceTypeRef[T Module](b *Base, owner Configurable, ptr *[]T) error
 	return nil
 }
 
-func filterByType[T Module](modules []Module) []T {
+// ModulesOfType returns every configured module satisfying T.
+func ModulesOfType[T any](modules []Module) []T {
 	var typeModules []T
 	for _, m := range modules {
 		t, ok := m.(T)

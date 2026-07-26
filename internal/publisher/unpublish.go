@@ -41,7 +41,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 	expandCommit := sync.Once{}
 	fetchManifests := parallel.NewActivitySync(ctx)
 	for i, flavor := range p.flavors {
-		fetchManifests.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		fetchManifests.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
 			ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
 

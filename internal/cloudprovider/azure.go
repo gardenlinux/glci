@@ -461,7 +461,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux
 	outputImages := make([]azurePublishedImage, 0, 4)
 	publish := parallel.NewActivitySync(ctx)
 
-	publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+	publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
 		images, er := p.publish(ctx, cname, p.source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
@@ -476,7 +476,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux
 	})
 
 	if p.enableChina {
-		publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "cloud", "china")
 
 			source := p.sourceChina
@@ -577,7 +577,7 @@ func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource
 
 	if bios {
 		blobUsed.Add(1)
-		createImageVersion.Go(func(_ context.Context) (parallel.ResultFunc, error) {
+		createImageVersion.Go(func(_ context.Context) (parallel.ResultSyncFunc, error) {
 			imageID, er := func() (string, error) {
 				defer blobUsed.Done()
 				return p.createImage(bctx, blobURL, image, true, china)
@@ -610,7 +610,7 @@ func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource
 		})
 	}
 
-	createImageVersion.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+	createImageVersion.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 		imageID, er := func() (string, error) {
 			defer blobUsed.Done()
 			return p.createImage(ctx, blobURL, image, false, china)
@@ -641,7 +641,7 @@ func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource
 		}, nil
 	})
 
-	createImageVersion.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+	createImageVersion.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 		blobUsed.Wait()
 
 		er := p.deleteBlob(ctx, blob, false, china)

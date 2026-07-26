@@ -10,7 +10,7 @@ import (
 )
 
 //nolint:gochecknoglobals // Required for automatic registration.
-var typeSchemas = make(map[reflect.Type]any)
+var configTypes = make(map[reflect.Type]any)
 
 //nolint:gochecknoglobals // Cached reflect.Type for the marker interfaces.
 var (
@@ -125,9 +125,9 @@ type anySliceSlot interface {
 	sliceSlotType() reflect.Type
 }
 
-// RegisterSchema records the config schema for a Configurable, using a nil prototype (e.g. (*T)(nil)) and a zero-value config struct.
-func RegisterSchema(prototype Configurable, schema any) {
-	typeSchemas[reflect.TypeOf(prototype)] = schema
+// RegisterConfigType records the config type for a Configurable, called with a nil impl (e.g. (*T)(nil)) and a zero-value config struct.
+func RegisterConfigType(impl Configurable, config any) {
+	configTypes[reflect.TypeOf(impl)] = config
 }
 
 // MaxSliceLen returns the longest slice length found anywhere in cfg.
@@ -160,7 +160,7 @@ func MaxSliceLen(rawCfg any) int {
 	return maxLen
 }
 
-type schemaCollector struct {
+type keyCollector struct {
 	cache       map[reflect.Type][]fieldEntry
 	path        map[reflect.Type]struct{}
 	keys        []string
@@ -174,9 +174,9 @@ type fieldEntry struct {
 	slice    bool
 }
 
-// CollectSchemaKeys walks root's tree and returns dotted leaf keys for every reachable schema, with maxSliceLen keys per SliceSlot field.
-func CollectSchemaKeys(root Configurable, maxSliceLen int) ([]string, error) {
-	c := &schemaCollector{
+// ConfigKeys walks root's tree and returns dotted leaf keys for every reachable config type, with maxSliceLen keys per SliceSlot field.
+func ConfigKeys(root Configurable, maxSliceLen int) ([]string, error) {
+	c := &keyCollector{
 		cache:       make(map[reflect.Type][]fieldEntry),
 		path:        make(map[reflect.Type]struct{}),
 		maxSliceLen: maxSliceLen,
@@ -185,30 +185,30 @@ func CollectSchemaKeys(root Configurable, maxSliceLen int) ([]string, error) {
 	return c.keys, c.err
 }
 
-func (c *schemaCollector) walkType(t reflect.Type, prefix string) {
+func (c *keyCollector) walkType(t reflect.Type, prefix string) {
 	if c.err != nil {
 		return
 	}
 
 	_, ok := c.path[t]
 	if ok {
-		c.err = fmt.Errorf("schema cycle: type %v reachable from itself at %q", t, prefix)
+		c.err = fmt.Errorf("config type cycle: type %v reachable from itself at %q", t, prefix)
 		return
 	}
 
-	var schema any
-	schema, ok = typeSchemas[t]
-	if !ok || schema == nil {
+	var configType any
+	configType, ok = configTypes[t]
+	if !ok || configType == nil {
 		return
 	}
 
 	c.path[t] = struct{}{}
-	c.walkFields(schema, prefix)
+	c.walkFields(configType, prefix)
 	delete(c.path, t)
 }
 
-func (c *schemaCollector) walkFields(schema any, prefix string) {
-	for _, f := range c.fieldEntries(schema) {
+func (c *keyCollector) walkFields(configType any, prefix string) {
+	for _, f := range c.fieldEntries(configType) {
 		field := f.name
 		if prefix != "" {
 			field = prefix + "." + f.name
@@ -227,8 +227,8 @@ func (c *schemaCollector) walkFields(schema any, prefix string) {
 	}
 }
 
-func (c *schemaCollector) fieldEntries(schema any) []fieldEntry {
-	t := reflect.TypeOf(schema)
+func (c *keyCollector) fieldEntries(configType any) []fieldEntry {
+	t := reflect.TypeOf(configType)
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -278,14 +278,14 @@ func (c *schemaCollector) fieldEntries(schema any) []fieldEntry {
 	return entries
 }
 
-func (c *schemaCollector) walkSliceSlot(slotType reflect.Type, prefix string) {
+func (c *keyCollector) walkSliceSlot(slotType reflect.Type, prefix string) {
 	c.keys = append(c.keys, prefix+".id")
 	for i := range c.maxSliceLen {
 		c.walkSingleSlot(slotType, prefix+".items."+strconv.Itoa(i))
 	}
 }
 
-func (c *schemaCollector) walkSingleSlot(slotType reflect.Type, prefix string) {
+func (c *keyCollector) walkSingleSlot(slotType reflect.Type, prefix string) {
 	switch slotType.Kind() {
 	case reflect.Interface:
 		c.walkCategory(slotType, prefix)
@@ -294,9 +294,9 @@ func (c *schemaCollector) walkSingleSlot(slotType reflect.Type, prefix string) {
 	}
 }
 
-func (c *schemaCollector) walkCategory(slotType reflect.Type, prefix string) {
+func (c *keyCollector) walkCategory(slotType reflect.Type, prefix string) {
 	c.keys = append(c.keys, prefix+".type", prefix+".id")
-	for typ := range typeSchemas {
+	for typ := range configTypes {
 		if !typ.Implements(slotType) {
 			continue
 		}

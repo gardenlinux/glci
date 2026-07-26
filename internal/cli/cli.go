@@ -82,13 +82,13 @@ func Setup(name string, define func(*cobra.Command), initialize func(context.Con
 			return nil
 		}
 
-		err := cfg.BindPFlags(cmd.Flags())
-		if err != nil {
-			return fmt.Errorf("cannot bind flags: %w", err)
+		inErr := cfg.BindPFlags(cmd.Flags())
+		if inErr != nil {
+			return fmt.Errorf("cannot bind flags: %w", inErr)
 		}
-		err = cfg.BindPFlags(cmd.InheritedFlags())
-		if err != nil {
-			return fmt.Errorf("cannot bind inherited flags: %w", err)
+		inErr = cfg.BindPFlags(cmd.InheritedFlags())
+		if inErr != nil {
+			return fmt.Errorf("cannot bind inherited flags: %w", inErr)
 		}
 
 		cfgFile := cfg.GetString("config-file")
@@ -96,19 +96,19 @@ func Setup(name string, define func(*cobra.Command), initialize func(context.Con
 			cfg.SetConfigFile(cfgFile)
 		}
 
-		err = cfg.ReadInConfig()
-		if err != nil {
-			_, ok := errors.AsType[viper.ConfigFileNotFoundError](err)
+		inErr = cfg.ReadInConfig()
+		if inErr != nil {
+			_, ok := errors.AsType[viper.ConfigFileNotFoundError](inErr)
 			if cfgFile != "" || !ok {
-				return fmt.Errorf("cannot read config file: %w", err)
+				return fmt.Errorf("cannot read config file: %w", inErr)
 			}
 		}
 
 		if initialize != nil {
 			var ctx context.Context
-			ctx, err = initialize(cmd.Context(), cfg)
-			if err != nil {
-				return fmt.Errorf("cannot initialize: %w", err)
+			ctx, inErr = initialize(cmd.Context(), cfg)
+			if inErr != nil {
+				return fmt.Errorf("cannot initialize: %w", inErr)
 			}
 			//nolint:fatcontext // This is required for ctxFunc closure to return the initialized context.
 			initializedCtx = ctx
