@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 
 	"github.com/gardenlinux/glci/internal/graph"
 	"github.com/gardenlinux/glci/internal/parallel"
@@ -26,8 +25,6 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 	}
 
 	var modules []Module
-	done := make(map[Module]chan struct{})
-	failed := make(map[Module]*atomic.Bool)
 	moduleDeps := make(map[Module][]Module)
 	for _, c := range configurables {
 		m, ok := c.(Module)
@@ -36,8 +33,6 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 		}
 
 		modules = append(modules, m)
-		done[m] = make(chan struct{})
-		failed[m] = &atomic.Bool{}
 
 		var ns []Configurable
 		ns, err = deps(m)
@@ -55,50 +50,35 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 	}
 
 	var started []Module
-	startActivity := parallel.NewActivitySync(ctx)
+	err = parallel.RunTasksSync(ctx, modules, func(m Module) ([]Module, error) {
+		return moduleDeps[m], nil
+	}, func(ctx context.Context, m Module) (parallel.ResultSyncFunc, error) {
+		if r.startedModules[m] != 0 {
+			return nil, nil
+		}
 
-	for _, m := range modules {
-		startActivity.Go(func(_ context.Context) (parallel.ResultFunc, error) {
-			defer close(done[m])
+		inErr := m.Start(ctx)
+		if inErr != nil {
+			return nil, fmt.Errorf("cannot start %T: %w", m, inErr)
+		}
 
-			if r.startedModules[m] != 0 {
-				return nil, nil
-			}
+		return func() error {
+			started = append(started, m)
 
-			for _, dependency := range moduleDeps[m] {
-				<-done[dependency]
-				if failed[dependency].Load() {
-					failed[m].Store(true)
-					return nil, nil
-				}
-			}
-
-			startErr := m.Start(ctx)
-			if startErr != nil {
-				failed[m].Store(true)
-				return nil, fmt.Errorf("cannot start %T: %w", m, startErr)
-			}
-
-			return func() error {
-				started = append(started, m)
-
-				return nil
-			}, nil
-		})
-	}
-
-	startErr := startActivity.Wait()
-	if startErr != nil {
+			return nil
+		}, nil
+	}, parallel.FailureModeSkipDependents)
+	if err != nil {
 		//nolint:contextcheck // Independent lifecycle, runs detached from parent ctx.
 		stopErr := stop(started, moduleDeps)
-		return nil, errors.Join(startErr, stopErr)
+		return nil, errors.Join(err, stopErr)
 	}
 
 	for _, m := range modules {
 		r.startedModules[m]++
 	}
 
-	stopped := false
+	var stopped bool
 	//nolint:contextcheck // Independent lifecycle, runs detached from parent ctx.
 	return func() error {
 		r.startedModulesMtx.Lock()
@@ -123,10 +103,6 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 }
 
 func stop(modules []Module, moduleDeps map[Module][]Module) error {
-	if len(modules) == 0 {
-		return nil
-	}
-
 	stoppable := make(map[Module]struct{}, len(modules))
 	for _, m := range modules {
 		stoppable[m] = struct{}{}
@@ -142,27 +118,14 @@ func stop(modules []Module, moduleDeps map[Module][]Module) error {
 		}
 	}
 
-	done := make(map[Module]chan struct{}, len(modules))
-	for _, m := range modules {
-		done[m] = make(chan struct{})
-	}
-	stopActivity := parallel.NewActivity(context.Background())
+	return parallel.RunTasks(context.Background(), modules, func(m Module) ([]Module, error) {
+		return stopAfter[m], nil
+	}, func(_ context.Context, m Module) error {
+		inErr := m.Stop()
+		if inErr != nil {
+			return fmt.Errorf("cannot stop %T: %w", m, inErr)
+		}
 
-	for _, m := range modules {
-		stopActivity.Go(func(_ context.Context) error {
-			defer close(done[m])
-			for _, dependent := range stopAfter[m] {
-				<-done[dependent]
-			}
-
-			stopErr := m.Stop()
-			if stopErr != nil {
-				return fmt.Errorf("cannot stop %T: %w", m, stopErr)
-			}
-
-			return nil
-		})
-	}
-
-	return stopActivity.Wait()
+		return nil
+	}, parallel.FailureModeContinue)
 }

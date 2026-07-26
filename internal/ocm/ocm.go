@@ -160,7 +160,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	packages := make([][]nameVersion, len(publications))
 	fetchPackages := parallel.NewActivitySync(ctx)
 	for i, publication := range publications {
-		fetchPackages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		fetchPackages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			pkgs, err := getPackages(ctx, source, publication.Manifest)
 			if err != nil {
 				return nil, fmt.Errorf("cannot list packages for %s: %w", publication.Cname, err)

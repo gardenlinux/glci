@@ -16,16 +16,28 @@ func (e *CycleError[N]) Error() string {
 
 // ReverseTopologicalSort runs DFS from each root and returns the nodes in reverse topological order or *CycleError if there is a cycle.
 func ReverseTopologicalSort[N comparable](roots []N, neighbors func(N) ([]N, error)) ([]N, error) {
-	return DFS(roots, neighbors, PostOrder)
+	return DFS(roots, neighbors, PostOrder, CyclesError)
 }
 
-// ReachableSet runs DFS from each root and returns every reachable node in pre-order or *CycleError if there is a cycle.
+// ReachableSet runs DFS from each root and returns every reachable node in pre-order, allowing cycles.
 func ReachableSet[N comparable](roots []N, neighbors func(N) ([]N, error)) ([]N, error) {
-	return DFS(roots, neighbors, PreOrder)
+	return DFS(roots, neighbors, PreOrder, CyclesAllow)
 }
 
-// DFS runs depth-first search from each root and returns the visited nodes in the requested order or *CycleError if there is a cycle.
-func DFS[N comparable](roots []N, neighbors func(N) ([]N, error), order Order) ([]N, error) {
+// DFS runs depth-first search from each root and returns the visited nodes in the requested order. Back-edges are handled per cycles.
+func DFS[N comparable](roots []N, neighbors func(N) ([]N, error), order Order, cycles Cycles) ([]N, error) {
+	switch order {
+	case PreOrder, PostOrder:
+	default:
+		return nil, fmt.Errorf("invalid order %d", order)
+	}
+
+	switch cycles {
+	case CyclesAllow, CyclesError:
+	default:
+		return nil, fmt.Errorf("invalid cycles mode %d", cycles)
+	}
+
 	const (
 		white = 0
 		gray  = 1
@@ -65,6 +77,10 @@ func DFS[N comparable](roots []N, neighbors func(N) ([]N, error), order Order) (
 
 		c := color[f.node]
 		if c == gray {
+			if cycles == CyclesAllow {
+				continue
+			}
+
 			start := slices.Index(path, f.node)
 			return nil, &CycleError[N]{
 				Cycle: append([]N(nil), path[start:]...),

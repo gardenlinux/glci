@@ -111,7 +111,7 @@ func (p *openstack) createClients(ctx context.Context, config openstackPublishin
 
 	initClients := parallel.NewLimitedActivitySync(ctx, 7)
 	for _, region := range config.Regions {
-		initClients.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		initClients.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
 				IdentityEndpoint: strings.Replace(config.Endpoint, "{region}", region, 1),
 				Username:         creds.Username,
@@ -271,7 +271,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gardenl
 				source = p.sourceChina
 			}
 
-			publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+			publishImages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 				ctx = log.WithValues(ctx, "region", region)
 
 				ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{

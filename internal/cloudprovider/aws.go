@@ -462,7 +462,7 @@ func (p *awsTarget) Publish(ctx context.Context, cname string, manifest *gardenl
 	outputImages := make([]awsPublishedImage, 0, 4)
 	publish := parallel.NewActivitySync(ctx)
 
-	publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+	publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
 		images, er := p.publish(ctx, p.source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, false)
@@ -477,7 +477,7 @@ func (p *awsTarget) Publish(ctx context.Context, cname string, manifest *gardenl
 	})
 
 	if p.enableChina && !secureBoot {
-		publish.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "cloud", "china")
 
 			source := p.sourceChina
@@ -545,7 +545,7 @@ func (p *awsTarget) publish(ctx context.Context, source ArtifactSource, key, ima
 	images := make(map[string]string, len(regions))
 	publishImages := parallel.NewLimitedActivitySync(ctx, 12)
 	for _, toRegion := range regions {
-		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		publishImages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
 			localID := imageID
 			var er error

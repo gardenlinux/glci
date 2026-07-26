@@ -261,7 +261,7 @@ func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gardenlinu
 	images := make(map[string]string, len(ecsClients))
 	publishImages := parallel.NewLimitedActivitySync(ctx, 7)
 	for toRegion := range ecsClients {
-		publishImages.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		publishImages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
 			localID := imageID
 			var er error

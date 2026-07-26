@@ -12,7 +12,7 @@ import (
 
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
-	module.RegisterSchema((*Publisher)(nil), &publisherConfig{})
+	module.RegisterConfigType((*Publisher)(nil), &publisherConfig{})
 }
 
 // Publisher publishes Garden Linux releases.

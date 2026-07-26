@@ -367,7 +367,7 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 			return fmt.Errorf("invalid task domain %s", domain)
 		}
 
-		rollbackTasks.Go(func(ctx context.Context) (parallel.ResultFunc, error) {
+		rollbackTasks.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			rf := func() error {
 				cnt += len(tset.domains[domain].Tasks)
 				delete(tset.domains, domain)
