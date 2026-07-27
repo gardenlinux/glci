@@ -18,17 +18,17 @@ import (
 // ArtifactSourceCategory is the module framework registry for ArtifactSource implementations.
 //
 //nolint:gochecknoglobals // Required for automatic registration.
-var ArtifactSourceCategory = module.NewCategory[ArtifactSource]()
+var ArtifactSourceCategory = module.NewCategory[ArtifactSource]("source")
 
 // PublishingTargetCategory is the module framework registry for PublishingTarget implementations.
 //
 //nolint:gochecknoglobals // Required for automatic registration.
-var PublishingTargetCategory = module.NewCategory[PublishingTarget]()
+var PublishingTargetCategory = module.NewCategory[PublishingTarget]("target")
 
 // OCMTargetCategory is the module framework registry for OCMTarget implementations.
 //
 //nolint:gochecknoglobals // Required for automatic registration.
-var OCMTargetCategory = module.NewCategory[OCMTarget]()
+var OCMTargetCategory = module.NewCategory[OCMTarget]("target")
 
 // ArtifactSource is a source of artifacts which can retrieve arbitrary objects as well as retrieve and publish manifests.
 type ArtifactSource interface {

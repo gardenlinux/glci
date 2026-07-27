@@ -51,7 +51,7 @@ flavors:
   flavor: gcp-gardener_prod_tpm2_trustedboot-arm64
 publishing:
   credentials:
-    type: Vault
+    source: Vault
     server: https://vault.tools.sap
     namespace: gardnlinux
     token:
@@ -62,23 +62,23 @@ publishing:
   manifest_target: S3test
   sources:
   - id: S3
-    type: AWS
+    source: AWS
     config: gardenlinux
     region: eu-central-1
     bucket: gardenlinux-github-releases
   - id: S3test
-    type: AWS
+    source: AWS
     config: gardenlinux-integration-test
     region: eu-central-1
     bucket: gardenlinux-test-import
   targets:
-  - type: Aliyun
+  - target: Aliyun
     source: S3
     config: gardenlinux-integration-test
     region: eu-central-1
     regions: [ eu-central-1, eu-west-1 ]
     bucket: gardenlinux-test-upload
-  - type: AWS
+  - target: AWS
     source: S3
     config: gardenlinux-integration-test
     region: eu-central-1
@@ -90,7 +90,7 @@ publishing:
         sec-by-def-public-image-exception: enabled
         purpose: test
         test-type: gardener-integration
-  - type: Azure
+  - target: Azure
     source: S3
     config: gardenlinux-integration-test
     storage_container: gardenlinux
@@ -105,12 +105,12 @@ publishing:
     image_publisher: GardenLinux
     image_offer: gardenlinux
     image_sku_prefix: gardenlinux
-  - type: GCP
+  - target: GCP
     source: S3
     config: gardenlinux-integration-test
     project: sap-cp-k8s-gdnlinux-gcp-test
     bucket: gardenlinux-test-images
-  - type: OpenStack
+  - target: OpenStack
     source: S3
     configs:
     - config: gardenlinux
@@ -120,12 +120,12 @@ publishing:
       regions: [ eu-nl-1 ]
     test: true
   ocm:
-    type: OCI
+    target: OCI
     config: gardenlinux
     repository: europe-docker.pkg.dev/sap-se-gcp-gardenlinux/tests
     file: descriptor.yaml
   state:
-    type: AWS
+    backend: AWS
     config: gardenlinux-integration-test
     region: eu-central-1
     bucket: glci-state-test

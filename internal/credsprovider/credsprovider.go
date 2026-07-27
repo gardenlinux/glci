@@ -12,7 +12,7 @@ import (
 // Category is the module framework registry for CredsSource implementations.
 //
 //nolint:gochecknoglobals // Required for automatic registration.
-var Category = module.NewCategory[CredsSource]()
+var Category = module.NewCategory[CredsSource]("source")
 
 // CredsSource is a source of credentials.
 type CredsSource interface {
