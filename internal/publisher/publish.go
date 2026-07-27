@@ -49,7 +49,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitCom
 	for i, flavorConfig := range p.flavors {
 		fetchManifests.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
-			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor, "targetType", flavorConfig.TargetType)
+			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
 
 			log.Info(ctx, "Retrieving manifest")
 			manifest, er := cloudprovider.GetManifest(ctx, p.manifestSource, manifestKey)
@@ -85,21 +85,20 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitCom
 				manifest = targetManifest
 			}
 
-			for _, target := range p.targets {
-				if target.CanPublish(manifest) {
-					return func() error {
-						publications[i] = cloudprovider.Publication{
-							Flavor:   flavorConfig.Flavor,
-							Manifest: manifest,
-							Target:   target,
-						}
-
-						return nil
-					}, nil
-				}
+			var target cloudprovider.PublishingTarget
+			target, er = p.selectTarget(manifest, flavorConfig.Flavor)
+			if er != nil {
+				return nil, er
 			}
+			return func() error {
+				publications[i] = cloudprovider.Publication{
+					Flavor:   flavorConfig.Flavor,
+					Manifest: manifest,
+					Target:   target,
+				}
 
-			return nil, fmt.Errorf("no publishing target for %s", flavorConfig.Flavor)
+				return nil
+			}, nil
 		})
 	}
 	err = fetchManifests.Wait()
