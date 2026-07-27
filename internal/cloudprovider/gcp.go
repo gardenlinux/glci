@@ -467,6 +467,10 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	return nil
 }
 
+func (*gcp) CanUnpublish() bool {
+	return true
+}
+
 func (p *gcp) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
@@ -518,7 +522,7 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 	return nil
 }
 
-func (p *gcp) CanRollback() string {
+func (p *gcp) RollbackDomain() string {
 	if !p.isConfigured() {
 		return ""
 	}

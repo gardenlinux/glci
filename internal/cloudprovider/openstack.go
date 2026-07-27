@@ -405,6 +405,10 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	return nil
 }
 
+func (*openstack) CanUnpublish() bool {
+	return true
+}
+
 func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
@@ -466,7 +470,7 @@ func (p *openstack) deleteImage(ctx context.Context, id, region string, steamrol
 	return nil
 }
 
-func (p *openstack) CanRollback() string {
+func (p *openstack) RollbackDomain() string {
 	if !p.isConfigured() {
 		return ""
 	}

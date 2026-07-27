@@ -547,6 +547,10 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	return nil
 }
 
+func (*aliyun) CanUnpublish() bool {
+	return true
+}
+
 func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
@@ -655,7 +659,7 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool
 	return nil
 }
 
-func (p *aliyun) CanRollback() string {
+func (p *aliyun) RollbackDomain() string {
 	if !p.isConfigured() {
 		return ""
 	}

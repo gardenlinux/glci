@@ -21,6 +21,10 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
+		if !target.CanUnpublish() {
+			continue
+		}
+
 		rollbackHandlers = append(rollbackHandlers, target)
 	}
 	err := task.Rollback(ctx, rollbackHandlers)
@@ -99,7 +103,11 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 			log.Info(lctx, "Already unpublished, skipping")
 			continue
 		}
-
+		if !publication.Target.CanUnpublish() {
+			lctx := log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
+			log.Info(lctx, "Target cannot be unpublished, skipping")
+			continue
+		}
 		unpublishPublications.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
 
