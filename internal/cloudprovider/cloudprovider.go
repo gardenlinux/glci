@@ -108,7 +108,7 @@ type PublishingTarget interface {
 	ImageSuffix() string
 	CanPublish(manifest *gardenlinux.Manifest) bool
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
-	Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
+	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	task.RollbackHandler
 }
@@ -155,7 +155,7 @@ type OCMTarget interface {
 
 // Publication represents the act of publishing an image including what is being published where and what the result is.
 type Publication struct {
-	Cname    string
+	Flavor   string
 	Manifest *gardenlinux.Manifest
 	Target   PublishingTarget
 }
@@ -169,8 +169,8 @@ func (e KeyNotFoundError) Error() string {
 	return e.err.Error()
 }
 
-func platform(cname string) string {
-	p, _, _ := strings.Cut(cname, "-")
+func platform(flavor string) string {
+	p, _, _ := strings.Cut(flavor, "-")
 	return p
 }
 

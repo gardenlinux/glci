@@ -191,8 +191,8 @@ func (*aliyun) ImageSuffix() string {
 	return ".qcow2"
 }
 
-func (*aliyun) imageName(cname, version, committish string) string {
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
+func (*aliyun) imageName(flavor, version, committish string) string {
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
 
 func (p *aliyun) CanPublish(manifest *gardenlinux.Manifest) bool {
@@ -216,20 +216,20 @@ func (p *aliyun) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return len(aliyunOutput.Images) > 0, nil
 }
 
-func (p *aliyun) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 
-	pl := platform(cname)
+	pl := platform(flavor)
 	if pl != "ali" {
-		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
+		return nil, fmt.Errorf("invalid flavor %s for target %s", flavor, p.Type())
 	}
 	if pl != manifest.Platform {
-		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
+	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)

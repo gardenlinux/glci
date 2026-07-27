@@ -40,10 +40,10 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 	publications := make([]cloudprovider.Publication, len(p.flavors))
 	expandCommit := sync.Once{}
 	fetchManifests := parallel.NewActivitySync(ctx)
-	for i, flavor := range p.flavors {
+	for i, flavorConfig := range p.flavors {
 		fetchManifests.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
-			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor.Cname, version, commit)
-			ctx = log.WithValues(ctx, "cname", flavor.Cname, "platform", flavor.Platform)
+			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
+			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor, "platform", flavorConfig.Platform)
 
 			log.Info(ctx, "Retrieving manifest")
 			manifest, er := cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
@@ -52,19 +52,19 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 				if ok && p.manifestTarget != p.manifestSource {
 					return func() error {
 						publications[i] = cloudprovider.Publication{
-							Cname: flavor.Cname,
+							Flavor: flavorConfig.Flavor,
 						}
 
 						return nil
 					}, nil
 				}
-				return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor.Cname, er)
+				return nil, fmt.Errorf("cannot get manifest for %s: %w", flavorConfig.Flavor, er)
 			}
 			if manifest.Version != version {
-				return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavor.Cname, manifest.Version)
+				return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavorConfig.Flavor, manifest.Version)
 			}
 			if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
-				return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavor.Cname, manifest.BuildCommittish)
+				return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavorConfig.Flavor, manifest.BuildCommittish)
 			}
 			expandCommit.Do(func() {
 				commit = manifest.BuildCommittish
@@ -74,7 +74,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 				if target.CanPublish(manifest) {
 					return func() error {
 						publications[i] = cloudprovider.Publication{
-							Cname:    flavor.Cname,
+							Flavor:   flavorConfig.Flavor,
 							Manifest: manifest,
 							Target:   target,
 						}
@@ -84,7 +84,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 				}
 			}
 
-			return nil, fmt.Errorf("no publishing target for %s", flavor.Cname)
+			return nil, fmt.Errorf("no publishing target for %s", flavorConfig.Flavor)
 		})
 	}
 	err = fetchManifests.Wait()
@@ -96,17 +96,17 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 	unpublishPublications := parallel.NewLimitedActivity(ctx, 7)
 	for i, publication := range publications {
 		if publication.Manifest == nil {
-			lctx := log.WithValues(ctx, "cname", publication.Cname)
+			lctx := log.WithValues(ctx, "flavor", publication.Flavor)
 			log.Info(lctx, "Already unpublished, skipping")
 			continue
 		}
 
 		unpublishPublications.Go(func(ctx context.Context) error {
-			ctx = log.WithValues(ctx, "cname", publication.Cname, "platform", publication.Target.Type())
+			ctx = log.WithValues(ctx, "flavor", publication.Flavor, "platform", publication.Target.Type())
 
 			isPublished, er := publication.Target.IsPublished(publication.Manifest)
 			if er != nil {
-				return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Cname, er)
+				return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Flavor, er)
 			}
 			if !isPublished {
 				log.Info(ctx, "Already unpublished, skipping")
@@ -116,7 +116,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 			log.Info(ctx, "Unpublishing image")
 			er = publication.Target.Unpublish(ctx, publication.Manifest, steamroll)
 			if er != nil {
-				return fmt.Errorf("cannot unpublish %s from %s: %w", publication.Cname, publication.Target.Type(), er)
+				return fmt.Errorf("cannot unpublish %s from %s: %w", publication.Flavor, publication.Target.Type(), er)
 			}
 			publication.Manifest.PublishedImageMetadata = nil
 
@@ -125,10 +125,10 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 			}
 
 			log.Info(ctx, "Updating manifest")
-			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Cname, version, commit)
+			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Flavor, version, commit)
 			er = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, publication.Manifest)
 			if er != nil {
-				return fmt.Errorf("cannot put manifest for %s: %w", publication.Cname, er)
+				return fmt.Errorf("cannot put manifest for %s: %w", publication.Flavor, er)
 			}
 
 			publications[i] = publication

@@ -137,10 +137,10 @@ func (*gcp) ImageSuffix() string {
 	return ".gcpimage.tar.gz"
 }
 
-func (*gcp) imageName(cname, version, committish string) string {
-	cname = hsh.Hash(fnv.New64(), cname)
+func (*gcp) imageName(flavor, version, committish string) string {
+	flavor = hsh.Hash(fnv.New64(), flavor)
 	version = strings.ReplaceAll(version, ".", "-")
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
 
 func (*gcp) architecture(arch gardenlinux.Architecture) (string, error) {
@@ -175,20 +175,20 @@ func (p *gcp) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return gcpOutput.Project != "" && gcpOutput.Image != "", nil
 }
 
-func (p *gcp) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 
-	pl := platform(cname)
+	pl := platform(flavor)
 	if pl != "gcp" {
-		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
+		return nil, fmt.Errorf("invalid flavor %s for target %s", flavor, p.Type())
 	}
 	if pl != manifest.Platform {
-		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
+	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
 	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
@@ -196,7 +196,7 @@ func (p *gcp) Publish(ctx context.Context, cname string, manifest *gardenlinux.M
 	var arch string
 	arch, err = p.architecture(manifest.Architecture)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
+		return nil, fmt.Errorf("invalid manifest %s: %w", flavor, err)
 	}
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository(),
 		"project", p.pubCfg.Project)

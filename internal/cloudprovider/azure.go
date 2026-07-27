@@ -361,8 +361,8 @@ func (*azure) ImageSuffix() string {
 	return ".vhd"
 }
 
-func (*azure) imageName(cname, version, committish string) string {
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
+func (*azure) imageName(flavor, version, committish string) string {
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
 
 func (*azure) version(version string) (string, error) {
@@ -384,12 +384,12 @@ func (*azure) architecture(arch gardenlinux.Architecture) (armcompute.Architectu
 	}
 }
 
-func (*azure) sku(base, cname string, bios bool) string {
-	cname = strings.TrimPrefix(cname, "azure-")
+func (*azure) sku(base, flavor string, bios bool) string {
+	suffix := strings.TrimPrefix(flavor, "azure-")
 	if bios {
-		cname += "-bios"
+		suffix += "-bios"
 	}
-	return fmt.Sprintf("%s-%s", base, cname)
+	return fmt.Sprintf("%s-%s", base, suffix)
 }
 
 func (p *azure) CanPublish(manifest *gardenlinux.Manifest) bool {
@@ -413,17 +413,17 @@ func (p *azure) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return len(azureOutput.Images) > 0, nil
 }
 
-func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 
-	pl := platform(cname)
+	pl := platform(flavor)
 	if pl != "azure" {
-		return nil, fmt.Errorf("invalid cname %s for target %s", cname, p.Type())
+		return nil, fmt.Errorf("invalid flavor %s for target %s", flavor, p.Type())
 	}
 	if pl != manifest.Platform {
-		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
 	ctx = log.WithValues(ctx, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
@@ -431,7 +431,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux
 		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
 	}
 
-	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
+	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
 	imageVersion, err := p.version(manifest.Version)
 	if err != nil {
 		return nil, fmt.Errorf("invalid version %s: %w", manifest.Version, err)
@@ -445,7 +445,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux
 	var arch armcompute.Architecture
 	arch, err = p.architecture(manifest.Architecture)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
+		return nil, fmt.Errorf("invalid manifest %s: %w", flavor, err)
 	}
 
 	var requireUEFI, secureBoot bool
@@ -464,7 +464,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux
 	publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
-		images, er := p.publish(ctx, cname, p.source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
+		images, er := p.publish(ctx, flavor, p.source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
 		if er != nil {
 			return nil, er
 		}
@@ -484,7 +484,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux
 				source = p.source
 			}
 
-			images, er := p.publish(ctx, cname, source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db,
+			images, er := p.publish(ctx, flavor, source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db,
 				true)
 			if er != nil {
 				return nil, er
@@ -508,7 +508,7 @@ func (p *azure) Publish(ctx context.Context, cname string, manifest *gardenlinux
 	}, nil
 }
 
-func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource, key, image, imageVersion string,
+func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSource, key, image, imageVersion string,
 	arch armcompute.Architecture, bios, secureBoot bool, pk, kek, db string, china bool,
 ) ([]azurePublishedImage, error) {
 	cld := "public"
@@ -518,7 +518,7 @@ func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource
 		taskImage += "/china"
 	}
 
-	imageDefinition := p.sku(p.pubCfg.ImagePrefix, cname, false)
+	imageDefinition := p.sku(p.pubCfg.ImagePrefix, flavor, false)
 	var imageDefinitionBIOS string
 
 	bctx := ctx
@@ -534,9 +534,9 @@ func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource
 
 	if bios {
 		createBlobAndImage.Go(func(_ context.Context) error {
-			imageDefinitionBIOS = p.sku(p.pubCfg.ImagePrefix, cname, true)
+			imageDefinitionBIOS = p.sku(p.pubCfg.ImagePrefix, flavor, true)
 
-			er := p.createImageDefinition(bctx, imageDefinitionBIOS, cname, arch, true, false, china)
+			er := p.createImageDefinition(bctx, imageDefinitionBIOS, flavor, arch, true, false, china)
 			if er != nil {
 				return task.Fail(bctx, fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinitionBIOS, image, er))
 			}
@@ -546,7 +546,7 @@ func (p *azure) publish(ctx context.Context, cname string, source ArtifactSource
 	}
 
 	createBlobAndImage.Go(func(ctx context.Context) error {
-		er := p.createImageDefinition(ctx, imageDefinition, cname, arch, false, secureBoot, china)
+		er := p.createImageDefinition(ctx, imageDefinition, flavor, arch, false, secureBoot, china)
 		if er != nil {
 			return task.Fail(ctx, fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinition, image, er))
 		}
@@ -727,7 +727,7 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 	return manifest.RequireUEFI, manifest.SecureBoot, pk, kek, db, nil
 }
 
-func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, cname string, arch armcompute.Architecture, bios,
+func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, flavor string, arch armcompute.Architecture, bios,
 	secureBoot bool, china bool,
 ) error {
 	gen := armcompute.HyperVGenerationV2
@@ -782,7 +782,7 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, cnam
 				Identifier: &armcompute.GalleryImageIdentifier{
 					Offer:     &p.pubCfg.ImageOffer,
 					Publisher: &p.pubCfg.ImagePublisher,
-					SKU:       new(p.sku(p.pubCfg.ImageSKUPrefix, cname, bios)),
+					SKU:       new(p.sku(p.pubCfg.ImageSKUPrefix, flavor, bios)),
 				},
 				OSState:          new(armcompute.OperatingSystemStateTypesGeneralized),
 				OSType:           new(armcompute.OperatingSystemTypesLinux),
