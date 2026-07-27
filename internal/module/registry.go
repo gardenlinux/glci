@@ -2,6 +2,7 @@ package module
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"strconv"
 	"strings"
@@ -10,7 +11,10 @@ import (
 )
 
 //nolint:gochecknoglobals // Required for automatic registration.
-var configTypes = make(map[reflect.Type]any)
+var (
+	configTypes  = make(map[reflect.Type]any)
+	selectorKeys = make(map[reflect.Type]string)
+)
 
 //nolint:gochecknoglobals // Cached reflect.Type for the marker interfaces.
 var (
@@ -20,13 +24,17 @@ var (
 
 // Category is the registry of implementations for a Module type T.
 type Category[T Module] struct {
-	ctors map[string]func(*Base) T
+	selectorKey string
+	ctors       map[string]func(*Base) T
 }
 
-// NewCategory creates a Category.
-func NewCategory[T Module]() *Category[T] {
+// NewCategory creates a Category whose implementations are selected by the value under selectorKey.
+func NewCategory[T Module](selectorKey string) *Category[T] {
+	selectorKeys[reflect.TypeFor[T]()] = selectorKey
+
 	return &Category[T]{
-		ctors: make(map[string]func(*Base) T),
+		selectorKey: selectorKey,
+		ctors:       make(map[string]func(*Base) T),
 	}
 }
 
@@ -67,9 +75,16 @@ func ConfigureModules[T Module](b *Base, cat *Category[T], slot SliceSlot[T]) ([
 func configureModule[T Module](b *Base, cat *Category[T], rawCfg map[string]any) (T, error) {
 	var zero T
 
+	typ, _ := rawCfg[cat.selectorKey].(string)
+	if typ == "" {
+		return zero, fmt.Errorf("missing %q", cat.selectorKey)
+	}
+
+	rawCfg = maps.Clone(rawCfg)
+	delete(rawCfg, cat.selectorKey)
+
 	type config struct {
-		Type string `mapstructure:"type"`
-		ID   string `mapstructure:"id,omitzero"`
+		ID string `mapstructure:"id,omitzero"`
 		//nolint:revive,nolintlint // The remain tag overrides the -, which is necessary to avoid an implicit name.
 		Config map[string]any `mapstructure:"-,remain"`
 	}
@@ -79,9 +94,9 @@ func configureModule[T Module](b *Base, cat *Category[T], rawCfg map[string]any)
 		return zero, err
 	}
 
-	ctor, ok := cat.ctors[cfg.Type]
+	ctor, ok := cat.ctors[typ]
 	if !ok {
-		return zero, fmt.Errorf("unknown type %q", cfg.Type)
+		return zero, fmt.Errorf("unknown type %q", typ)
 	}
 	mod := ctor(b)
 
@@ -94,7 +109,7 @@ func configureModule[T Module](b *Base, cat *Category[T], rawCfg map[string]any)
 
 	err = mod.Configure(cfg.Config)
 	if err != nil {
-		return zero, fmt.Errorf("cannot configure type %q: %w", cfg.Type, err)
+		return zero, fmt.Errorf("cannot configure type %q: %w", typ, err)
 	}
 
 	return mod, nil
@@ -295,7 +310,21 @@ func (c *keyCollector) walkSingleSlot(slotType reflect.Type, prefix string) {
 }
 
 func (c *keyCollector) walkCategory(slotType reflect.Type, prefix string) {
-	c.keys = append(c.keys, prefix+".type", prefix+".id")
+	if c.err != nil {
+		return
+	}
+
+	selectorKey, ok := selectorKeys[slotType]
+	if !ok {
+		c.err = fmt.Errorf("category at config key %q not registered", prefix)
+		return
+	}
+	if selectorKey == "" {
+		c.err = fmt.Errorf("category at config key %q has no selector key", prefix)
+		return
+	}
+
+	c.keys = append(c.keys, prefix+"."+selectorKey, prefix+".id")
 	for typ := range configTypes {
 		if !typ.Implements(slotType) {
 			continue

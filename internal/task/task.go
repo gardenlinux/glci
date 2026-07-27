@@ -25,7 +25,7 @@ type (
 // Category is the module framework registry for StatePersistor implementations.
 //
 //nolint:gochecknoglobals // Required for automatic registration.
-var Category = module.NewCategory[StatePersistor]()
+var Category = module.NewCategory[StatePersistor]("backend")
 
 // StatePersistor is anything that can load and save task state.
 type StatePersistor interface {

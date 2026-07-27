@@ -19,7 +19,7 @@ flavors:
   flavor: openstackbaremetal-gardener_prod-amd64
 publishing:
   credentials:
-    type: Vault
+    source: Vault
     server: https://vault.tools.sap
     namespace: gardnlinux
     token:
@@ -29,22 +29,22 @@ publishing:
   manifest_source: S3
   sources:
   - id: S3
-    type: AWS
+    source: AWS
     config: gardenlinux
     region: eu-central-1
     bucket: gardenlinux-github-releases
   - id: S3-China
-    type: AWS
+    source: AWS
     config: gardenlinux-cn
     region: cn-northwest-1
     bucket: gardenlinux-github-releases
   targets:
-  - type: Aliyun
+  - target: Aliyun
     source: S3
     config: gardenlinux
     region: eu-central-1
     bucket: gardenlinux-community
-  - type: AWS
+  - target: AWS
     source: S3
     source_china: S3-China
     config: gardenlinux
@@ -54,7 +54,7 @@ publishing:
     image_tags:
       static_tags:
         sec-by-def-public-image-exception: enabled
-  - type: Azure
+  - target: Azure
     source: S3
     source_china: S3-China
     config: gardenlinux
@@ -71,12 +71,12 @@ publishing:
     image_publisher: GardenLinux
     image_offer: gardenlinux
     image_sku_prefix: gardenlinux_nvme
-  - type: GCP
+  - target: GCP
     source: S3
     config: gardenlinux
     project: sap-se-gcp-gardenlinux
     bucket: gardenlinux-images
-  - type: OpenStack
+  - target: OpenStack
     source: S3
     source_china: S3-China
     configs:
@@ -101,11 +101,11 @@ publishing:
       - na-us-2
       - na-us-3
   ocm:
-    type: OCI
+    target: OCI
     config: gardener
     repository: europe-docker.pkg.dev/gardener-project/releases
   state:
-    type: AWS
+    backend: AWS
     config: gardenlinux
     region: eu-central-1
     bucket: glci-state
