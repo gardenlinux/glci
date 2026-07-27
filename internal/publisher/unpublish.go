@@ -43,7 +43,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 	for i, flavorConfig := range p.flavors {
 		fetchManifests.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
-			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor, "platform", flavorConfig.Platform)
+			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor, "targetType", flavorConfig.TargetType)
 
 			log.Info(ctx, "Retrieving manifest")
 			manifest, er := cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
@@ -102,7 +102,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 		}
 
 		unpublishPublications.Go(func(ctx context.Context) error {
-			ctx = log.WithValues(ctx, "flavor", publication.Flavor, "platform", publication.Target.Type())
+			ctx = log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
 
 			isPublished, er := publication.Target.IsPublished(publication.Manifest)
 			if er != nil {

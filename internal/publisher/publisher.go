@@ -34,8 +34,8 @@ type Publisher struct {
 
 // FlavorConfig is a Garden Linux release flavor together with its publishing configuration.
 type FlavorConfig struct {
-	Platform string `mapstructure:"platform"`
-	Flavor   string `mapstructure:"flavor"`
+	TargetType string `mapstructure:"target_type"`
+	Flavor     string `mapstructure:"flavor"`
 }
 
 type publisherConfig struct {

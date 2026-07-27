@@ -1,57 +1,57 @@
 flavors:
-- platform: Aliyun
+- target_type: Aliyun
   flavor: ali-gardener_prod-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_prod-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_prod-arm64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_fips_prod-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_fips_prod-arm64
-- platform: Azure
+- target_type: Azure
   flavor: azure-gardener_prod-amd64
-- platform: Azure
+- target_type: Azure
   flavor: azure-gardener_prod-arm64
-- platform: GCP
+- target_type: GCP
   flavor: gcp-gardener_prod-amd64
-- platform: GCP
+- target_type: GCP
   flavor: gcp-gardener_prod-arm64
-- platform: OpenStack
+- target_type: OpenStack
   flavor: openstack-gardener_prod-amd64
-- platform: OpenStack
+- target_type: OpenStack
   flavor: openstack-gardener-metal_prod-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_prod_usi-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_prod_usi-arm64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_fips_prod_usi-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_fips_prod_usi-arm64
-- platform: Azure
+- target_type: Azure
   flavor: azure-gardener_prod_usi-amd64
-- platform: Azure
+- target_type: Azure
   flavor: azure-gardener_prod_usi-arm64
-- platform: GCP
+- target_type: GCP
   flavor: gcp-gardener_prod_usi-amd64
-- platform: GCP
+- target_type: GCP
   flavor: gcp-gardener_prod_usi-arm64
-- platform: OpenStack
+- target_type: OpenStack
   flavor: openstack-gardener_prod_usi-amd64
-- platform: OpenStack
+- target_type: OpenStack
   flavor: openstack-gardener-metal_prod_usi-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_prod_tpm2_trustedboot-amd64
-- platform: AWS
+- target_type: AWS
   flavor: aws-gardener_prod_tpm2_trustedboot-arm64
-- platform: Azure
+- target_type: Azure
   flavor: azure-gardener_prod_tpm2_trustedboot-amd64
-- platform: Azure
+- target_type: Azure
   flavor: azure-gardener_prod_tpm2_trustedboot-arm64
-- platform: GCP
+- target_type: GCP
   flavor: gcp-gardener_prod_tpm2_trustedboot-amd64
-- platform: GCP
+- target_type: GCP
   flavor: gcp-gardener_prod_tpm2_trustedboot-arm64
 publishing:
   credentials:
