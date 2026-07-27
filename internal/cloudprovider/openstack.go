@@ -156,11 +156,11 @@ func (*openstack) ImageSuffix() string {
 	return ".vmdk"
 }
 
-func (p *openstack) imageName(cname, version, committish string) string {
+func (p *openstack) imageName(flavor, version, committish string) string {
 	if p.pubCfg.Test {
-		cname += "-test"
+		flavor += "-test"
 	}
-	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", cname, version, committish)
+	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
 
 func (*openstack) variant(platform, variant string) (openstackVariant, error) {
@@ -227,22 +227,22 @@ func (p *openstack) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return len(openstackOutput.Images) > 0, nil
 }
 
-func (p *openstack) Publish(ctx context.Context, cname string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *openstack) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 	if manifest.Platform == "metal,openstackbaremetal" { // A terrible workaround, please remove a soon as possible.
 		manifest.Platform = "openstackbaremetal"
 	}
-	if platform(cname) != manifest.Platform {
-		return nil, fmt.Errorf("cname %s does not match platform %s", cname, manifest.Platform)
+	if platform(flavor) != manifest.Platform {
+		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
 
-	image := p.imageName(cname, manifest.Version, manifest.BuildCommittish)
+	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
 	var imagePath gardenlinux.S3ReleaseFile
 	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
@@ -251,7 +251,7 @@ func (p *openstack) Publish(ctx context.Context, cname string, manifest *gardenl
 	var arch string
 	arch, err = p.architecture(manifest.Architecture)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest %s: %w", cname, err)
+		return nil, fmt.Errorf("invalid manifest %s: %w", flavor, err)
 	}
 	ctx = log.WithValues(ctx, "image", image, "variant", variant, "architecture", arch, "sourceType", p.source.Type(),
 		"sourceRepo", p.source.Repository())

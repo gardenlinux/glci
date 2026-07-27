@@ -28,14 +28,14 @@ type Publisher struct {
 	state          task.StatePersistor
 
 	cfg     publisherConfig
-	flavors []Flavor
+	flavors []FlavorConfig
 	aliases map[string][]string
 }
 
-// Flavor is a Garden Linux release flavor.
-type Flavor struct {
+// FlavorConfig is a Garden Linux release flavor together with its publishing configuration.
+type FlavorConfig struct {
 	Platform string `mapstructure:"platform"`
-	Cname    string `mapstructure:"cname"`
+	Flavor   string `mapstructure:"flavor"`
 }
 
 type publisherConfig struct {
@@ -46,7 +46,7 @@ type publisherConfig struct {
 	Targets        module.SliceSlot[cloudprovider.PublishingTarget] `mapstructure:"targets"`
 	OCM            module.Slot[cloudprovider.OCMTarget]             `mapstructure:"ocm"`
 	State          module.Slot[task.StatePersistor]                 `mapstructure:"state"`
-	Flavors        []Flavor                                         `mapstructure:"flavors"`
+	Flavors        []FlavorConfig                                   `mapstructure:"flavors"`
 	Aliases        map[string][]string                              `mapstructure:"aliases,omitempty"`
 }
 

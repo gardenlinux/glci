@@ -163,7 +163,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		fetchPackages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
 			pkgs, err := getPackages(ctx, source, publication.Manifest)
 			if err != nil {
-				return nil, fmt.Errorf("cannot list packages for %s: %w", publication.Cname, err)
+				return nil, fmt.Errorf("cannot list packages for %s: %w", publication.Flavor, err)
 			}
 
 			return func() error {
@@ -182,13 +182,13 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		var imagePath gardenlinux.S3ReleaseFile
 		imagePath, err = publication.Manifest.PathBySuffix(publication.Target.ImageSuffix())
 		if err != nil {
-			return nil, fmt.Errorf("missing image for %s: %w", publication.Cname, err)
+			return nil, fmt.Errorf("missing image for %s: %w", publication.Flavor, err)
 		}
 
 		var rootfsPath gardenlinux.S3ReleaseFile
 		rootfsPath, err = publication.Manifest.PathBySuffix(".tar")
 		if err != nil {
-			return nil, fmt.Errorf("missing rootfs for %s: %w", publication.Cname, err)
+			return nil, fmt.Errorf("missing rootfs for %s: %w", publication.Flavor, err)
 		}
 
 		labels := make([]componentDescriptorlabel, 0, 3)
@@ -218,7 +218,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			"feature-flags":    strings.Join(publication.Manifest.Modifiers, ","),
 			"architecture":     string(publication.Manifest.Architecture),
 			"platform":         publication.Manifest.Platform,
-			"platform-variant": publication.Manifest.PlatformVariant,
+			"platform_variant": publication.Manifest.PlatformVariant,
 		}
 		if publication.Manifest.PlatformVariant == "" {
 			delete(extraIdentity, "platform_variant")
