@@ -16,11 +16,11 @@ import (
 )
 
 // Publish publishes a release to all configured cloud providers.
-func (p *Publisher) Publish(ctx context.Context, version, commit string, omitComponentDescritpr bool) error {
+func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
 	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
-	err := p.publish(ctx, version, commit, omitComponentDescritpr)
+	err := p.publish(ctx, version, commit, omitIrreversible, omitComponentDescriptor)
 	stateErr := task.PersistorError(ctx)
 	if stateErr != nil {
 		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
@@ -31,9 +31,13 @@ func (p *Publisher) Publish(ctx context.Context, version, commit string, omitCom
 	return err
 }
 
-func (p *Publisher) publish(ctx context.Context, version, commit string, omitComponentDescritpr bool) error {
+func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
+		if !target.CanUnpublish() {
+			continue
+		}
+
 		rollbackHandlers = append(rollbackHandlers, target)
 	}
 	err := task.Rollback(ctx, rollbackHandlers)
@@ -113,49 +117,20 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitCom
 	}
 
 	log.Info(ctx, "Publishing images", "count", len(publications))
-	publishPublications := parallel.NewActivity(ctx)
-	for i, publication := range publications {
-		publishPublications.Go(func(ctx context.Context) error {
-			ctx = log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
+	notUnpublishablePublications := make([]*cloudprovider.Publication, 0, len(publications))
+	publishPublication := parallel.NewActivity(ctx)
+	for i := range publications {
+		publication := &publications[i]
+		if !publication.Target.CanUnpublish() {
+			notUnpublishablePublications = append(notUnpublishablePublications, publication)
+			continue
+		}
 
-			uptime := cli.ExecTime(ctx)
-			if uptime != 0 && uptime.Hours() > 5 {
-				return errors.New("publishing taking too long, restart GLCI to resume")
-			}
-
-			isPublished, er := publication.Target.IsPublished(publication.Manifest)
-			if er != nil {
-				return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Flavor, err)
-			}
-			if isPublished {
-				log.Info(ctx, "Already published, skipping")
-				return nil
-			}
-			ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, publication.Flavor), true), publication.Target.CanRollback())
-
-			log.Info(ctx, "Publishing image")
-			publication.Manifest.PublishedImageMetadata, er = publication.Target.Publish(ctx, publication.Flavor, publication.Manifest)
-			if er != nil {
-				return fmt.Errorf("cannot publish %s to %s: %w", publication.Flavor, publication.Target.Type(), er)
-			}
-
-			if glciVer != "" {
-				publication.Manifest.GLCIVersion = glciVer
-			}
-
-			log.Info(ctx, "Updating manifest")
-			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Flavor, version, commit)
-			task.RemoveCompleted(ctx, publication.Flavor)
-			er = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, publication.Manifest)
-			if er != nil {
-				return fmt.Errorf("cannot put manifest for %s: %w", publication.Flavor, er)
-			}
-
-			publications[i] = publication
-			return nil
+		publishPublication.Go(func(ctx context.Context) error {
+			return p.publishPublication(ctx, publication, version, commit, glciVer)
 		})
 	}
-	err = publishPublications.Wait()
+	err = publishPublication.Wait()
 	if err != nil {
 		return err
 	}
@@ -166,7 +141,26 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitCom
 		return fmt.Errorf("cannot maintain state: %w", stateErr)
 	}
 
-	if !omitComponentDescritpr {
+	if omitIrreversible {
+		if len(notUnpublishablePublications) > 0 {
+			log.Info(ctx, "Skipping targets that cannot be unpublished", "count", len(notUnpublishablePublications))
+		}
+	} else {
+		publishPublication = parallel.NewActivity(ctx)
+		for _, publication := range notUnpublishablePublications {
+			publishPublication.Go(func(ctx context.Context) error {
+				return p.publishPublication(ctx, publication, version, commit, glciVer)
+			})
+		}
+		err = publishPublication.Wait()
+		if err != nil {
+			return err
+		}
+	}
+
+	if omitIrreversible || omitComponentDescriptor {
+		log.Info(ctx, "Skipping component descriptor")
+	} else {
 		log.Debug(ctx, "Finalizing component descriptor")
 		err = ocm.AddPublicationOutput(descriptor, publications)
 		if err != nil {
@@ -188,6 +182,45 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitCom
 	}
 
 	log.Info(ctx, "Publishing completed successfully")
+	return nil
+}
+
+func (p *Publisher) publishPublication(ctx context.Context, publication *cloudprovider.Publication, version, commit, glciVer string) error {
+	ctx = log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
+
+	uptime := cli.ExecTime(ctx)
+	if uptime != 0 && uptime.Hours() > 5 {
+		return errors.New("publishing taking too long, restart to resume")
+	}
+
+	isPublished, err := publication.Target.IsPublished(publication.Manifest)
+	if err != nil {
+		return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Flavor, err)
+	}
+	if isPublished {
+		log.Info(ctx, "Already published, skipping")
+		return nil
+	}
+	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, publication.Flavor), true), publication.Target.RollbackDomain())
+
+	log.Info(ctx, "Publishing image")
+	publication.Manifest.PublishedImageMetadata, err = publication.Target.Publish(ctx, publication.Flavor, publication.Manifest)
+	if err != nil {
+		return fmt.Errorf("cannot publish %s to %s: %w", publication.Flavor, publication.Target.Type(), err)
+	}
+
+	if glciVer != "" {
+		publication.Manifest.GLCIVersion = glciVer
+	}
+
+	log.Info(ctx, "Updating manifest")
+	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Flavor, version, commit)
+	task.RemoveCompleted(ctx, publication.Flavor)
+	err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, publication.Manifest)
+	if err != nil {
+		return fmt.Errorf("cannot put manifest for %s: %w", publication.Flavor, err)
+	}
+
 	return nil
 }
 

@@ -78,7 +78,7 @@ func WithStatePersistor(ctx context.Context, persistor StatePersistor, id string
 // WithDomain stores a domain into the context.
 func WithDomain(ctx context.Context, domain string) context.Context {
 	tset, _ := ctx.Value(ctxkSet{}).(*taskSet)
-	if tset == nil {
+	if tset == nil || tset.domains == nil {
 		return ctx
 	}
 
@@ -120,7 +120,7 @@ type State any
 // Begin begins a new task with an initial state and associates it to the context.
 func Begin[STATE any](ctx context.Context, id string, state STATE) context.Context {
 	tset, _ := ctx.Value(ctxkSet{}).(*taskSet)
-	if tset == nil {
+	if tset == nil || tset.domains == nil {
 		return ctx
 	}
 
@@ -331,7 +331,7 @@ func ParseState[STATE any](generic State) (STATE, error) {
 
 // RollbackHandler is anything that can roll back task state.
 type RollbackHandler interface {
-	CanRollback() string
+	RollbackDomain() string
 	Rollback(ctx context.Context, tasks map[string]Task) error
 }
 
@@ -344,7 +344,7 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 
 	domainHandlers := make(map[string]RollbackHandler, len(handlers))
 	for _, handler := range handlers {
-		domain := handler.CanRollback()
+		domain := handler.RollbackDomain()
 		_, ok := domainHandlers[domain]
 		if ok {
 			return fmt.Errorf("duplicate handler for domain %s", domain)

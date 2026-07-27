@@ -3,6 +3,7 @@ package cloudprovider
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -109,6 +110,7 @@ type PublishingTarget interface {
 	CanPublish(manifest *gardenlinux.Manifest) bool
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
 	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
+	CanUnpublish() bool
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	task.RollbackHandler
 }
@@ -167,6 +169,29 @@ type KeyNotFoundError struct {
 
 func (e KeyNotFoundError) Error() string {
 	return e.err.Error()
+}
+
+//nolint:unused // Canonical base for targets that cannot be unpublished.
+type notUnpublishableTarget struct{}
+
+//nolint:unused // Canonical base for targets that cannot be unpublished.
+func (notUnpublishableTarget) CanUnpublish() bool {
+	return false
+}
+
+//nolint:unused // Canonical base for targets that cannot be unpublished.
+func (notUnpublishableTarget) Unpublish(context.Context, *gardenlinux.Manifest, bool) error {
+	return errors.New("target cannot unpublish")
+}
+
+//nolint:unused // Canonical base for targets that cannot be unpublished.
+func (notUnpublishableTarget) RollbackDomain() string {
+	return ""
+}
+
+//nolint:unused // Canonical base for targets that cannot be unpublished.
+func (notUnpublishableTarget) Rollback(context.Context, map[string]task.Task) error {
+	return errors.New("target cannot rollback")
 }
 
 func platform(flavor string) string {
