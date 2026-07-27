@@ -6,6 +6,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/credsprovider"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -34,8 +35,7 @@ type Publisher struct {
 
 // FlavorConfig is a Garden Linux release flavor together with its publishing configuration.
 type FlavorConfig struct {
-	TargetType string `mapstructure:"target_type"`
-	Flavor     string `mapstructure:"flavor"`
+	Flavor string `mapstructure:"flavor"`
 }
 
 type publisherConfig struct {
@@ -133,4 +133,23 @@ func (p *Publisher) Configurables() []module.Configurable {
 	configurables = module.AppendConfigurables(configurables, p.sources)
 	configurables = module.AppendConfigurables(configurables, p.targets)
 	return configurables
+}
+
+func (p *Publisher) selectTarget(manifest *gardenlinux.Manifest, flavor string) (cloudprovider.PublishingTarget, error) {
+	var target cloudprovider.PublishingTarget
+	for _, t := range p.targets {
+		if !t.CanPublish(manifest) {
+			continue
+		}
+
+		if target != nil {
+			return nil, fmt.Errorf("multiple publishing targets for %s", flavor)
+		}
+		target = t
+	}
+	if target == nil {
+		return nil, fmt.Errorf("no publishing target for %s", flavor)
+	}
+
+	return target, nil
 }
