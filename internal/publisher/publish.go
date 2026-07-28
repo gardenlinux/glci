@@ -116,9 +116,9 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	}
 
 	manifestsInDescriptor := make([]gardenlinux.FlavorManifest, 0, len(publications))
-	for _, publication := range publications {
-		if publication.InComponentDescriptor {
-			manifestsInDescriptor = append(manifestsInDescriptor, publication.FlavorManifest)
+	for _, pub := range publications {
+		if pub.InComponentDescriptor {
+			manifestsInDescriptor = append(manifestsInDescriptor, pub.FlavorManifest)
 		}
 	}
 
@@ -132,14 +132,14 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	log.Info(ctx, "Publishing images", "count", len(publications))
 	notUnpublishablePublications := make([]publication, 0, len(publications))
 	publishPublication := parallel.NewActivity(ctx)
-	for _, publication := range publications {
-		if !publication.Target.CanUnpublish() {
-			notUnpublishablePublications = append(notUnpublishablePublications, publication)
+	for _, pub := range publications {
+		if !pub.Target.CanUnpublish() {
+			notUnpublishablePublications = append(notUnpublishablePublications, pub)
 			continue
 		}
 
 		publishPublication.Go(func(ctx context.Context) error {
-			return p.publishPublication(ctx, publication, version, commit, glciVer)
+			return p.publishPublication(ctx, pub, version, commit, glciVer)
 		})
 	}
 	err = publishPublication.Wait()
@@ -159,9 +159,9 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		}
 	} else {
 		publishPublication = parallel.NewActivity(ctx)
-		for _, publication := range notUnpublishablePublications {
+		for _, pub := range notUnpublishablePublications {
 			publishPublication.Go(func(ctx context.Context) error {
-				return p.publishPublication(ctx, publication, version, commit, glciVer)
+				return p.publishPublication(ctx, pub, version, commit, glciVer)
 			})
 		}
 		err = publishPublication.Wait()
