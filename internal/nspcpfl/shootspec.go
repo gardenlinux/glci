@@ -12,7 +12,7 @@ import (
 )
 
 func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudProfile) (*gardencorev1beta1.Shoot, []byte, error) {
-	major := strings.Split(version, ".")[0]
+	major, _, _ := strings.Cut(version, ".")
 	platform := profile.Spec.Parent.Name
 
 	var workers []gardencorev1beta1.Worker
@@ -72,24 +72,25 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 				architecture := string(arch)
 				var machineType string
 				var volumeType string
-				if platform == "aws" {
+				switch platform {
+				case "aws":
 					machineType = "a1.2xlarge"
 					if architecture == "amd64" {
 						machineType = "m5.large"
 					}
 					volumeType = "gp2"
-				} else if platform == "alicloud" {
+				case "alicloud":
 					machineType = "ecs.t6-c1m2.large"
 					volumeType = "cloud_efficiency"
-				} else if platform == "gcp" {
+				case "gcp":
 					machineType = "n1-standard-2"
 					if architecture == "arm64" {
 						machineType = "t2a-standard-2"
 					}
 					volumeType = "pd-standard"
-				} else if platform == "converged-cloud" {
+				case "converged-cloud":
 					machineType = "m1.xsmall"
-				} else if platform == "az" {
+				case "az":
 					machineType = "Standard_DS2_v2"
 					volumeType = "Standard_LRS"
 				}
@@ -110,7 +111,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 							Name:    "gardenlinux",
 							Version: &version,
 						},
-						Architecture: ptr(architecture),
+						Architecture: &architecture,
 					},
 					Zones:   []string{zoneName},
 					Maximum: 2,
@@ -118,7 +119,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 				}
 				if platform != "converged-cloud" {
 					worker.Volume = &gardencorev1beta1.Volume{
-						Type:       ptr(volumeType),
+						Type:       &volumeType,
 						VolumeSize: "50Gi",
 					}
 				}
@@ -127,6 +128,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 		}
 	}
 
+	networkType := "calico"
 	shoot := &gardencorev1beta1.Shoot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "core.gardener.cloud/v1beta1",
@@ -150,7 +152,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 				Kind: "NamespacedCloudProfile",
 			},
 			Networking: &gardencorev1beta1.Networking{
-				Type: ptr("calico"),
+				Type: &networkType,
 			},
 			Region: region,
 		},
@@ -161,7 +163,8 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 		return nil, nil, fmt.Errorf("cannot marshal shoot to JSON: %w", err)
 	}
 	var intermediate map[string]any
-	if err := json.Unmarshal(jsonBytes, &intermediate); err != nil {
+	err = json.Unmarshal(jsonBytes, &intermediate)
+	if err != nil {
 		return nil, nil, fmt.Errorf("cannot unmarshal shoot JSON: %w", err)
 	}
 	if meta, ok := intermediate["metadata"].(map[string]any); ok {
@@ -176,8 +179,6 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 
 	return shoot, shootYAML, nil
 }
-
-func ptr[T any](v T) *T { return &v }
 
 func BuildShootSpecYAML(version string, profile *gardencorev1beta1.NamespacedCloudProfile) ([]byte, error) {
 	_, shootYAML, err := buildShootSpec(version, profile)

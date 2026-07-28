@@ -18,8 +18,7 @@ import (
 )
 
 // Publish publishes a release to all configured cloud providers.
-
-func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool, omitNSCloudProfile bool) error {
+func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor, omitNSCloudProfile bool) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
 	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
@@ -34,8 +33,7 @@ func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrr
 	return err
 }
 
-
-func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool, omitNSCloudProfile bool) error {
+func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor, omitNSCloudProfile bool) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
 		if !target.CanUnpublish() {

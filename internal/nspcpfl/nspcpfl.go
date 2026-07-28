@@ -177,7 +177,8 @@ func ToYAML(d *gardencorev1beta1.NamespacedCloudProfile) ([]byte, error) {
 		return nil, fmt.Errorf("cannot marshal to JSON: %w", err)
 	}
 	var intermediate map[string]any
-	if err := json.Unmarshal(jsonBytes, &intermediate); err != nil {
+	err = json.Unmarshal(jsonBytes, &intermediate)
+	if err != nil {
 		return nil, fmt.Errorf("cannot unmarshal JSON: %w", err)
 	}
 	if meta, ok := intermediate["metadata"].(map[string]any); ok {
@@ -230,7 +231,8 @@ func MajorVersion(version string) string {
 	return strings.Split(version, ".")[0]
 }
 
-func newProfile(version, provider string, rawConfig *runtime.RawExtension, architecture []string) *gardencorev1beta1.NamespacedCloudProfile {
+func newProfile(version, provider string, rawConfig *runtime.RawExtension, architecture []string,
+) *gardencorev1beta1.NamespacedCloudProfile {
 	major := MajorVersion(version)
 	name := fmt.Sprintf("gardenlinux-%s-%s", major, strings.ToLower(provider))
 	return &gardencorev1beta1.NamespacedCloudProfile{
@@ -277,7 +279,8 @@ func decodePublishedMetadata[T any](pub cloudprovider.Publication) (T, error) {
 	if err != nil {
 		return meta, fmt.Errorf("cannot create decoder: %w", err)
 	}
-	if err := decoder.Decode(pub.Manifest.PublishedImageMetadata); err != nil {
+	err = decoder.Decode(pub.Manifest.PublishedImageMetadata)
+	if err != nil {
 		return meta, fmt.Errorf("cannot decode published image metadata: %w", err)
 	}
 	return meta, nil
