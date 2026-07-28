@@ -227,7 +227,7 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 			}
 
 			var shootYAML []byte
-			shootYAML, err := nspcpfl.BuildShootSpecYAML(version, profile)
+			shootYAML, err = nspcpfl.BuildShootSpecYAML(version, profile)
 			if err != nil {
 				return fmt.Errorf("invalid shoot spec for %s: %w", profile.Name, err)
 			}
