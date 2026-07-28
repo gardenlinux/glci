@@ -47,7 +47,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	glciVer := cli.Version(ctx)
 
-	publications := make([]cloudprovider.Publication, len(p.flavors))
+	publications := make([]publication, len(p.flavors))
 	expandCommit := sync.Once{}
 	fetchManifests := parallel.NewActivitySync(ctx)
 	for i, flavorConfig := range p.flavors {
@@ -95,10 +95,15 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 				return nil, er
 			}
 			return func() error {
-				publications[i] = cloudprovider.Publication{
-					Flavor:   flavorConfig.Flavor,
-					Manifest: manifest,
-					Target:   target,
+				publications[i] = publication{
+					FlavorManifest: gardenlinux.FlavorManifest{
+						Flavor:      flavorConfig.Flavor,
+						Manifest:    manifest,
+						ImageSuffix: target.ImageSuffix(),
+					},
+					Target:                target,
+					CloudProfile:          flavorConfig.CloudProfile,
+					InComponentDescriptor: flavorConfig.InComponentDescriptor,
 				}
 
 				return nil
@@ -110,17 +115,24 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		return err
 	}
 
+	manifestsInDescriptor := make([]gardenlinux.FlavorManifest, 0, len(publications))
+	for _, publication := range publications {
+		if publication.InComponentDescriptor {
+			manifestsInDescriptor = append(manifestsInDescriptor, publication.FlavorManifest)
+		}
+	}
+
 	var descriptor *ocm.ComponentDescriptor
-	descriptor, err = ocm.BuildComponentDescriptor(ctx, p.manifestSource, publications, p.ocmTarget, p.aliases, glciVer, version, commit)
+	descriptor, err = ocm.BuildComponentDescriptor(ctx, p.manifestSource, manifestsInDescriptor, p.ocmTarget, p.aliases, glciVer, version,
+		commit)
 	if err != nil {
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
 
 	log.Info(ctx, "Publishing images", "count", len(publications))
-	notUnpublishablePublications := make([]*cloudprovider.Publication, 0, len(publications))
+	notUnpublishablePublications := make([]publication, 0, len(publications))
 	publishPublication := parallel.NewActivity(ctx)
-	for i := range publications {
-		publication := &publications[i]
+	for _, publication := range publications {
 		if !publication.Target.CanUnpublish() {
 			notUnpublishablePublications = append(notUnpublishablePublications, publication)
 			continue
@@ -162,7 +174,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		log.Info(ctx, "Skipping component descriptor")
 	} else {
 		log.Debug(ctx, "Finalizing component descriptor")
-		err = ocm.AddPublicationOutput(descriptor, publications)
+		err = ocm.AddPublicationOutput(descriptor, manifestsInDescriptor)
 		if err != nil {
 			return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
 		}
@@ -185,7 +197,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	return nil
 }
 
-func (p *Publisher) publishPublication(ctx context.Context, publication *cloudprovider.Publication, version, commit, glciVer string) error {
+func (p *Publisher) publishPublication(ctx context.Context, publication publication, version, commit, glciVer string) error {
 	ctx = log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
 
 	uptime := cli.ExecTime(ctx)

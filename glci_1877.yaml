@@ -1,30 +1,56 @@
 flavors:
 - flavor: ali-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod-arm64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod-arm64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod-arm64
+  in_component_descriptor: true
 - flavor: openstack-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: openstackbaremetal-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: openstack-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_tpm2_trustedboot-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_tpm2_trustedboot-arm64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_tpm2_trustedboot-amd64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_tpm2_trustedboot-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_tpm2_trustedboot-amd64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_tpm2_trustedboot-arm64
+  in_component_descriptor: true
 publishing:
   credentials:
     source: Vault
