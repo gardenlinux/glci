@@ -155,13 +155,6 @@ type OCMTarget interface {
 	PublishComponentDescriptor(ctx context.Context, version string, descriptor []byte) error
 }
 
-// Publication represents the act of publishing an image including what is being published where and what the result is.
-type Publication struct {
-	Flavor   string
-	Manifest *gardenlinux.Manifest
-	Target   PublishingTarget
-}
-
 // KeyNotFoundError wraps a source-specific error inficating that a given key is not present.
 type KeyNotFoundError struct {
 	err error

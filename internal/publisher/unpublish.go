@@ -8,6 +8,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
+	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
@@ -41,7 +42,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 
 	glciVer := cli.Version(ctx)
 
-	publications := make([]cloudprovider.Publication, len(p.flavors))
+	publications := make([]publication, len(p.flavors))
 	expandCommit := sync.Once{}
 	fetchManifests := parallel.NewActivitySync(ctx)
 	for i, flavorConfig := range p.flavors {
@@ -55,8 +56,10 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 				_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
 				if ok && p.manifestTarget != p.manifestSource {
 					return func() error {
-						publications[i] = cloudprovider.Publication{
-							Flavor: flavorConfig.Flavor,
+						publications[i] = publication{
+							FlavorManifest: gardenlinux.FlavorManifest{
+								Flavor: flavorConfig.Flavor,
+							},
 						}
 
 						return nil
@@ -80,10 +83,13 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 				return nil, er
 			}
 			return func() error {
-				publications[i] = cloudprovider.Publication{
-					Flavor:   flavorConfig.Flavor,
-					Manifest: manifest,
-					Target:   target,
+				publications[i] = publication{
+					FlavorManifest: gardenlinux.FlavorManifest{
+						Flavor:      flavorConfig.Flavor,
+						Manifest:    manifest,
+						ImageSuffix: target.ImageSuffix(),
+					},
+					Target: target,
 				}
 
 				return nil

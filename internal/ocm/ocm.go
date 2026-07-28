@@ -106,7 +106,7 @@ type nameVersion struct {
 }
 
 // BuildComponentDescriptor generates a component desciptor that includes all data except the results of the publishing process.
-func BuildComponentDescriptor(ctx context.Context, source cloudprovider.ArtifactSource, publications []cloudprovider.Publication,
+func BuildComponentDescriptor(ctx context.Context, source cloudprovider.ArtifactSource, flavorManifests []gardenlinux.FlavorManifest,
 	ocmTarget cloudprovider.OCMTarget, aliases map[string][]string, glciVersion, version, commit string,
 ) (*ComponentDescriptor, error) {
 	log.Debug(ctx, "Building component descriptor")
@@ -157,13 +157,13 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		},
 	}
 
-	packages := make([][]nameVersion, len(publications))
+	packages := make([][]nameVersion, len(flavorManifests))
 	fetchPackages := parallel.NewActivitySync(ctx)
-	for i, publication := range publications {
+	for i, fm := range flavorManifests {
 		fetchPackages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
-			pkgs, err := getPackages(ctx, source, publication.Manifest)
+			pkgs, err := getPackages(ctx, source, fm.Manifest)
 			if err != nil {
-				return nil, fmt.Errorf("cannot list packages for %s: %w", publication.Flavor, err)
+				return nil, fmt.Errorf("cannot list packages for %s: %w", fm.Flavor, err)
 			}
 
 			return func() error {
@@ -178,25 +178,25 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		return nil, err
 	}
 
-	for i, publication := range publications {
+	for i, fm := range flavorManifests {
 		var imagePath gardenlinux.S3ReleaseFile
-		imagePath, err = publication.Manifest.PathBySuffix(publication.Target.ImageSuffix())
+		imagePath, err = fm.Manifest.PathBySuffix(fm.ImageSuffix)
 		if err != nil {
-			return nil, fmt.Errorf("missing image for %s: %w", publication.Flavor, err)
+			return nil, fmt.Errorf("missing image for %s: %w", fm.Flavor, err)
 		}
 
 		var rootfsPath gardenlinux.S3ReleaseFile
-		rootfsPath, err = publication.Manifest.PathBySuffix(".tar")
+		rootfsPath, err = fm.Manifest.PathBySuffix(".tar")
 		if err != nil {
-			return nil, fmt.Errorf("missing rootfs for %s: %w", publication.Flavor, err)
+			return nil, fmt.Errorf("missing rootfs for %s: %w", fm.Flavor, err)
 		}
 
 		labels := make([]componentDescriptorlabel, 0, 3)
 		labels = append(labels, componentDescriptorlabel{
 			Name: "gardener.cloud/gardenlinux/ci/build-metadata",
 			Value: map[string]any{
-				"modifiers":      publication.Manifest.Modifiers,
-				"buildTimestamp": publication.Manifest.BuildTimestamp,
+				"modifiers":      fm.Manifest.Modifiers,
+				"buildTimestamp": fm.Manifest.BuildTimestamp,
 			},
 		})
 		if glciVersion != "" {
@@ -215,17 +215,17 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		}
 
 		extraIdentity := map[string]string{
-			"feature-flags":    strings.Join(publication.Manifest.Modifiers, ","),
-			"architecture":     string(publication.Manifest.Architecture),
-			"platform":         publication.Manifest.Platform,
-			"platform_variant": publication.Manifest.PlatformVariant,
+			"feature-flags":    strings.Join(fm.Manifest.Modifiers, ","),
+			"architecture":     string(fm.Manifest.Architecture),
+			"platform":         fm.Manifest.Platform,
+			"platform_variant": fm.Manifest.PlatformVariant,
 		}
-		if publication.Manifest.PlatformVariant == "" {
+		if fm.Manifest.PlatformVariant == "" {
 			delete(extraIdentity, "platform_variant")
 		}
 		descriptor.Component.Resources = append(descriptor.Component.Resources, componentDesciptorResource{
 			Name:          "gardenlinux",
-			Version:       publication.Manifest.Version,
+			Version:       fm.Manifest.Version,
 			ExtraIdentity: extraIdentity,
 			Labels:        labels,
 			Type:          "virtual_machine_image",
@@ -236,19 +236,19 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			},
 			Access: componentDescriptorS3{
 				Type:   "s3",
-				Bucket: publication.Manifest.S3Bucket,
+				Bucket: fm.Manifest.S3Bucket,
 				Key:    imagePath.S3Key,
 			},
 		}, componentDesciptorResource{
 			Name:          "rootfs",
-			Version:       publication.Manifest.Version,
+			Version:       fm.Manifest.Version,
 			ExtraIdentity: extraIdentity,
 			Labels: []componentDescriptorlabel{
 				{
 					Name: "gardener.cloud/gardenlinux/ci/build-metadata",
 					Value: map[string]any{
-						"modifiers":      publication.Manifest.Modifiers,
-						"buildTimestamp": publication.Manifest.BuildTimestamp,
+						"modifiers":      fm.Manifest.Modifiers,
+						"buildTimestamp": fm.Manifest.BuildTimestamp,
 						"debianPackages": getPackageList(packages[i]),
 					},
 				},
@@ -270,7 +270,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			},
 			Access: componentDescriptorS3{
 				Type:   "s3",
-				Bucket: publication.Manifest.S3Bucket,
+				Bucket: fm.Manifest.S3Bucket,
 				Key:    rootfsPath.S3Key,
 			},
 		},
@@ -351,13 +351,13 @@ func getPackageList(packages []nameVersion) []string {
 }
 
 // AddPublicationOutput adds the outputs of the publishing process to an existing component descriptor.
-func AddPublicationOutput(descriptor *ComponentDescriptor, publications []cloudprovider.Publication) error {
-	if len(descriptor.Component.Resources) != len(publications)*2 {
-		return fmt.Errorf("invalid component descriptor: expected %d resources, got %d", len(publications)*2,
+func AddPublicationOutput(descriptor *ComponentDescriptor, flavorManifests []gardenlinux.FlavorManifest) error {
+	if len(descriptor.Component.Resources) != len(flavorManifests)*2 {
+		return fmt.Errorf("invalid component descriptor: expected %d resources, got %d", len(flavorManifests)*2,
 			len(descriptor.Component.Resources))
 	}
 
-	for i, publication := range publications {
+	for i, fm := range flavorManifests {
 		if descriptor.Component.Resources[i*2].Type != "virtual_machine_image" {
 			return fmt.Errorf("invalid component descriptor: resource %d has incorrect type %s", i*2,
 				descriptor.Component.Resources[i*2].Type)
@@ -369,7 +369,7 @@ func AddPublicationOutput(descriptor *ComponentDescriptor, publications []cloudp
 
 		descriptor.Component.Resources[i*2].Labels = append(descriptor.Component.Resources[i*2].Labels, componentDescriptorlabel{
 			Name:  "gardener.cloud/gardenlinux/ci/published-image-metadata",
-			Value: publication.Manifest.PublishedImageMetadata,
+			Value: fm.Manifest.PublishedImageMetadata,
 		})
 	}
 

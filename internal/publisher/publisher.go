@@ -35,7 +35,9 @@ type Publisher struct {
 
 // FlavorConfig is a Garden Linux release flavor together with its publishing configuration.
 type FlavorConfig struct {
-	Flavor string `mapstructure:"flavor"`
+	Flavor                string `mapstructure:"flavor"`
+	CloudProfile          bool   `mapstructure:"cloud_profile,omitzero"`
+	InComponentDescriptor bool   `mapstructure:"in_component_descriptor,omitzero"`
 }
 
 type publisherConfig struct {
@@ -152,4 +154,12 @@ func (p *Publisher) selectTarget(manifest *gardenlinux.Manifest, flavor string) 
 	}
 
 	return target, nil
+}
+
+type publication struct {
+	gardenlinux.FlavorManifest
+
+	Target                cloudprovider.PublishingTarget
+	CloudProfile          bool
+	InComponentDescriptor bool
 }
