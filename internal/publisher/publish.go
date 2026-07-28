@@ -197,40 +197,40 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	return nil
 }
 
-func (p *Publisher) publishPublication(ctx context.Context, publication publication, version, commit, glciVer string) error {
-	ctx = log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
+func (p *Publisher) publishPublication(ctx context.Context, pub publication, version, commit, glciVer string) error {
+	ctx = log.WithValues(ctx, "flavor", pub.Flavor, "targetType", pub.Target.Type())
 
 	uptime := cli.ExecTime(ctx)
 	if uptime != 0 && uptime.Hours() > 5 {
 		return errors.New("publishing taking too long, restart to resume")
 	}
 
-	isPublished, err := publication.Target.IsPublished(publication.Manifest)
+	isPublished, err := pub.Target.IsPublished(pub.Manifest)
 	if err != nil {
-		return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Flavor, err)
+		return fmt.Errorf("cannot determine publishing status for %s: %w", pub.Flavor, err)
 	}
 	if isPublished {
 		log.Info(ctx, "Already published, skipping")
 		return nil
 	}
-	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, publication.Flavor), true), publication.Target.RollbackDomain())
+	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, pub.Flavor), true), pub.Target.RollbackDomain())
 
 	log.Info(ctx, "Publishing image")
-	publication.Manifest.PublishedImageMetadata, err = publication.Target.Publish(ctx, publication.Flavor, publication.Manifest)
+	pub.Manifest.PublishedImageMetadata, err = pub.Target.Publish(ctx, pub.Flavor, pub.Manifest)
 	if err != nil {
-		return fmt.Errorf("cannot publish %s to %s: %w", publication.Flavor, publication.Target.Type(), err)
+		return fmt.Errorf("cannot publish %s to %s: %w", pub.Flavor, pub.Target.Type(), err)
 	}
 
 	if glciVer != "" {
-		publication.Manifest.GLCIVersion = glciVer
+		pub.Manifest.GLCIVersion = glciVer
 	}
 
 	log.Info(ctx, "Updating manifest")
-	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Flavor, version, commit)
-	task.RemoveCompleted(ctx, publication.Flavor)
-	err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, publication.Manifest)
+	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", pub.Flavor, version, commit)
+	task.RemoveCompleted(ctx, pub.Flavor)
+	err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, pub.Manifest)
 	if err != nil {
-		return fmt.Errorf("cannot put manifest for %s: %w", publication.Flavor, err)
+		return fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err)
 	}
 
 	return nil
