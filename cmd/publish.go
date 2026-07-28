@@ -22,6 +22,7 @@ func publishCmd() *cobra.Command {
 
 	c.Flags().StringP("version", "v", "", "release version")
 	c.Flags().StringP("commit", "c", "", "release commit(ish)")
+	c.Flags().Bool("omit-irreversible", false, "omit publishing anything that cannot be unpublished (implies --omit-component-descriptor)")
 	c.Flags().Bool("omit-component-descriptor", false, "omit publishing a component descriptor")
 	c.Flags().Bool("omit-ns-cloud-profile", false, "omit publishing a namespaced cloud profile")
 

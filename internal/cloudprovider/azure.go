@@ -1057,6 +1057,10 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 	return nil
 }
 
+func (*azure) CanUnpublish() bool {
+	return true
+}
+
 func (p *azure) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
@@ -1233,7 +1237,7 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, imageDefinition 
 	return nil
 }
 
-func (p *azure) CanRollback() string {
+func (p *azure) RollbackDomain() string {
 	if !p.isConfigured() {
 		return ""
 	}
