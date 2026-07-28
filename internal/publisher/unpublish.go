@@ -103,23 +103,23 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 
 	log.Info(ctx, "Unpublishing images", "count", len(publications))
 	unpublishPublications := parallel.NewLimitedActivity(ctx, 7)
-	for i, publication := range publications {
-		if publication.Manifest == nil {
-			lctx := log.WithValues(ctx, "flavor", publication.Flavor)
+	for i, pub := range publications {
+		if pub.Manifest == nil {
+			lctx := log.WithValues(ctx, "flavor", pub.Flavor)
 			log.Info(lctx, "Already unpublished, skipping")
 			continue
 		}
-		if !publication.Target.CanUnpublish() {
-			lctx := log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
+		if !pub.Target.CanUnpublish() {
+			lctx := log.WithValues(ctx, "flavor", pub.Flavor, "targetType", pub.Target.Type())
 			log.Info(lctx, "Target cannot be unpublished, skipping")
 			continue
 		}
 		unpublishPublications.Go(func(ctx context.Context) error {
-			ctx = log.WithValues(ctx, "flavor", publication.Flavor, "targetType", publication.Target.Type())
+			ctx = log.WithValues(ctx, "flavor", pub.Flavor, "targetType", pub.Target.Type())
 
-			isPublished, er := publication.Target.IsPublished(publication.Manifest)
+			isPublished, er := pub.Target.IsPublished(pub.Manifest)
 			if er != nil {
-				return fmt.Errorf("cannot determine publishing status for %s: %w", publication.Flavor, er)
+				return fmt.Errorf("cannot determine publishing status for %s: %w", pub.Flavor, er)
 			}
 			if !isPublished {
 				log.Info(ctx, "Already unpublished, skipping")
@@ -127,24 +127,24 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 			}
 
 			log.Info(ctx, "Unpublishing image")
-			er = publication.Target.Unpublish(ctx, publication.Manifest, steamroll)
+			er = pub.Target.Unpublish(ctx, pub.Manifest, steamroll)
 			if er != nil {
-				return fmt.Errorf("cannot unpublish %s from %s: %w", publication.Flavor, publication.Target.Type(), er)
+				return fmt.Errorf("cannot unpublish %s from %s: %w", pub.Flavor, pub.Target.Type(), er)
 			}
-			publication.Manifest.PublishedImageMetadata = nil
+			pub.Manifest.PublishedImageMetadata = nil
 
 			if glciVer != "" {
-				publication.Manifest.GLCIVersion = glciVer
+				pub.Manifest.GLCIVersion = glciVer
 			}
 
 			log.Info(ctx, "Updating manifest")
-			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", publication.Flavor, version, commit)
-			er = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, publication.Manifest)
+			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", pub.Flavor, version, commit)
+			er = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, pub.Manifest)
 			if er != nil {
-				return fmt.Errorf("cannot put manifest for %s: %w", publication.Flavor, er)
+				return fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, er)
 			}
 
-			publications[i] = publication
+			publications[i] = pub
 			return nil
 		})
 	}
