@@ -240,7 +240,7 @@ func newProfile(version, provider string, rawConfig *runtime.RawExtension, archi
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: fmt.Sprintf("gardenlinux-%s", major),
+			Namespace: "garden-gl-it",
 		},
 		Spec: gardencorev1beta1.NamespacedCloudProfileSpec{
 			Parent: gardencorev1beta1.CloudProfileReference{

@@ -19,7 +19,7 @@ import (
 
 // Publish publishes a release to all cloud providers specified in the flavors and publishing configurations.
 func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig PublishingConfig, aliasesConfig AliasesConfig, version,
-	commit string, omitComponentDescritpr bool, omitNSCloudProfile bool,
+	commit string, omitComponentDescritpr, omitNSCloudProfile bool,
 ) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
@@ -50,7 +50,7 @@ func Publish(ctx context.Context, flavorsConfig FlavorsConfig, publishingConfig 
 func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig AliasesConfig, credsSource credsprovider.CredsSource,
 	manifestSource, manifestTarget cloudprovider.ArtifactSource, sources map[string]cloudprovider.ArtifactSource,
 	targets []cloudprovider.PublishingTarget, ocmTarget cloudprovider.OCMTarget, state task.StatePersistor, version, commit string,
-	omitComponentDescritpr bool, omitNSCloudProfile bool,
+	omitComponentDescritpr, omitNSCloudProfile bool,
 ) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(targets))
 	for _, target := range targets {
@@ -211,27 +211,29 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 
 	profiles, err := nspcpfl.BuildNSCloudProfiles(version, publications)
 	if err != nil {
-		return fmt.Errorf("error creating Namespaced Cloud Profiles %w", err)
+		return fmt.Errorf("cannot create namespaced cloud profiles %w", err)
 	}
 
 	for _, profile := range profiles {
 		profileYAML, err := nspcpfl.ToYAML(profile)
 		if err != nil {
-			return fmt.Errorf("invalid profile configuration: %w", err)
+			return fmt.Errorf("invalid cloud profile: %w", err)
 		}
 		if !omitNSCloudProfile {
 			baseName := fmt.Sprintf("gardenlinux-%s-%.8s-%s", nspcpfl.MajorVersion(version), commit, profile.Spec.Parent.Name)
-			NSProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, baseName)
-			if err := manifestTarget.PutObject(ctx, NSProfileKey, bytes.NewReader(profileYAML)); err != nil {
+			nsProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, baseName)
+			if err := manifestTarget.PutObject(ctx, nsProfileKey, bytes.NewReader(profileYAML)); err != nil {
 				return fmt.Errorf("cannot store NSCloudProfile %s: %w", profile.Name, err)
 			}
 
+			var shootYAML []byte
 			shootYAML, err := nspcpfl.BuildShootSpecYAML(version, profile)
 			if err != nil {
 				return fmt.Errorf("invalid shoot spec for %s: %w", profile.Name, err)
 			}
 			shootKey := fmt.Sprintf("meta/ShootSpec/%s/%s", version, baseName)
-			if err := manifestTarget.PutObject(ctx, shootKey, bytes.NewReader(shootYAML)); err != nil {
+			err = manifestTarget.PutObject(ctx, shootKey, bytes.NewReader(shootYAML))
+			if err != nil {
 				return fmt.Errorf("cannot store ShootSpec %s: %w", profile.Name, err)
 			}
 		}

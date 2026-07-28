@@ -119,7 +119,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 				if platform != "converged-cloud" {
 					worker.Volume = &gardencorev1beta1.Volume{
 						Type:       ptr(volumeType),
-						VolumeSize: "50GB",
+						VolumeSize: "50Gi",
 					}
 				}
 				workers = append(workers, worker)
@@ -134,7 +134,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("gardenlinux-%s-%s", major, strings.ToLower(platform)),
-			Namespace: fmt.Sprintf("gardenlinux-%s", major),
+			Namespace: "garden-gl-it",
 		},
 		Spec: gardencorev1beta1.ShootSpec{
 			Provider: gardencorev1beta1.Provider{
