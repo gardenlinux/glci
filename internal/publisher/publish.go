@@ -1,6 +1,7 @@
 package publisher
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,17 +11,18 @@ import (
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/nspcpfl"
 	"github.com/gardenlinux/glci/internal/ocm"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
 // Publish publishes a release to all configured cloud providers.
-func (p *Publisher) Publish(ctx context.Context, version, commit string, omitComponentDescritpr bool) error {
+func (p *Publisher) Publish(ctx context.Context, version, commit string, omitComponentDescritpr, omitNSCloudProfile bool) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
 	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
-	err := p.publish(ctx, version, commit, omitComponentDescritpr)
+	err := p.publish(ctx, version, commit, omitComponentDescritpr, omitNSCloudProfile)
 	stateErr := task.PersistorError(ctx)
 	if stateErr != nil {
 		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
@@ -31,7 +33,7 @@ func (p *Publisher) Publish(ctx context.Context, version, commit string, omitCom
 	return err
 }
 
-func (p *Publisher) publish(ctx context.Context, version, commit string, omitComponentDescritpr bool) error {
+func (p *Publisher) publish(ctx context.Context, version, commit string, omitComponentDescritpr, omitNSCloudProfile bool) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
 		rollbackHandlers = append(rollbackHandlers, target)
@@ -184,6 +186,36 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitCom
 		err = p.ocmTarget.PublishComponentDescriptor(ctx, version, descriptorYAML)
 		if err != nil {
 			return fmt.Errorf("cannot publish component descriptor: %w", err)
+		}
+	}
+
+	if !omitNSCloudProfile {
+		profiles, er := nspcpfl.BuildNSCloudProfiles(version, publications)
+		if er != nil {
+			return fmt.Errorf("cannot create namespaced cloud profiles: %w", er)
+		}
+
+		for _, profile := range profiles {
+			profileYAML, er := nspcpfl.ToYAML(profile)
+			if er != nil {
+				return fmt.Errorf("invalid cloud profile: %w", er)
+			}
+
+			baseName := fmt.Sprintf("gardenlinux-%s-%.8s-%s", nspcpfl.MajorVersion(version), commit, profile.Spec.Parent.Name)
+			nsProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, baseName)
+			if er = p.manifestTarget.PutObject(ctx, nsProfileKey, bytes.NewReader(profileYAML)); er != nil {
+				return fmt.Errorf("cannot store NSCloudProfile %s: %w", profile.Name, er)
+			}
+
+			var shootYAML []byte
+			shootYAML, er = nspcpfl.BuildShootSpecYAML(version, profile)
+			if er != nil {
+				return fmt.Errorf("invalid shoot spec for %s: %w", profile.Name, er)
+			}
+			shootKey := fmt.Sprintf("meta/ShootSpec/%s/%s", version, baseName)
+			if er = p.manifestTarget.PutObject(ctx, shootKey, bytes.NewReader(shootYAML)); er != nil {
+				return fmt.Errorf("cannot store ShootSpec %s: %w", profile.Name, er)
+			}
 		}
 	}
 
