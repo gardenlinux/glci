@@ -304,7 +304,7 @@ func buildAWSProfile(version string, publications []cloudprovider.Publication) (
 		}
 		arch := string(pub.Manifest.Architecture)
 		for _, img := range meta.Images {
-			if strings.Contains(img.ImageName, fmt.Sprintf("gardenlinux-aws-gardener_prod-%s", arch)) {
+			if strings.Contains(img.ImageName, "gardenlinux-aws-gardener_prod-"+arch) {
 				if !slices.Contains(architectures, arch) {
 					architectures = append(architectures, arch)
 				}
@@ -344,7 +344,7 @@ func buildAlicloudProfile(version string, publications []cloudprovider.Publicati
 		}
 		arch := string(pub.Manifest.Architecture)
 		for _, img := range meta.Images {
-			if strings.Contains(img.ImageName, fmt.Sprintf("gardenlinux-ali-gardener_prod-%s", arch)) {
+			if strings.Contains(img.ImageName, "gardenlinux-ali-gardener_prod-"+arch) {
 				if !slices.Contains(architectures, arch) {
 					architectures = append(architectures, arch)
 				}
@@ -382,7 +382,7 @@ func buildGCPProfile(version string, publications []cloudprovider.Publication) (
 		if err != nil {
 			return nil, fmt.Errorf("cannot find GCP image path: %w", err)
 		}
-		if !strings.Contains(imagePath.S3Key, fmt.Sprintf("gcp-gardener_prod-%s", arch)) {
+		if !strings.Contains(imagePath.S3Key, "gcp-gardener_prod-"+arch) {
 			continue
 		}
 		meta, err := decodePublishedMetadata[gcpPublishedMetadata](pub)
@@ -466,7 +466,7 @@ func buildAzureProfile(version string, publications []cloudprovider.Publication)
 		for _, img := range meta.Images {
 			id := img.ID
 			archCopy := arch
-			if strings.Contains(id, fmt.Sprintf("gardenlinux-gardener_prod-%s/Versions/", archCopy)) {
+			if strings.Contains(id, "gardenlinux-gardener_prod-"+archCopy+"/Versions/") {
 				versions = append(versions, azureMachineImageVersion{
 					Version:                 version,
 					CommunityGalleryImageID: &id,

@@ -22,7 +22,9 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	if profile.Spec.ProviderConfig == nil || len(profile.Spec.ProviderConfig.Raw) == 0 {
 		return nil, nil, fmt.Errorf("providerConfig is empty")
 	}
-	if err := json.Unmarshal(profile.Spec.ProviderConfig.Raw, &providerCfg); err != nil {
+	var err error
+	err = json.Unmarshal(profile.Spec.ProviderConfig.Raw, &providerCfg)
+	if err != nil {
 		return nil, nil, fmt.Errorf("cannot unmarshal providerConfig: %w", err)
 	}
 
@@ -41,10 +43,10 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 		regionList := versions[0].(map[string]any)["regions"].([]any)
 		region = regionList[0].(map[string]any)["name"].(string)
 	}
-	var err error
+
 	if platform != "gcp" && platform != "converged-cloud" && platform != "az" {
 		infraConfig, err = marshalRaw(map[string]any{
-			"apiVersion": fmt.Sprintf("%s.provider.extensions.gardener.cloud/v1alpha1", platform),
+			"apiVersion": platform + ".provider.extensions.gardener.cloud/v1alpha1",
 			"kind":       "InfrastructureConfig",
 			"networks": map[string]any{
 				"zones": []map[string]any{{"name": region + "a"}},
@@ -56,7 +58,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	}
 	if platform == "converged-cloud" {
 		infraConfig, err = marshalRaw(map[string]any{
-			"apiVersion":           fmt.Sprintf("%s.provider.extensions.gardener.cloud/v1alpha1", platform),
+			"apiVersion":           platform + ".provider.extensions.gardener.cloud/v1alpha1",
 			"kind":                 "InfrastructureConfig",
 			"loadbalancerProvider": "f5",
 			"floatingPoolName":     "FloatingIP-external-cp-gardener",

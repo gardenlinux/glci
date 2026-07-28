@@ -18,7 +18,8 @@ import (
 )
 
 // Publish publishes a release to all configured cloud providers.
-func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor, omitNSCloudProfile bool) error {
+func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor, omitNSCloudProfile bool,
+) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
 	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
@@ -33,7 +34,8 @@ func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrr
 	return err
 }
 
-func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor, omitNSCloudProfile bool) error {
+func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor, omitNSCloudProfile bool,
+) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
 		if !target.CanUnpublish() {
@@ -184,31 +186,34 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	}
 
 	if !omitNSCloudProfile {
-		profiles, er := nspcpfl.BuildNSCloudProfiles(version, publications)
-		if er != nil {
-			return fmt.Errorf("cannot create namespaced cloud profiles: %w", er)
+		profiles, err := nspcpfl.BuildNSCloudProfiles(version, publications)
+		if err != nil {
+			return fmt.Errorf("cannot create namespaced cloud profiles: %w", err)
 		}
 
 		for _, profile := range profiles {
-			profileYAML, er := nspcpfl.ToYAML(profile)
-			if er != nil {
-				return fmt.Errorf("invalid cloud profile: %w", er)
+			var profileYAML []byte
+			profileYAML, err = nspcpfl.ToYAML(profile)
+			if err != nil {
+				return fmt.Errorf("invalid cloud profile: %w", err)
 			}
 
 			baseName := fmt.Sprintf("gardenlinux-%s-%.8s-%s", nspcpfl.MajorVersion(version), commit, profile.Spec.Parent.Name)
 			nsProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, baseName)
-			if er = p.manifestTarget.PutObject(ctx, nsProfileKey, bytes.NewReader(profileYAML)); er != nil {
-				return fmt.Errorf("cannot store NSCloudProfile %s: %w", profile.Name, er)
+			err = p.manifestTarget.PutObject(ctx, nsProfileKey, bytes.NewReader(profileYAML))
+			if err != nil {
+				return fmt.Errorf("cannot store NSCloudProfile %s: %w", profile.Name, err)
 			}
 
 			var shootYAML []byte
-			shootYAML, er = nspcpfl.BuildShootSpecYAML(version, profile)
-			if er != nil {
-				return fmt.Errorf("invalid shoot spec for %s: %w", profile.Name, er)
+			shootYAML, err = nspcpfl.BuildShootSpecYAML(version, profile)
+			if err != nil {
+				return fmt.Errorf("invalid shoot spec for %s: %w", profile.Name, err)
 			}
 			shootKey := fmt.Sprintf("meta/ShootSpec/%s/%s", version, baseName)
-			if er = p.manifestTarget.PutObject(ctx, shootKey, bytes.NewReader(shootYAML)); er != nil {
-				return fmt.Errorf("cannot store ShootSpec %s: %w", profile.Name, er)
+			err = p.manifestTarget.PutObject(ctx, shootKey, bytes.NewReader(shootYAML))
+			if err != nil {
+				return fmt.Errorf("cannot store ShootSpec %s: %w", profile.Name, err)
 			}
 		}
 	}
