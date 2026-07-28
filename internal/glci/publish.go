@@ -209,17 +209,18 @@ func publish(ctx context.Context, flavorsConfig FlavorsConfig, aliasesConfig Ali
 		}
 	}
 
-	profiles, err := nspcpfl.BuildNSCloudProfiles(version, publications)
-	if err != nil {
-		return fmt.Errorf("cannot create namespaced cloud profiles %w", err)
-	}
-
-	for _, profile := range profiles {
-		profileYAML, err := nspcpfl.ToYAML(profile)
+	if !omitNSCloudProfile {
+		profiles, err := nspcpfl.BuildNSCloudProfiles(version, publications)
 		if err != nil {
-			return fmt.Errorf("invalid cloud profile: %w", err)
+			return fmt.Errorf("cannot create namespaced cloud profiles %w", err)
 		}
-		if !omitNSCloudProfile {
+
+		for _, profile := range profiles {
+			profileYAML, err := nspcpfl.ToYAML(profile)
+			if err != nil {
+				return fmt.Errorf("invalid cloud profile: %w", err)
+			}
+
 			baseName := fmt.Sprintf("gardenlinux-%s-%.8s-%s", nspcpfl.MajorVersion(version), commit, profile.Spec.Parent.Name)
 			nsProfileKey := fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, baseName)
 			if err := manifestTarget.PutObject(ctx, nsProfileKey, bytes.NewReader(profileYAML)); err != nil {
