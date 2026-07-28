@@ -46,8 +46,8 @@ func publish(ctx context.Context, cfg *viper.Viper, _ []string) error {
 		_ = stop()
 	}()
 
-	err = g.Publisher.Publish(ctx, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("omit-component-descriptor"), 
-               cfg.GetBool("omit-ns-cloud-profile"))
+	err = g.Publisher.Publish(ctx, cfg.GetString("version"), cfg.GetString("commit"),  cfg.GetBool("omit-irreversible"),
+		cfg.GetBool("omit-component-descriptor"), cfg.GetBool("omit-ns-cloud-profile"))
 	if err != nil {
 		return err
 	}
