@@ -9,9 +9,9 @@ import (
 
 	"github.com/go-viper/mapstructure/v2"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 type (
@@ -360,14 +360,14 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 	}
 
 	cnt := 0
-	rollbackTasks := parallel.NewLimitedActivitySync(ctx, 3)
+	rollbackTasks := concurrency.NewLimitedActivitySync(ctx, 3)
 	for domain, tasks := range tset.domains {
 		handler, ok := domainHandlers[domain]
 		if !ok {
 			return fmt.Errorf("invalid task domain %s", domain)
 		}
 
-		rollbackTasks.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		rollbackTasks.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			rf := func() error {
 				cnt += len(tset.domains[domain].Tasks)
 				delete(tset.domains, domain)

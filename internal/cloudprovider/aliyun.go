@@ -15,12 +15,12 @@ import (
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -259,9 +259,9 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 
 	_, ecsClients := p.clients()
 	images := make(map[string]string, len(ecsClients))
-	publishImages := parallel.NewLimitedActivitySync(ctx, 7)
+	publishImages := concurrency.NewLimitedActivitySync(ctx, 7)
 	for toRegion := range ecsClients {
-		publishImages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
 			localID := imageID
 			var er error
@@ -568,7 +568,7 @@ func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, 
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	removeImages := parallel.NewLimitedActivity(ctx, 3)
+	removeImages := concurrency.NewLimitedActivity(ctx, 3)
 	for _, img := range pubOut.Images {
 		removeImages.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "image", img.ID, "region", img.Region)
@@ -672,7 +672,7 @@ func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
+	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*aliyunTaskState](t.State)
 		if err != nil {

@@ -11,9 +11,9 @@ import (
 	"github.com/goccy/go-yaml"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
-	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 const (
@@ -158,9 +158,9 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	}
 
 	packages := make([][]nameVersion, len(flavorManifests))
-	fetchPackages := parallel.NewActivitySync(ctx)
+	fetchPackages := concurrency.NewActivitySync(ctx)
 	for i, fm := range flavorManifests {
-		fetchPackages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		fetchPackages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			pkgs, err := getPackages(ctx, source, fm.Manifest)
 			if err != nil {
 				return nil, fmt.Errorf("cannot list packages for %s: %w", fm.Flavor, err)

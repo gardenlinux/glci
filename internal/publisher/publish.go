@@ -8,10 +8,10 @@ import (
 
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ocm"
-	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -49,9 +49,9 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	publications := make([]publication, len(p.flavors))
 	expandCommit := sync.Once{}
-	fetchManifests := parallel.NewActivitySync(ctx)
+	fetchManifests := concurrency.NewActivitySync(ctx)
 	for i, flavorConfig := range p.flavors {
-		fetchManifests.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		fetchManifests.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
 			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
 
@@ -131,7 +131,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	log.Info(ctx, "Publishing images", "count", len(publications))
 	notUnpublishablePublications := make([]publication, 0, len(publications))
-	publishPublication := parallel.NewActivity(ctx)
+	publishPublication := concurrency.NewActivity(ctx)
 	for _, pub := range publications {
 		if !pub.Target.CanUnpublish() {
 			notUnpublishablePublications = append(notUnpublishablePublications, pub)
@@ -158,7 +158,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 			log.Info(ctx, "Skipping targets that cannot be unpublished", "count", len(notUnpublishablePublications))
 		}
 	} else {
-		publishPublication = parallel.NewActivity(ctx)
+		publishPublication = concurrency.NewActivity(ctx)
 		for _, pub := range notUnpublishablePublications {
 			publishPublication.Go(func(ctx context.Context) error {
 				return p.publishPublication(ctx, pub, version, commit, glciVer)
