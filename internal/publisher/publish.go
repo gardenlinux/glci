@@ -9,6 +9,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/concurrency"
+	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ocm"
@@ -23,9 +24,11 @@ func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrr
 	err := p.publish(ctx, version, commit, omitIrreversible, omitComponentDescriptor)
 	stateErr := task.PersistorError(ctx)
 	if stateErr != nil {
-		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
-		if err == nil {
-			err = stateErr
+		criticalStateErr := errorreport.MarkCritical(fmt.Errorf("cannot maintain state: %w", stateErr))
+		if errors.Is(err, stateErr) {
+			err = criticalStateErr
+		} else {
+			err = errors.Join(err, criticalStateErr)
 		}
 	}
 	return err
@@ -148,9 +151,9 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	}
 
 	task.Clear(ctx)
-	stateErr := task.PersistorError(ctx)
-	if stateErr != nil {
-		return fmt.Errorf("cannot maintain state: %w", stateErr)
+	err = task.PersistorError(ctx)
+	if err != nil {
+		return err
 	}
 
 	if omitIrreversible {
@@ -230,7 +233,7 @@ func (p *Publisher) publishPublication(ctx context.Context, pub publication, ver
 	task.RemoveCompleted(ctx, pub.Flavor)
 	err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, pub.Manifest)
 	if err != nil {
-		return fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err)
+		return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err))
 	}
 
 	return nil

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/concurrency"
+	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/log"
 )
 
@@ -50,7 +51,14 @@ func run() int {
 	err = mainCmd.ExecuteContext(ctx)
 	ctx = cmdCtx()
 	if err != nil {
-		log.ErrorAnyway(ctx, err)
+		renderedErr := errorreport.Render(err)
+		log.ErrorAnyway(ctx, renderedErr)
+
+		banner := renderedErr.Banner()
+		if banner != "" {
+			log.ErrorMsg(ctx, banner)
+		}
+
 		return 1
 	}
 
