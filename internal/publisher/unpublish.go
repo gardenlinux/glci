@@ -9,6 +9,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/concurrency"
+	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/task"
@@ -19,7 +20,20 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 	ctx = log.WithValues(ctx, "op", "unpublish", "version", version, "commit", commit)
 
 	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
+	err := p.unpublish(ctx, version, commit, steamroll)
+	stateErr := task.PersistorError(ctx)
+	if stateErr != nil {
+		criticalStateErr := errorreport.MarkCritical(fmt.Errorf("cannot maintain state: %w", stateErr))
+		if errors.Is(err, stateErr) {
+			err = criticalStateErr
+		} else {
+			err = errors.Join(err, criticalStateErr)
+		}
+	}
+	return err
+}
 
+func (p *Publisher) unpublish(ctx context.Context, version, commit string, steamroll bool) error {
 	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
 		if !target.CanUnpublish() {
@@ -36,8 +50,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 	task.Clear(ctx)
 	err = task.PersistorError(ctx)
 	if err != nil {
-		log.ErrorMsg(ctx, "State could not be saved! Please investigate manually before rerunning GLCI!")
-		return fmt.Errorf("cannot maintain state: %w", err)
+		return err
 	}
 
 	glciVer := cli.Version(ctx)
@@ -141,7 +154,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", pub.Flavor, version, commit)
 			er = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, pub.Manifest)
 			if er != nil {
-				return fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, er)
+				return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, er))
 			}
 
 			publications[i] = pub
