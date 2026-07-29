@@ -1,4 +1,4 @@
-package parallel
+package concurrency
 
 import (
 	"context"
@@ -125,7 +125,7 @@ func runTasks[T comparable](ctx context.Context, tasks []T, dependencies func(T)
 		}
 
 		if c.err != nil {
-			errs = append(errs, c.err)
+			errs = append(errs, logOnce(ctx, c.err))
 			switch mode {
 			case FailureModeStop:
 				stopping = true
@@ -154,7 +154,7 @@ func runTasks[T comparable](ctx context.Context, tasks []T, dependencies func(T)
 		if c.err == nil && c.resultSync != nil {
 			err = c.resultSync()
 			if err != nil {
-				errs = append(errs, err)
+				errs = append(errs, logOnce(ctx, err))
 			}
 		}
 

@@ -14,12 +14,12 @@ import (
 	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/imageimport"
 	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/images"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -109,9 +109,9 @@ func (p *openstack) createClients(ctx context.Context, config openstackPublishin
 	p.clientsMtx.Lock()
 	defer p.clientsMtx.Unlock()
 
-	initClients := parallel.NewLimitedActivitySync(ctx, 7)
+	initClients := concurrency.NewLimitedActivitySync(ctx, 7)
 	for _, region := range config.Regions {
-		initClients.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		initClients.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
 				IdentityEndpoint: strings.Replace(config.Endpoint, "{region}", region, 1),
 				Username:         creds.Username,
@@ -262,7 +262,7 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 
 	imagesClients := p.clients()
 	outImages := make(map[string]string, len(imagesClients))
-	publishImages := parallel.NewActivitySync(ctx)
+	publishImages := concurrency.NewActivitySync(ctx)
 	for _, config := range p.pubCfg.Configs {
 		for _, region := range config.Regions {
 			imageClient := imagesClients[region]
@@ -271,7 +271,7 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 				source = p.sourceChina
 			}
 
-			publishImages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+			publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 				ctx = log.WithValues(ctx, "region", region)
 
 				ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{
@@ -432,7 +432,7 @@ func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 
 	imagesClients := p.clients()
 
-	removeImages := parallel.NewLimitedActivity(ctx, 3)
+	removeImages := concurrency.NewLimitedActivity(ctx, 3)
 	for _, img := range pubOut.Images {
 		_, ok := imagesClients[img.Region]
 		if !ok {
@@ -483,7 +483,7 @@ func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) er
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
+	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*openstackTaskState](t.State)
 		if err != nil {

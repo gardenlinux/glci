@@ -22,12 +22,12 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Masterminds/semver/v3"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -459,9 +459,9 @@ func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinu
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "requireUEFI", requireUEFI, "secureBoot", secureBoot)
 
 	outputImages := make([]azurePublishedImage, 0, 4)
-	publish := parallel.NewActivitySync(ctx)
+	publish := concurrency.NewActivitySync(ctx)
 
-	publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+	publish.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
 		images, er := p.publish(ctx, flavor, p.source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
@@ -476,7 +476,7 @@ func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinu
 	})
 
 	if p.enableChina {
-		publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		publish.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "cloud", "china")
 
 			source := p.sourceChina
@@ -530,7 +530,7 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 	ctx = task.Begin(ctx, "publish/"+taskImage, &azureTaskState{
 		China: china,
 	})
-	createBlobAndImage := parallel.NewActivity(ctx)
+	createBlobAndImage := concurrency.NewActivity(ctx)
 
 	if bios {
 		createBlobAndImage.Go(func(_ context.Context) error {
@@ -571,13 +571,13 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 	}
 
 	outputImages := make([]azurePublishedImage, 0, 2)
-	createImageVersion := parallel.NewActivitySync(ctx)
+	createImageVersion := concurrency.NewActivitySync(ctx)
 	var blobUsed sync.WaitGroup
 	blobUsed.Add(1)
 
 	if bios {
 		blobUsed.Add(1)
-		createImageVersion.Go(func(_ context.Context) (parallel.ResultSyncFunc, error) {
+		createImageVersion.Go(func(_ context.Context) (concurrency.ResultSyncFunc, error) {
 			imageID, er := func() (string, error) {
 				defer blobUsed.Done()
 				return p.createImage(bctx, blobURL, image, true, china)
@@ -610,7 +610,7 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 		})
 	}
 
-	createImageVersion.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+	createImageVersion.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 		imageID, er := func() (string, error) {
 			defer blobUsed.Done()
 			return p.createImage(ctx, blobURL, image, false, china)
@@ -641,7 +641,7 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 		}, nil
 	})
 
-	createImageVersion.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+	createImageVersion.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 		blobUsed.Wait()
 
 		er := p.deleteBlob(ctx, blob, false, china)
@@ -668,7 +668,7 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 	var pk, kek, db string
 
 	if manifest.SecureBoot {
-		fetchCertificates := parallel.NewActivity(ctx)
+		fetchCertificates := concurrency.NewActivity(ctx)
 
 		fetchCertificates.Go(func(ctx context.Context) error {
 			pkFile, er := manifest.PathBySuffix(".secureboot.pk.der")
@@ -1078,7 +1078,7 @@ func (p *azure) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, s
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	deleteImages := parallel.NewActivity(ctx)
+	deleteImages := concurrency.NewActivity(ctx)
 	for _, img := range pubOut.Images {
 		deleteImages.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "cloud", img.Cloud, "imageID", img.ID)
@@ -1250,7 +1250,7 @@ func (p *azure) Rollback(ctx context.Context, tasks map[string]task.Task) error 
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
+	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*azureTaskState](t.State)
 		if err != nil {

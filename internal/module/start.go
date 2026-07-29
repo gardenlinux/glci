@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/graph"
-	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 // Start starts the modules reachable from targets. The returned stop function stops them.
@@ -50,9 +50,9 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 	}
 
 	var started []Module
-	err = parallel.RunTasksSync(ctx, modules, func(m Module) ([]Module, error) {
+	err = concurrency.RunTasksSync(ctx, modules, func(m Module) ([]Module, error) {
 		return moduleDeps[m], nil
-	}, func(ctx context.Context, m Module) (parallel.ResultSyncFunc, error) {
+	}, func(ctx context.Context, m Module) (concurrency.ResultSyncFunc, error) {
 		if r.startedModules[m] != 0 {
 			return nil, nil
 		}
@@ -67,7 +67,7 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 
 			return nil
 		}, nil
-	}, parallel.FailureModeSkipDependents)
+	}, concurrency.FailureModeSkipDependents)
 	if err != nil {
 		//nolint:contextcheck // Independent lifecycle, runs detached from parent ctx.
 		stopErr := stop(started, moduleDeps)
@@ -118,7 +118,7 @@ func stop(modules []Module, moduleDeps map[Module][]Module) error {
 		}
 	}
 
-	return parallel.RunTasks(context.Background(), modules, func(m Module) ([]Module, error) {
+	return concurrency.RunTasks(context.Background(), modules, func(m Module) ([]Module, error) {
 		return stopAfter[m], nil
 	}, func(_ context.Context, m Module) error {
 		inErr := m.Stop()
@@ -127,5 +127,5 @@ func stop(modules []Module, moduleDeps map[Module][]Module) error {
 		}
 
 		return nil
-	}, parallel.FailureModeContinue)
+	}, concurrency.FailureModeContinue)
 }

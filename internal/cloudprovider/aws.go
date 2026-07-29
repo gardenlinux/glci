@@ -22,12 +22,12 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/logging"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/slc"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -460,9 +460,9 @@ func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "requireUEFI", requireUEFI, "secureBoot", secureBoot)
 
 	outputImages := make([]awsPublishedImage, 0, 4)
-	publish := parallel.NewActivitySync(ctx)
+	publish := concurrency.NewActivitySync(ctx)
 
-	publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+	publish.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
 		images, er := p.publish(ctx, p.source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, false)
@@ -477,7 +477,7 @@ func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	})
 
 	if p.enableChina && !secureBoot {
-		publish.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		publish.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "cloud", "china")
 
 			source := p.sourceChina
@@ -543,9 +543,9 @@ func (p *awsTarget) publish(ctx context.Context, source ArtifactSource, key, ima
 	}
 
 	images := make(map[string]string, len(regions))
-	publishImages := parallel.NewLimitedActivitySync(ctx, 12)
+	publishImages := concurrency.NewLimitedActivitySync(ctx, 12)
 	for _, toRegion := range regions {
-		publishImages.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
 			localID := imageID
 			var er error
@@ -632,7 +632,7 @@ func (*awsTarget) prepareSecureBoot(ctx context.Context, source ArtifactSource, 
 	var uefiData *string
 
 	if manifest.SecureBoot {
-		fetchCertificates := parallel.NewActivity(ctx)
+		fetchCertificates := concurrency.NewActivity(ctx)
 
 		fetchCertificates.Go(func(ctx context.Context) error {
 			efivarsFile, er := manifest.PathBySuffix(".secureboot.aws-efivars")
@@ -892,7 +892,7 @@ func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	deregisterImages := parallel.NewLimitedActivity(ctx, 3)
+	deregisterImages := concurrency.NewLimitedActivity(ctx, 3)
 	for _, img := range pubOut.Images {
 		deregisterImages.Go(func(ctx context.Context) error {
 			lctx := log.WithValues(ctx, "cloud", img.Cloud, "region", img.Region, "imageID", img.ID, "image", img.Image)
@@ -956,7 +956,7 @@ func (p *awsTarget) Rollback(ctx context.Context, tasks map[string]task.Task) er
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
+	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*awsTaskState](t.State)
 		if err != nil {

@@ -19,13 +19,13 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -244,7 +244,7 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 	var pk, kek, db string
 
 	if manifest.SecureBoot {
-		fetchCertificates := parallel.NewActivity(ctx)
+		fetchCertificates := concurrency.NewActivity(ctx)
 
 		fetchCertificates.Go(func(ctx context.Context) error {
 			pkFile, er := manifest.PathBySuffix(".secureboot.pk.der")
@@ -535,7 +535,7 @@ func (p *gcp) Rollback(ctx context.Context, tasks map[string]task.Task) error {
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := parallel.NewLimitedActivity(ctx, 3)
+	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
 	for _, t := range tasks {
 		state, err := task.ParseState[*gcpTaskState](t.State)
 		if err != nil {

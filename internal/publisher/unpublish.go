@@ -8,9 +8,9 @@ import (
 
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
-	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
 
@@ -44,9 +44,9 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 
 	publications := make([]publication, len(p.flavors))
 	expandCommit := sync.Once{}
-	fetchManifests := parallel.NewActivitySync(ctx)
+	fetchManifests := concurrency.NewActivitySync(ctx)
 	for i, flavorConfig := range p.flavors {
-		fetchManifests.Go(func(ctx context.Context) (parallel.ResultSyncFunc, error) {
+		fetchManifests.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
 			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
 
@@ -102,7 +102,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 	}
 
 	log.Info(ctx, "Unpublishing images", "count", len(publications))
-	unpublishPublications := parallel.NewLimitedActivity(ctx, 7)
+	unpublishPublications := concurrency.NewLimitedActivity(ctx, 7)
 	for i, pub := range publications {
 		if pub.Manifest == nil {
 			lctx := log.WithValues(ctx, "flavor", pub.Flavor)

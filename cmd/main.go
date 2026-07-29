@@ -11,8 +11,8 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/gardenlinux/glci/internal/cli"
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/log"
-	"github.com/gardenlinux/glci/internal/parallel"
 )
 
 var version = "dev"
@@ -33,7 +33,7 @@ func run() int {
 	}, func(ctx context.Context, cfg *viper.Viper) (context.Context, error) {
 		ctx = log.Setup(ctx, cfg.GetBool("debug"), false, os.Stderr)
 		if cfg.GetBool("glacial") {
-			ctx = parallel.WithInlineMode(ctx, true)
+			ctx = concurrency.WithInlineMode(ctx, true)
 		}
 		ctx = cli.WithVersion(ctx, version)
 		ctx = cli.WithStart(ctx, cli.StartTime())

@@ -1,12 +1,10 @@
-package parallel
+package concurrency
 
 import (
 	"context"
 	"errors"
 
 	"github.com/wandb/parallel"
-
-	"github.com/gardenlinux/glci/internal/log"
 )
 
 // Activity is a parallel activity that can spawn goroutines and wait for them.
@@ -55,14 +53,15 @@ func (a *parallelActivity) Go(f ActivityFunc) {
 	a.exec.Go(func(_ context.Context) error {
 		inErr := f(a.ctx)
 		if inErr != nil {
-			log.Error(a.ctx, inErr)
+			inErr = logOnce(a.ctx, inErr)
 		}
+
 		return inErr
 	})
 }
 
 func (a *parallelActivity) Wait() error {
-	return reportErrs(a.ctx, a.exec.Wait())
+	return normalize(a.exec.Wait())
 }
 
 type inlineActivity struct {
@@ -73,13 +72,12 @@ type inlineActivity struct {
 func (a *inlineActivity) Go(f ActivityFunc) {
 	err := f(a.ctx)
 	if err != nil {
-		log.Error(a.ctx, err)
-		a.errs = append(a.errs, err)
+		a.errs = append(a.errs, logOnce(a.ctx, err))
 	}
 }
 
 func (a *inlineActivity) Wait() error {
-	return reportErrs(a.ctx, parallel.CombineErrors(a.errs...))
+	return errors.Join(a.errs...)
 }
 
 // ActivitySync is a parallel activity that can spawn goroutines, sync them, and wait for them.
@@ -121,7 +119,7 @@ func NewLimitedActivitySync(ctx context.Context, limit int) ActivitySync {
 
 			inErr := rf()
 			if inErr != nil {
-				log.Error(ctx, inErr)
+				inErr = logOnce(ctx, inErr)
 			}
 			return inErr
 		}),
@@ -138,14 +136,14 @@ func (a *parallelActivitySync) Go(f ActivitySyncFunc) {
 	a.exec.Go(func(_ context.Context) (ResultSyncFunc, error) {
 		rf, inErr := f(a.ctx)
 		if inErr != nil {
-			log.Error(a.ctx, inErr)
+			inErr = logOnce(a.ctx, inErr)
 		}
 		return rf, inErr
 	})
 }
 
 func (a *parallelActivitySync) Wait() error {
-	return reportErrs(a.ctx, a.exec.Wait())
+	return normalize(a.exec.Wait())
 }
 
 type inlineActivitySync struct {
@@ -156,31 +154,26 @@ type inlineActivitySync struct {
 func (a *inlineActivitySync) Go(f ActivitySyncFunc) {
 	rf, err := f(a.ctx)
 	if err != nil {
-		log.Error(a.ctx, err)
-		a.errs = append(a.errs, err)
+		a.errs = append(a.errs, logOnce(a.ctx, err))
 		return
 	}
 	if rf != nil {
 		err = rf()
 		if err != nil {
-			log.Error(a.ctx, err)
-			a.errs = append(a.errs, err)
+			a.errs = append(a.errs, logOnce(a.ctx, err))
 		}
 	}
 }
 
 func (a *inlineActivitySync) Wait() error {
-	return reportErrs(a.ctx, parallel.CombineErrors(a.errs...))
+	return errors.Join(a.errs...)
 }
 
-func reportErrs(ctx context.Context, err error) error {
-	if err != nil {
-		terr, ok := errors.AsType[parallel.MultiError](err)
-		if ok {
-			errs := terr.Unwrap()
-			log.ErrorMsg(ctx, "Errors encountered during parallel execution", "cnt", len(errs))
-		}
+func normalize(err error) error {
+	multiErr, ok := err.(parallel.MultiError) //nolint:errorlint // Intentional exact error assertion.
+	if !ok {
+		return err
 	}
 
-	return err
+	return errors.Join(multiErr.Unwrap()...)
 }
