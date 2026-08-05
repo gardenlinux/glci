@@ -233,9 +233,6 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
-	if manifest.Platform == "metal,openstackbaremetal" { // A terrible workaround, please remove a soon as possible.
-		manifest.Platform = "openstackbaremetal"
-	}
 	if platform(flavor) != manifest.Platform {
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
