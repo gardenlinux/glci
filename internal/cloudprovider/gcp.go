@@ -50,6 +50,8 @@ func (*gcp) Type() string {
 }
 
 type gcp struct {
+	nonFusableTarget
+
 	base *module.Base
 
 	credsSource credsprovider.CredsSource

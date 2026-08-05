@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/goccy/go-yaml"
 
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/task"
@@ -81,8 +83,10 @@ func GetManifest(ctx context.Context, source ArtifactSource, key string) (*garde
 	return manifest, nil
 }
 
-// PutManifest stores a manifest into an ArtifactSource.
+// PutManifest stores a manifest into an ArtifactSource, stamping the version that wrote it.
 func PutManifest(ctx context.Context, source ArtifactSource, key string, manifest *gardenlinux.Manifest) error {
+	manifest.GLCIVersion = cli.Version(ctx)
+
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	defer func() {
@@ -101,6 +105,66 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 	return source.PutObject(ctx, key, &buf)
 }
 
+// GetGroupManifest retrieves a group manifest from an artifact source.
+func GetGroupManifest(ctx context.Context, source ArtifactSource, key string) (*gardenlinux.GroupManifest, error) {
+	body, err := source.GetObject(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = body.Close()
+	}()
+
+	var rawGroupManifest map[string]any
+	err = yaml.NewDecoder(body).Decode(&rawGroupManifest)
+	if err != nil {
+		return nil, fmt.Errorf("invalid group manifest: %w", err)
+	}
+
+	groupManifest := &gardenlinux.GroupManifest{}
+	var decoder *mapstructure.Decoder
+	decoder, err = mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:  groupManifest,
+		TagName: "yaml",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invalid group manifest: %w", err)
+	}
+	err = decoder.Decode(rawGroupManifest)
+	if err != nil {
+		return nil, fmt.Errorf("invalid group manifest: %w", err)
+	}
+
+	err = body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return groupManifest, nil
+}
+
+// PutGroupManifest stores a group manifest into an ArtifactSource, stamping the version that wrote it.
+func PutGroupManifest(ctx context.Context, source ArtifactSource, key string, groupManifest *gardenlinux.GroupManifest) error {
+	groupManifest.GLCIVersion = cli.Version(ctx)
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	defer func() {
+		_ = enc.Close()
+	}()
+
+	err := enc.Encode(groupManifest)
+	if err != nil {
+		return fmt.Errorf("cannot encode group manifest: %w", err)
+	}
+	err = enc.Close()
+	if err != nil {
+		return fmt.Errorf("cannot encode group manifest: %w", err)
+	}
+
+	return source.PutObject(ctx, key, &buf)
+}
+
 // PublishingTarget is a target onto which GLCI can publish Garden Linux images.
 type PublishingTarget interface {
 	module.Module
@@ -112,6 +176,9 @@ type PublishingTarget interface {
 	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
 	CanUnpublish() bool
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
+	CanFuse() bool
+	Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error)
+	Unfuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest, steamroll bool) error
 	task.RollbackHandler
 }
 
@@ -145,6 +212,15 @@ func publishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest) (P
 	return output, nil
 }
 
+func individualPublishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest) (PUBOUT, error) {
+	output, err := publishingOutput[PUBOUT](manifest.IndividualPublishedImageMetadata)
+	if err != nil {
+		return output, fmt.Errorf("invalid individual published image metadata in manifest: %w", err)
+	}
+
+	return output, nil
+}
+
 // OCMTarget is a target onto which GLCI can publish an OCM component descriptor.
 type OCMTarget interface {
 	module.Module
@@ -173,7 +249,7 @@ func (notUnpublishableTarget) CanUnpublish() bool {
 }
 
 //nolint:unused // Canonical base for targets that cannot be unpublished.
-func (notUnpublishableTarget) Unpublish(context.Context, *gardenlinux.Manifest, bool) error {
+func (notUnpublishableTarget) Unpublish(_ context.Context, _ *gardenlinux.Manifest, _ bool) error {
 	return errors.New("target cannot unpublish")
 }
 
@@ -183,8 +259,22 @@ func (notUnpublishableTarget) RollbackDomain() string {
 }
 
 //nolint:unused // Canonical base for targets that cannot be unpublished.
-func (notUnpublishableTarget) Rollback(context.Context, map[string]task.Task) error {
+func (notUnpublishableTarget) Rollback(_ context.Context, _ map[string]task.Task) error {
 	return errors.New("target cannot rollback")
+}
+
+type nonFusableTarget struct{}
+
+func (nonFusableTarget) CanFuse() bool {
+	return false
+}
+
+func (nonFusableTarget) Fuse(_ context.Context, _ []gardenlinux.FlavorManifest) (PublishingOutput, error) {
+	return nil, errors.New("target cannot fuse")
+}
+
+func (nonFusableTarget) Unfuse(_ context.Context, _ []gardenlinux.FlavorManifest, _ bool) error {
+	return errors.New("target cannot unfuse")
 }
 
 func platform(flavor string) string {
@@ -231,4 +321,48 @@ func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]b
 	}
 
 	return buf.Bytes(), nil
+}
+
+func getObjectFile(ctx context.Context, source ArtifactSource, key string) (string, error) {
+	body, err := source.GetObject(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = body.Close()
+	}()
+
+	var f *os.File
+	f, err = os.CreateTemp("", "")
+	if err != nil {
+		return "", fmt.Errorf("cannot create file: %w", err)
+	}
+
+	var success bool
+	defer func() {
+		if success {
+			return
+		}
+
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+
+	_, err = io.Copy(f, body)
+	if err != nil {
+		return "", fmt.Errorf("cannot copy object to file %s: %w", f.Name(), err)
+	}
+
+	err = f.Close()
+	if err != nil {
+		return "", fmt.Errorf("cannot close file %s: %w", f.Name(), err)
+	}
+
+	err = body.Close()
+	if err != nil {
+		return "", fmt.Errorf("cannot close object: %w", err)
+	}
+
+	success = true
+	return f.Name(), nil
 }

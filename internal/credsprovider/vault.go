@@ -323,13 +323,17 @@ func (*vault) secretKeys(id CredsID) []string {
 		return []string{
 			fmt.Sprintf("se-gcp-%s/impersonated-account/glci/token", id.Config),
 		}
+	case "OCI_userpass":
+		return []string{
+			fmt.Sprintf("se-oci-%s/data/application", id.Config),
+		}
 	case "OpenStack":
 		return []string{
 			fmt.Sprintf("se-sci-%s/data/creds", id.Config),
 		}
 	default:
 		return []string{
-			fmt.Sprintf("se-%s/data/creds", id.Config),
+			fmt.Sprintf("se-oci-%s/data/application", id.Config),
 		}
 	}
 }

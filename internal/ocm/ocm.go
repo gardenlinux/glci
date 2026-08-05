@@ -120,7 +120,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			Version: version,
 			Labels: []componentDescriptorlabel{
 				{
-					Name:  "glci-version",
+					Name:  "glci_version",
 					Value: glciVersion,
 				},
 			},

@@ -42,6 +42,8 @@ func (*aliyun) Type() string {
 }
 
 type aliyun struct {
+	nonFusableTarget
+
 	base *module.Base
 
 	credsSource credsprovider.CredsSource

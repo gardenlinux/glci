@@ -81,6 +81,8 @@ linters:
         disabled: true
       - name: function-result-limit
         disabled: true
+      - name: identical-switch-branches
+        disabled: true
       - name: line-length-limit
         disabled: true
       - name: max-public-structs

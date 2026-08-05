@@ -48,6 +48,8 @@ func (*azure) Type() string {
 }
 
 type azure struct {
+	nonFusableTarget
+
 	base *module.Base
 
 	credsSource credsprovider.CredsSource

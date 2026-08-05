@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
@@ -20,7 +19,7 @@ import (
 func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
-	ctx = task.WithStatePersistor(ctx, p.state, id(version, commit))
+	ctx = task.WithStatePersistor(ctx, p.state, fmt.Sprintf("%s-%.8s", version, commit))
 	err := p.publish(ctx, version, commit, omitIrreversible, omitComponentDescriptor)
 	stateErr := task.PersistorError(ctx)
 	if stateErr != nil {
@@ -48,74 +47,11 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		return fmt.Errorf("cannot roll back: %w", err)
 	}
 
-	glciVer := cli.Version(ctx)
-
-	publications := make([]publication, len(p.flavors))
-	expandCommit := sync.Once{}
-	fetchManifests := concurrency.NewActivitySync(ctx)
-	for i, flavorConfig := range p.flavors {
-		fetchManifests.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
-			manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
-			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
-
-			log.Info(ctx, "Retrieving manifest")
-			manifest, er := cloudprovider.GetManifest(ctx, p.manifestSource, manifestKey)
-			if er != nil {
-				return nil, fmt.Errorf("cannot get manifest for %s: %w", flavorConfig.Flavor, er)
-			}
-			if manifest.Version != version {
-				return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavorConfig.Flavor, manifest.Version)
-			}
-			if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
-				return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavorConfig.Flavor, manifest.BuildCommittish)
-			}
-			expandCommit.Do(func() {
-				commit = manifest.BuildCommittish
-			})
-
-			log.Debug(ctx, "Retrieving target manifest")
-			var targetManifest *gardenlinux.Manifest
-			targetManifest, er = cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
-			_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
-			if er != nil && !ok {
-				return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavorConfig.Flavor, er)
-			}
-			if targetManifest != nil {
-				if targetManifest.Version != version {
-					return nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavorConfig.Flavor, targetManifest.Version)
-				}
-				if targetManifest.BuildCommittish != commit {
-					return nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavorConfig.Flavor,
-						targetManifest.BuildCommittish)
-				}
-
-				manifest = targetManifest
-			}
-
-			var target cloudprovider.PublishingTarget
-			target, er = p.selectTarget(manifest, flavorConfig.Flavor)
-			if er != nil {
-				return nil, er
-			}
-			return func() error {
-				publications[i] = publication{
-					FlavorManifest: gardenlinux.FlavorManifest{
-						Flavor:      flavorConfig.Flavor,
-						Manifest:    manifest,
-						ImageSuffix: target.ImageSuffix(),
-					},
-					Target:                target,
-					CloudProfile:          flavorConfig.CloudProfile,
-					InComponentDescriptor: flavorConfig.InComponentDescriptor,
-				}
-
-				return nil
-			}, nil
-		})
-	}
-	err = fetchManifests.Wait()
+	var publications []publication
+	var groupPublications []groupPublication
+	publications, groupPublications, commit, err = p.fetchManifests(ctx, version, commit, false)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot fetch manifests: %w", err)
 	}
 
 	manifestsInDescriptor := make([]gardenlinux.FlavorManifest, 0, len(publications))
@@ -126,28 +62,58 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	}
 
 	var descriptor *ocm.ComponentDescriptor
-	descriptor, err = ocm.BuildComponentDescriptor(ctx, p.manifestSource, manifestsInDescriptor, p.ocmTarget, p.aliases, glciVer, version,
-		commit)
+	descriptor, err = ocm.BuildComponentDescriptor(ctx, p.manifestSource, manifestsInDescriptor, p.ocmTarget, p.aliases, cli.Version(ctx),
+		version, commit)
 	if err != nil {
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
 
-	log.Info(ctx, "Publishing images", "count", len(publications))
-	notUnpublishablePublications := make([]publication, 0, len(publications))
-	publishPublication := concurrency.NewActivity(ctx)
-	for _, pub := range publications {
-		if !pub.Target.CanUnpublish() {
-			notUnpublishablePublications = append(notUnpublishablePublications, pub)
-			continue
-		}
-
-		publishPublication.Go(func(ctx context.Context) error {
-			return p.publishPublication(ctx, pub, version, commit, glciVer)
-		})
-	}
-	err = publishPublication.Wait()
+	var reversibleTasks, irreversibleTasks []publishingTask
+	reversibleTasks, irreversibleTasks, err = p.classifyPublishTasks(publications, groupPublications)
 	if err != nil {
 		return err
+	}
+
+	dependencies := func(t publishingTask) ([]publishingTask, error) {
+		switch pub := t.(type) {
+		case *publication:
+			return nil, nil
+
+		case *groupPublication:
+			deps := make([]publishingTask, len(pub.publications))
+			for i := range pub.publications {
+				deps[i] = pub.publications[i]
+			}
+
+			return deps, nil
+
+		default:
+			return nil, fmt.Errorf("unknown publishing task type %T", pub)
+		}
+	}
+
+	run := func(ctx context.Context, t publishingTask) error {
+		switch pub := t.(type) {
+		case *publication:
+			return p.publishFlavor(ctx, *pub)
+
+		case *groupPublication:
+			return p.publishGroup(ctx, pub)
+
+		default:
+			return fmt.Errorf("unknown publishing task type %T", t)
+		}
+	}
+
+	count := p.countFlavors(reversibleTasks)
+	if !omitIrreversible {
+		count += p.countFlavors(irreversibleTasks)
+	}
+	log.Info(ctx, "Publishing flavors", "count", count)
+
+	err = concurrency.RunTasks(ctx, reversibleTasks, dependencies, run, concurrency.FailureModeSkipDependents)
+	if err != nil {
+		return fmt.Errorf("cannot publish targets: %w", err)
 	}
 
 	task.Clear(ctx)
@@ -157,19 +123,14 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	}
 
 	if omitIrreversible {
-		if len(notUnpublishablePublications) > 0 {
-			log.Info(ctx, "Skipping targets that cannot be unpublished", "count", len(notUnpublishablePublications))
+		cnt := p.countFlavors(irreversibleTasks)
+		if cnt > 0 {
+			log.Info(ctx, "Skipping flavors that cannot be unpublished", "count", cnt)
 		}
 	} else {
-		publishPublication = concurrency.NewActivity(ctx)
-		for _, pub := range notUnpublishablePublications {
-			publishPublication.Go(func(ctx context.Context) error {
-				return p.publishPublication(ctx, pub, version, commit, glciVer)
-			})
-		}
-		err = publishPublication.Wait()
+		err = concurrency.RunTasks(ctx, irreversibleTasks, dependencies, run, concurrency.FailureModeSkipDependents)
 		if err != nil {
-			return err
+			return fmt.Errorf("cannot publish irreversible targets: %w", err)
 		}
 	}
 
@@ -200,45 +161,133 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	return nil
 }
 
-func (p *Publisher) publishPublication(ctx context.Context, pub publication, version, commit, glciVer string) error {
+func (*Publisher) classifyPublishTasks(publications []publication, groupPublications []groupPublication) ([]publishingTask,
+	[]publishingTask, error,
+) {
+	var reversibleTasks, irreversibleTasks []publishingTask
+
+	for i := range publications {
+		if publications[i].PublishingGroup != "" {
+			continue
+		}
+
+		isPublished, err := publications[i].Target.IsPublished(publications[i].Manifest)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cannot determine publishing status for %s: %w", publications[i].Flavor, err)
+		}
+		if isPublished {
+			continue
+		}
+
+		tasks := &reversibleTasks
+		if !publications[i].Target.CanUnpublish() {
+			tasks = &irreversibleTasks
+		}
+		*tasks = append(*tasks, &publications[i])
+	}
+
+	for i := range groupPublications {
+		if groupPublications[i].isPublished() {
+			continue
+		}
+
+		tasks := &reversibleTasks
+		if !groupPublications[i].Target.CanUnpublish() {
+			tasks = &irreversibleTasks
+		}
+		for j := range groupPublications[i].publications {
+			*tasks = append(*tasks, groupPublications[i].publications[j])
+		}
+		*tasks = append(*tasks, &groupPublications[i])
+	}
+
+	return reversibleTasks, irreversibleTasks, nil
+}
+
+func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 	ctx = log.WithValues(ctx, "flavor", pub.Flavor, "targetType", pub.Target.Type())
+	if pub.PublishingGroup != "" {
+		ctx = log.WithValues(ctx, "group", pub.PublishingGroup)
+	}
 
 	uptime := cli.ExecTime(ctx)
 	if uptime != 0 && uptime.Hours() > 5 {
 		return errors.New("publishing taking too long, restart to resume")
 	}
 
-	isPublished, err := pub.Target.IsPublished(pub.Manifest)
-	if err != nil {
-		return fmt.Errorf("cannot determine publishing status for %s: %w", pub.Flavor, err)
+	batch := pub.Flavor
+	if pub.PublishingGroup != "" {
+		batch = pub.PublishingGroup
 	}
-	if isPublished {
-		log.Info(ctx, "Already published, skipping")
-		return nil
-	}
-	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, pub.Flavor), true), pub.Target.RollbackDomain())
+	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, batch), true), pub.Target.RollbackDomain())
 
-	log.Info(ctx, "Publishing image")
-	pub.Manifest.PublishedImageMetadata, err = pub.Target.Publish(ctx, pub.Flavor, pub.Manifest)
+	pub.Manifest.PublishedImageMetadata = nil
+	pub.Manifest.IndividualPublishedImageMetadata = nil
+
+	log.Info(ctx, "Publishing flavor")
+	output, err := pub.Target.Publish(ctx, pub.Flavor, pub.Manifest)
 	if err != nil {
 		return fmt.Errorf("cannot publish %s to %s: %w", pub.Flavor, pub.Target.Type(), err)
 	}
 
-	if glciVer != "" {
-		pub.Manifest.GLCIVersion = glciVer
+	if pub.PublishingGroup != "" {
+		pub.Manifest.IndividualPublishedImageMetadata = output
+	} else {
+		pub.Manifest.PublishedImageMetadata = output
 	}
 
-	log.Info(ctx, "Updating manifest")
-	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", pub.Flavor, version, commit)
-	task.RemoveCompleted(ctx, pub.Flavor)
-	err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKey, pub.Manifest)
-	if err != nil {
-		return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err))
+	if pub.PublishingGroup == "" {
+		log.Info(ctx, "Updating manifest")
+		task.RemoveCompleted(ctx, pub.Flavor)
+		err = cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
+		if err != nil {
+			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err))
+		}
 	}
 
 	return nil
 }
 
-func id(version, commit string) string {
-	return fmt.Sprintf("%s-%.8s", version, commit)
+func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication) error {
+	ctx = log.WithValues(ctx, "group", groupPub.Group, "targetType", groupPub.Target.Type())
+	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, groupPub.Group), true), groupPub.Target.RollbackDomain())
+
+	manifests := make([]gardenlinux.FlavorManifest, len(groupPub.publications))
+	for i, pub := range groupPub.publications {
+		manifests[i] = pub.FlavorManifest
+	}
+
+	log.Info(ctx, "Fusing group", "count", len(groupPub.publications))
+	output, err := groupPub.Target.Fuse(ctx, manifests)
+	if err != nil {
+		return fmt.Errorf("cannot fuse group %s to %s: %w", groupPub.Group, groupPub.Target.Type(), err)
+	}
+
+	manifestKeys := make([]string, len(groupPub.publications))
+	for i, pub := range groupPub.publications {
+		manifestKeys[i] = pub.manifestKey()
+
+		pub.Manifest.PublishedImageMetadata = output
+
+		log.Info(log.WithValues(ctx, "flavor", pub.Flavor), "Updating manifest")
+		err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKeys[i], pub.Manifest)
+		if err != nil {
+			return fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err)
+		}
+	}
+
+	groupPub.GroupManifest = &gardenlinux.GroupManifest{
+		Version:         groupPub.publications[0].Manifest.Version,
+		BuildCommittish: groupPub.publications[0].Manifest.BuildCommittish,
+		Manifests:       manifestKeys,
+	}
+
+	log.Info(ctx, "Updating group manifest")
+	task.RemoveCompleted(ctx, groupPub.Group)
+	err = cloudprovider.PutGroupManifest(ctx, p.manifestTarget, groupPub.manifestKey(), groupPub.GroupManifest)
+	if err != nil {
+		return errorreport.MarkCritical(fmt.Errorf("cannot put group manifest for %s: %w", groupPub.Group, err))
+	}
+
+	return nil
 }

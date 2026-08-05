@@ -39,6 +39,8 @@ func (*openstack) Type() string {
 }
 
 type openstack struct {
+	nonFusableTarget
+
 	base *module.Base
 
 	credsSource credsprovider.CredsSource
