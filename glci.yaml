@@ -1,31 +1,62 @@
 flavors:
 - flavor: ali-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod-arm64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod-arm64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod-arm64
+  in_component_descriptor: true
 - flavor: openstack-gardener_prod-amd64
+  in_component_descriptor: true
 - flavor: openstack-gardener-metal_prod-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_fips_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: openstack-gardener_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: openstack-gardener-metal_prod_usi-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_tpm2_trustedboot-amd64
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_tpm2_trustedboot-arm64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_tpm2_trustedboot-amd64
+  in_component_descriptor: true
 - flavor: azure-gardener_prod_tpm2_trustedboot-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_tpm2_trustedboot-amd64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_tpm2_trustedboot-arm64
+  in_component_descriptor: true
+- flavor: container-amd64
+  publishing_group: container
+- flavor: container-arm64
+  publishing_group: container
 publishing:
   credentials:
     source: Vault
@@ -85,6 +116,11 @@ publishing:
     config: gardenlinux
     project: sap-se-gcp-gardenlinux
     bucket: gardenlinux-images
+  - target: OCI
+    source: S3
+    config: gardenlinux-hccs
+    repository: gardenlinux.common.repositories.cloud.sap/gardenlinux
+    allows_delete: false
   - target: OpenStack
     source: S3
     source_china: S3-China
@@ -100,7 +136,6 @@ publishing:
       - ap-jp-1
       - ap-jp-2
       - ap-sa-1
-      #- ap-sa-2
       - eu-de-1
       - eu-de-2
       - eu-nl-1

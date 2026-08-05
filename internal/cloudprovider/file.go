@@ -39,7 +39,7 @@ func (p *file) isConfigured() bool {
 }
 
 func (*file) OCMType() string {
-	return (*oci)(nil).OCMType()
+	return (*ociOCMTarget)(nil).OCMType()
 }
 
 func (p *file) OCMRepositoryBase() string {
