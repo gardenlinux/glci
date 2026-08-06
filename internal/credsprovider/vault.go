@@ -299,7 +299,7 @@ func (*vault) secretKeys(id CredsID) []string {
 		}
 	case "AWS_china":
 		return []string{
-			fmt.Sprintf("se-aws-%s/data/creds/glci", id.Config),
+			fmt.Sprintf("se-aws-%s-old/data/creds/glci", id.Config),
 		}
 	case "Azure":
 		return []string{
@@ -308,7 +308,7 @@ func (*vault) secretKeys(id CredsID) []string {
 		}
 	case "Azure_china":
 		return []string{
-			fmt.Sprintf("se-azure-%s/data/creds/glci", id.Config),
+			fmt.Sprintf("se-azure-%s-old/data/creds/glci", id.Config),
 		}
 	case "Azure_storage":
 		return []string{
@@ -329,7 +329,7 @@ func (*vault) secretKeys(id CredsID) []string {
 		}
 	case "OpenStack":
 		return []string{
-			fmt.Sprintf("se-sci-%s/data/creds", id.Config),
+			fmt.Sprintf("se-sci-%s-old/data/creds", id.Config),
 		}
 	default:
 		return []string{
