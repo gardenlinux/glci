@@ -297,22 +297,14 @@ func (*vault) secretKeys(id CredsID) []string {
 		return []string{
 			fmt.Sprintf("se-aws-%s/creds/glci", id.Config),
 		}
-	case "AWS_china":
-		return []string{
-			fmt.Sprintf("se-aws-%s-old/data/creds/glci", id.Config),
-		}
 	case "Azure":
 		return []string{
 			fmt.Sprintf("se-azure-%s/config", id.Config),
 			fmt.Sprintf("se-azure-%s/creds/glci", id.Config),
 		}
-	case "Azure_china":
-		return []string{
-			fmt.Sprintf("se-azure-%s-old/data/creds/glci", id.Config),
-		}
 	case "Azure_storage":
 		return []string{
-			fmt.Sprintf("se-azure_storage-%s/data/creds", id.Config),
+			fmt.Sprintf("se-azure_storage-%s/data/application", id.Config),
 		}
 	case "GCP":
 		return []string{
@@ -332,9 +324,7 @@ func (*vault) secretKeys(id CredsID) []string {
 			fmt.Sprintf("se-sci-%s-old/data/creds", id.Config),
 		}
 	default:
-		return []string{
-			fmt.Sprintf("se-oci-%s/data/application", id.Config),
-		}
+		return nil
 	}
 }
 
@@ -421,6 +411,10 @@ func (p *vault) renewCreds(ctx context.Context, id CredsID, validate ValidateFun
 	ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Role)
 
 	keys := p.secretKeys(id)
+	if len(keys) == 0 {
+		return fmt.Errorf("unsupported credentials type %q", id.Type)
+	}
+
 	for _, key := range keys {
 		lctx := log.WithValues(ctx, "vaultKey", key)
 

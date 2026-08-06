@@ -1419,7 +1419,7 @@ func (p *azure) Start(ctx context.Context) error {
 
 	if p.enableChina {
 		err = p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type() + "_china",
+			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",
 		}, func(ctx context.Context, creds map[string]any) error {
@@ -1456,7 +1456,7 @@ func (p *azure) Stop() error {
 		})
 
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
-			Type:   p.Type() + "_china",
+			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",
 		})

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -1106,13 +1105,8 @@ func (*awsSource) Configurables() []module.Configurable {
 }
 
 func (p *awsSource) Start(ctx context.Context) error {
-	credsType := p.Type()
-	if strings.HasPrefix(p.srcCfg.Region, "cn-") {
-		credsType += "_china"
-	}
-
 	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   credsType,
+		Type:   p.Type(),
 		Config: p.srcCfg.Config,
 		Role:   "source",
 	}, p.createClients)
@@ -1125,13 +1119,8 @@ func (p *awsSource) Start(ctx context.Context) error {
 
 func (p *awsSource) Stop() error {
 	if p.srcCfg.Config != "" {
-		credsType := p.Type()
-		if strings.HasPrefix(p.srcCfg.Region, "cn-") {
-			credsType += "_china"
-		}
-
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
-			Type:   credsType,
+			Type:   p.Type(),
 			Config: p.srcCfg.Config,
 			Role:   "source",
 		})
@@ -1213,7 +1202,7 @@ func (p *awsTarget) Start(ctx context.Context) error {
 
 	if p.enableChina {
 		err = p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type() + "_china",
+			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",
 		}, func(ctx context.Context, creds map[string]any) error {
@@ -1238,7 +1227,7 @@ func (p *awsTarget) Stop() error {
 
 	if p.pubCfg.ConfigChina != "" {
 		p.credsSource.ReleaseCreds(credsprovider.CredsID{
-			Type:   p.Type() + "_china",
+			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",
 		})
