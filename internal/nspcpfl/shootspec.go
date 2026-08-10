@@ -1,6 +1,7 @@
 package nspcpfl
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,7 +21,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	var providerCfg map[string]any
 
 	if profile.Spec.ProviderConfig == nil || len(profile.Spec.ProviderConfig.Raw) == 0 {
-		return nil, nil, fmt.Errorf("providerConfig is empty")
+		return nil, nil, errors.New("providerConfig is empty")
 	}
 	var err error
 	err = json.Unmarshal(profile.Spec.ProviderConfig.Raw, &providerCfg)
@@ -28,8 +29,14 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 		return nil, nil, fmt.Errorf("cannot unmarshal providerConfig: %w", err)
 	}
 
-	machineImages := providerCfg["machineImages"].([]any)
-	versions := machineImages[0].(map[string]any)["versions"].([]any)
+	machineImages, ok := providerCfg["machineImages"].([]any)
+	if !ok {
+		return nil, nil, errors.New("providerConfig: machineImages is missing or not an array")
+	}
+	versions, ok := machineImages[0].(map[string]any)["versions"].([]any)
+	if !ok {
+		return nil, nil, errors.New("providerConfig: versions is missing or not an array")
+	}
 
 	var region string
 	switch platform {
@@ -40,8 +47,15 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	case "az":
 		region = "northeurope"
 	default:
-		regionList := versions[0].(map[string]any)["regions"].([]any)
-		region = regionList[0].(map[string]any)["name"].(string)
+		regionListRaw, ok := versions[0].(map[string]any)["regions"].([]any)
+		if !ok {
+			return nil, nil, errors.New("providerConfig: regions is missing or not an array")
+		}
+		regionName, ok := regionListRaw[0].(map[string]any)["name"].(string)
+		if !ok {
+			return nil, nil, errors.New("providerConfig: region name is missing or not a string")
+		}
+		region = regionName
 	}
 
 	if platform != "gcp" && platform != "converged-cloud" && platform != "az" {
@@ -49,7 +63,15 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 			"apiVersion": platform + ".provider.extensions.gardener.cloud/v1alpha1",
 			"kind":       "InfrastructureConfig",
 			"networks": map[string]any{
-				"zones": []map[string]any{{"name": region + "a"}},
+				"vpc": map[string]any{"cidr": "10.180.0.0/16"},
+				"zones": []map[string]any{
+					{
+						"name":     region + "a",
+						"workers":  "10.180.0.0/19",
+						"public":   "10.180.32.0/20",
+						"internal": "10.180.48.0/20",
+					},
+				},
 			},
 		})
 		if err != nil {
@@ -71,7 +93,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	for _, mi := range profile.Spec.MachineImages {
 		for _, v := range mi.Versions {
 			for _, arch := range v.Architectures {
-				architecture := string(arch)
+				architecture := arch
 				var machineType string
 				var volumeType string
 				switch platform {
@@ -131,13 +153,15 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	}
 
 	networkType := "calico"
+	cidr := "10.180.0.0/16"
+	credentialBindingName := "aws"
 	shoot := &gardencorev1beta1.Shoot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "core.gardener.cloud/v1beta1",
 			Kind:       "Shoot",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("gardenlinux-%s-%s", major, strings.ToLower(platform)),
+			Name:      fmt.Sprintf("gl-%s-%s", major, strings.ToLower(platform)),
 			Namespace: "garden-gl-it",
 		},
 		Spec: gardencorev1beta1.ShootSpec{
@@ -154,9 +178,11 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 				Kind: "NamespacedCloudProfile",
 			},
 			Networking: &gardencorev1beta1.Networking{
-				Type: &networkType,
+				Type:  &networkType,
+				Nodes: &cidr,
 			},
-			Region: region,
+			Region:                 region,
+			CredentialsBindingName: &credentialBindingName,
 		},
 	}
 
@@ -182,6 +208,7 @@ func buildShootSpec(version string, profile *gardencorev1beta1.NamespacedCloudPr
 	return shoot, shootYAML, nil
 }
 
+// BuildShootSpecYAML returns the YAML-encoded Shoot spec derived from the given NamespacedCloudProfile.
 func BuildShootSpecYAML(version string, profile *gardencorev1beta1.NamespacedCloudProfile) ([]byte, error) {
 	_, shootYAML, err := buildShootSpec(version, profile)
 	return shootYAML, err

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 
+	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
+
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
@@ -186,7 +188,8 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	}
 
 	if !omitNSCloudProfile {
-		profiles, err := nspcpfl.BuildNSCloudProfiles(version, publications)
+		var profiles []*gardencorev1beta1.NamespacedCloudProfile
+		profiles, err = nspcpfl.BuildNSCloudProfiles(version, publications)
 		if err != nil {
 			return fmt.Errorf("cannot create namespaced cloud profiles: %w", err)
 		}
