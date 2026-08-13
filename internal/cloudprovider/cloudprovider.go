@@ -41,6 +41,7 @@ type ArtifactSource interface {
 	GetObjectSize(ctx context.Context, key string) (int64, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, object io.Reader) error
+	DeleteObject(ctx context.Context, key string) error
 }
 
 // GetManifest retrieves a manifest from an artifact source.

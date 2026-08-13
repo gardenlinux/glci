@@ -155,7 +155,7 @@ type azureMachineImage struct {
 
 type azureMachineImageVersion struct {
 	Version                 string  `json:"version"`
-	CommunityGalleryImageID *string `json:"communityGalleryImageID,omitempty"`
+	CommunityGalleryImageID *string `json:"community_gallery_image_id,omitempty"`
 	Architecture            *string `json:"architecture,omitempty"`
 }
 
@@ -227,6 +227,7 @@ func BuildNSCloudProfiles(version string, publications []cloudprovider.Publicati
 	return profiles, nil
 }
 
+// MajorVersion returns the major version component from a semver-like version string.
 func MajorVersion(version string) string {
 	return strings.Split(version, ".")[0]
 }
@@ -255,7 +256,8 @@ func newProfile(version, provider string, rawConfig *runtime.RawExtension, archi
 					Versions: []gardencorev1beta1.MachineImageVersion{
 						{
 							ExpirableVersion: gardencorev1beta1.ExpirableVersion{
-								Version: version,
+								Version:        version,
+								Classification: classificationSupported(),
 							},
 							Architectures: architecture,
 							CRI: []gardencorev1beta1.CRI{
@@ -292,6 +294,11 @@ func marshalRaw(cfg any) (*runtime.RawExtension, error) {
 		return nil, fmt.Errorf("cannot marshal provider config: %w", err)
 	}
 	return &runtime.RawExtension{Raw: raw}, nil
+}
+
+func classificationSupported() *gardencorev1beta1.VersionClassification {
+	c := gardencorev1beta1.ClassificationSupported
+	return &c
 }
 
 func buildAWSProfile(version string, publications []cloudprovider.Publication) (*gardencorev1beta1.NamespacedCloudProfile, error) {
@@ -425,7 +432,7 @@ func buildOpenStackProfile(version string, publications []cloudprovider.Publicat
 		}
 		arch := string(pub.Manifest.Architecture)
 		for _, img := range meta.Images {
-			if strings.Contains(img.ImageName, fmt.Sprintf("gardenlinux-openstack-openstack-prod-%s", arch)) {
+			if strings.Contains(img.ImageName, "gardenlinux-openstack-openstack-prod-"+arch) {
 				if !slices.Contains(architectures, arch) {
 					architectures = append(architectures, arch)
 				}

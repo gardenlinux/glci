@@ -398,6 +398,26 @@ func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader)
 	return nil
 }
 
+func (p *awsSource) DeleteObject(ctx context.Context, key string) error {
+	s3Client := p.srcClients()
+
+	if s3Client == nil {
+		return errors.New("config not set")
+	}
+	ctx = log.WithValues(ctx, "source", p.Type())
+
+	log.Debug(ctx, "Deleting object", "bucket", p.srcCfg.Bucket, "key", key)
+	_, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &p.srcCfg.Bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot delete object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
+	}
+
+	return nil
+}
+
 func (p *awsTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
 	if !p.isConfigured() {
 		return false

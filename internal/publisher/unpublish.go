@@ -9,6 +9,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/nspcpfl"
 	"github.com/gardenlinux/glci/internal/parallel"
 	"github.com/gardenlinux/glci/internal/task"
 )
@@ -95,6 +96,10 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 		return err
 	}
 
+	// Capture NSCloudProfile/ShootSpec keys before images are unpublished
+	// (PublishedImageMetadata is cleared during unpublish, so must be done here).
+	nsCloudProfileKeys, shootSpecKeys := collectNSCloudProfileKeys(ctx, version, commit, publications)
+
 	log.Info(ctx, "Unpublishing images", "count", len(publications))
 	unpublishPublications := parallel.NewLimitedActivity(ctx, 7)
 	for i, publication := range publications {
@@ -147,6 +152,45 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 		return err
 	}
 
+	p.removeNSCloudProfileAndShootSpec(ctx, nsCloudProfileKeys, shootSpecKeys)
+
 	log.Info(ctx, "Unpublishing completed successfully")
 	return nil
+}
+
+func collectNSCloudProfileKeys(ctx context.Context, version, commit string, publications []cloudprovider.Publication) (nsProfileKeys, shootKeys []string) {
+	validPublications := make([]cloudprovider.Publication, 0, len(publications))
+	for _, pub := range publications {
+		if pub.Manifest != nil && pub.Target != nil {
+			validPublications = append(validPublications, pub)
+		}
+	}
+	profiles, err := nspcpfl.BuildNSCloudProfiles(version, validPublications)
+	if err != nil {
+		log.Info(ctx, "Cannot rebuild NSCloudProfiles for cleanup, skipping", "err", err)
+		return nil, nil
+	}
+	for _, profile := range profiles {
+		baseName := fmt.Sprintf("gardenlinux-%s-%.8s-%s", nspcpfl.MajorVersion(version), commit, profile.Spec.Parent.Name)
+		nsProfileKeys = append(nsProfileKeys, fmt.Sprintf("meta/NSCloudProfile/%s/%s", version, baseName))
+		shootKeys = append(shootKeys, fmt.Sprintf("meta/ShootSpec/%s/%s", version, baseName))
+	}
+	return nsProfileKeys, shootKeys
+}
+
+func (p *Publisher) removeNSCloudProfileAndShootSpec(ctx context.Context, nsProfileKeys, shootKeys []string) {
+	for _, key := range nsProfileKeys {
+		if err := p.manifestTarget.DeleteObject(ctx, key); err != nil {
+			log.Info(ctx, "Cannot remove NSCloudProfile", "key", key, "err", err)
+		} else {
+			log.Info(ctx, "Removed NSCloudProfile", "key", key)
+		}
+	}
+	for _, key := range shootKeys {
+		if err := p.manifestTarget.DeleteObject(ctx, key); err != nil {
+			log.Info(ctx, "Cannot remove ShootSpec", "key", key, "err", err)
+		} else {
+			log.Info(ctx, "Removed ShootSpec", "key", key)
+		}
+	}
 }
