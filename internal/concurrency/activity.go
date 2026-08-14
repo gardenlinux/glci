@@ -9,7 +9,7 @@ import (
 
 // Activity is a parallel activity that can spawn goroutines and wait for them.
 type Activity interface {
-	Go(f ActivityFunc)
+	Go(run ActivityFunc)
 	Wait() error
 }
 
@@ -48,10 +48,10 @@ type parallelActivity struct {
 	exec parallel.AllErrsExecutor
 }
 
-func (a *parallelActivity) Go(f ActivityFunc) {
+func (a *parallelActivity) Go(run ActivityFunc) {
 	//nolint:contextcheck // Forwards caller context, not parallel's group context.
 	a.exec.Go(func(_ context.Context) error {
-		inErr := f(a.ctx)
+		inErr := run(a.ctx)
 		if inErr != nil {
 			inErr = logOnce(a.ctx, inErr)
 		}
@@ -69,8 +69,8 @@ type inlineActivity struct {
 	errs []error
 }
 
-func (a *inlineActivity) Go(f ActivityFunc) {
-	err := f(a.ctx)
+func (a *inlineActivity) Go(run ActivityFunc) {
+	err := run(a.ctx)
 	if err != nil {
 		a.errs = append(a.errs, logOnce(a.ctx, err))
 	}
@@ -82,7 +82,7 @@ func (a *inlineActivity) Wait() error {
 
 // ActivitySync is a parallel activity that can spawn goroutines, sync them, and wait for them.
 type ActivitySync interface {
-	Go(f ActivitySyncFunc)
+	Go(run ActivitySyncFunc)
 	Wait() error
 }
 
@@ -131,10 +131,10 @@ type parallelActivitySync struct {
 	exec parallel.FeedingAllErrsExecutor[ResultSyncFunc]
 }
 
-func (a *parallelActivitySync) Go(f ActivitySyncFunc) {
+func (a *parallelActivitySync) Go(run ActivitySyncFunc) {
 	//nolint:contextcheck // Forwards caller context, not parallel's group context.
 	a.exec.Go(func(_ context.Context) (ResultSyncFunc, error) {
-		rf, inErr := f(a.ctx)
+		rf, inErr := run(a.ctx)
 		if inErr != nil {
 			inErr = logOnce(a.ctx, inErr)
 		}
@@ -151,8 +151,8 @@ type inlineActivitySync struct {
 	errs []error
 }
 
-func (a *inlineActivitySync) Go(f ActivitySyncFunc) {
-	rf, err := f(a.ctx)
+func (a *inlineActivitySync) Go(run ActivitySyncFunc) {
+	rf, err := run(a.ctx)
 	if err != nil {
 		a.errs = append(a.errs, logOnce(a.ctx, err))
 		return

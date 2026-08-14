@@ -5,13 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	signer "github.com/aws/aws-sdk-go-v2/aws/signer/v4" // Package is named v4, and someone at Amazon needs to learn Go.
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -24,11 +28,12 @@ import (
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
+	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
+	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/slc"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -37,15 +42,27 @@ func init() {
 	env.Clean("_X_AMZN_")
 
 	module.RegisterImpl(ArtifactSourceCategory, "AWS", func(b *module.Base) ArtifactSource {
-		return &awsSource{
+		p := &awsSource{
 			base: b,
 		}
+		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.clientsGen.Load()
+		}), guard.DelegatingTimeoutPolicy{})
+
+		return p
 	})
 
 	module.RegisterImpl(PublishingTargetCategory, "AWS", func(b *module.Base) PublishingTarget {
-		return &awsTarget{
+		p := &awsTarget{
 			base: b,
 		}
+		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.clientsGen.Load()
+		}), guard.DelegatingTimeoutPolicy{})
+		p.retrierChina = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.clientsGenChina.Load()
+		}), guard.DelegatingTimeoutPolicy{})
+		return p
 	})
 }
 
@@ -62,9 +79,16 @@ type awsSource struct {
 
 	credsSource credsprovider.CredsSource
 
-	srcCfg     awsSourceConfig
+	srcCfg  awsSourceConfig
+	retrier guard.Retrier
+
 	clientsMtx sync.RWMutex
-	s3Client   *s3.Client
+	clients    awsSourceClients
+	clientsGen atomic.Uint64
+}
+
+type awsSourceClients struct {
+	s3 *s3.Client
 }
 
 type awsTarget struct {
@@ -76,13 +100,23 @@ type awsTarget struct {
 	source      ArtifactSource
 	sourceChina ArtifactSource
 
-	pubCfg         awsPublishingConfig
-	clientsMtx     sync.RWMutex
-	ec2Client      *ec2.Client
-	ec2ClientChina *ec2.Client
-	regions        []string
-	regionsChina   []string
-	enableChina    bool
+	pubCfg       awsPublishingConfig
+	regions      []string
+	regionsChina []string
+	enableChina  bool
+	retrier      guard.Retrier
+	retrierChina guard.Retrier
+
+	clientsMtx      sync.RWMutex
+	clients         awsTargetClients
+	clientsGen      atomic.Uint64
+	clientsGenChina atomic.Uint64
+}
+
+type awsTargetClients struct {
+	ec2 *ec2.Client
+
+	ec2China *ec2.Client
 }
 
 type awsSourceConfig struct {
@@ -110,12 +144,10 @@ type awsImageTags struct {
 }
 
 func (p *awsTarget) isConfigured() bool {
-	ec2Client := p.clients(false)
-
-	return ec2Client != nil
+	return p.ec2Client(false) != nil
 }
 
-type awsTaskState struct {
+type awsOperationState struct {
 	China    bool   `json:"china,omitzero"`
 	Region   string `json:"region,omitzero"`
 	Import   string `json:"import,omitzero"`
@@ -155,13 +187,18 @@ func (p *awsSource) createClients(ctx context.Context, rawCreds map[string]any) 
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, creds.SessionToken)),
 		config.WithRetryer(func() awssdk.Retryer {
 			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.MaxAttempts = guard.Retries + 1
+				o.MaxBackoff = guard.RetryMaxDelay
 				o.RateLimiter = ratelimit.None
 			})
-		}))
+		}), config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
+			t.ResponseHeaderTimeout = guard.Timeout
+		})))
 	if err != nil {
 		return fmt.Errorf("cannot load default config: %w", err)
 	}
-	p.s3Client = s3.NewFromConfig(awsCfg)
+	p.clients.s3 = s3.NewFromConfig(awsCfg)
+	p.clientsGen.Add(1)
 
 	return nil
 }
@@ -186,9 +223,13 @@ func (p *awsTarget) createClients(ctx context.Context, rawCreds map[string]any, 
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, creds.SessionToken)),
 		config.WithRetryer(func() awssdk.Retryer {
 			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.MaxAttempts = guard.Retries + 1
+				o.MaxBackoff = guard.RetryMaxDelay
 				o.RateLimiter = ratelimit.None
 			})
-		}))
+		}), config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
+			t.ResponseHeaderTimeout = guard.Timeout
+		})))
 	if err != nil {
 		return fmt.Errorf("cannot load default AWS config: %w", err)
 	}
@@ -202,7 +243,7 @@ func (p *awsTarget) createClients(ctx context.Context, rawCreds map[string]any, 
 
 	if china {
 		if len(p.pubCfg.RegionsChina) > 0 {
-			regions = slc.Subset(regions, p.pubCfg.RegionsChina)
+			regions = subset(regions, p.pubCfg.RegionsChina)
 		}
 		if len(regions) == 0 {
 			return errors.New("no available regions")
@@ -211,11 +252,16 @@ func (p *awsTarget) createClients(ctx context.Context, rawCreds map[string]any, 
 			return fmt.Errorf("region %s is not available", region)
 		}
 
-		p.ec2ClientChina = ec2Client
+		if len(p.regionsChina) > 0 && !equalSets(regions, p.regionsChina) {
+			return errorreport.MarkCritical(errors.New("available regions changed"))
+		}
+
+		p.clients.ec2China = ec2Client
 		p.regionsChina = regions
+		p.clientsGenChina.Add(1)
 	} else {
 		if len(p.pubCfg.Regions) > 0 {
-			regions = slc.Subset(regions, p.pubCfg.Regions)
+			regions = subset(regions, p.pubCfg.Regions)
 		}
 		if len(regions) == 0 {
 			return errors.New("no available regions")
@@ -224,16 +270,26 @@ func (p *awsTarget) createClients(ctx context.Context, rawCreds map[string]any, 
 			return fmt.Errorf("region %s is not available", region)
 		}
 
-		p.ec2Client = ec2Client
+		if len(p.regions) > 0 && !equalSets(regions, p.regions) {
+			return errorreport.MarkCritical(errors.New("available regions changed"))
+		}
+
+		p.clients.ec2 = ec2Client
 		p.regions = regions
+		p.clientsGen.Add(1)
 	}
 
 	return nil
 }
 
-func (*awsTarget) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, error) {
+func (p *awsTarget) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, error) {
 	log.Debug(ctx, "Listing available regions")
-	r, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
+	var r *ec2.DescribeRegionsOutput
+	err := p.retrier.Do(ctx, "describe regions", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
+		return inErr
+	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot describe regions: %w", err)
 	}
@@ -255,22 +311,49 @@ func overrideRegion(region string) func(o *ec2.Options) {
 	}
 }
 
-func (p *awsSource) clients() *s3.Client {
+func (p *awsSource) getClients() awsSourceClients {
 	p.clientsMtx.RLock()
 	defer p.clientsMtx.RUnlock()
 
-	return p.s3Client
+	return p.clients
 }
 
-func (p *awsTarget) clients(china bool) *ec2.Client {
+func (p *awsSource) s3Client() *s3.Client {
+	return p.getClients().s3
+}
+
+func (p *awsTarget) getClients() awsTargetClients {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.clients
+}
+
+func (p *awsTarget) ec2Client(china bool) *ec2.Client {
+	if china {
+		return p.getClients().ec2China
+	}
+
+	return p.getClients().ec2
+}
+
+func (p *awsTarget) getRegions(china bool) []string {
 	p.clientsMtx.RLock()
 	defer p.clientsMtx.RUnlock()
 
 	if china {
-		return p.ec2ClientChina
+		return p.regionsChina
 	}
 
-	return p.ec2Client
+	return p.regions
+}
+
+func (p *awsTarget) getRetrier(china bool) guard.Retrier {
+	if china {
+		return p.retrierChina
+	}
+
+	return p.retrier
 }
 
 func (*awsTarget) ImageSuffix() string {
@@ -297,20 +380,23 @@ func (p *awsSource) Repository() string {
 }
 
 func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error) {
-	s3Client := p.clients()
-
-	if s3Client == nil {
+	if p.s3Client() == nil {
 		return "", errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "source", p.Type())
 
 	log.Debug(ctx, "Getting presigned URL", "bucket", p.srcCfg.Bucket, "key", key)
-	presignClient := s3.NewPresignClient(s3Client, func(o *s3.PresignOptions) {
-		o.Expires = time.Hour * 7
-	})
-	presigned, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: &p.srcCfg.Bucket,
-		Key:    &key,
+	var presigned *signer.PresignedHTTPRequest
+	err := p.retrier.Do(ctx, "presign get object", func(ctx context.Context) error {
+		presignClient := s3.NewPresignClient(p.s3Client(), func(o *s3.PresignOptions) {
+			o.Expires = time.Hour * 7
+		})
+		var inErr error
+		presigned, inErr = presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+			Bucket: &p.srcCfg.Bucket,
+			Key:    &key,
+		})
+		return inErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot get presigned URL: %w", err)
@@ -320,17 +406,20 @@ func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error
 }
 
 func (p *awsSource) GetObjectSize(ctx context.Context, key string) (int64, error) {
-	s3Client := p.clients()
-
-	if s3Client == nil {
+	if p.s3Client() == nil {
 		return 0, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "source", p.Type())
 
 	log.Debug(ctx, "Heading object", "bucket", p.srcCfg.Bucket, "key", key)
-	r, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: &p.srcCfg.Bucket,
-		Key:    &key,
+	var r *s3.HeadObjectOutput
+	err := p.retrier.Do(ctx, "head object", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.s3Client().HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: &p.srcCfg.Bucket,
+			Key:    &key,
+		})
+		return inErr
 	})
 	if err != nil {
 		_, ok := errors.AsType[*s3types.NoSuchKey](err)
@@ -350,17 +439,44 @@ func (p *awsSource) GetObjectSize(ctx context.Context, key string) (int64, error
 }
 
 func (p *awsSource) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
-	s3Client := p.clients()
-
-	if s3Client == nil {
+	if p.s3Client() == nil {
 		return nil, errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "source", p.Type())
 
 	log.Debug(ctx, "Getting object", "bucket", p.srcCfg.Bucket, "key", key)
-	r, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: &p.srcCfg.Bucket,
-		Key:    &key,
+
+	return guard.NewRetryingReader(ctx, guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}), awsContentSource{
+		retrier: p.retrier,
+		client:  p.s3Client,
+		bucket:  p.srcCfg.Bucket,
+		key:     key,
+	})
+}
+
+type awsContentSource struct {
+	retrier guard.Retrier
+	client  func() *s3.Client
+	bucket  string
+	key     string
+}
+
+func (s awsContentSource) Open(ctx context.Context, offset int64, identity string) (guard.Content, error) {
+	input := &s3.GetObjectInput{
+		Bucket: &s.bucket,
+		Key:    &s.key,
+	}
+	if offset > 0 {
+		input.Range = new(fmt.Sprintf("bytes=%d-", offset))
+	}
+	if identity != "" {
+		input.IfMatch = &identity
+	}
+	var output *s3.GetObjectOutput
+	err := s.retrier.Do(ctx, "get object", func(ctx context.Context) error {
+		var inErr error
+		output, inErr = s.client().GetObject(ctx, input)
+		return inErr
 	})
 	if err != nil {
 		_, ok := errors.AsType[*s3types.NoSuchKey](err)
@@ -370,27 +486,43 @@ func (p *awsSource) GetObject(ctx context.Context, key string) (io.ReadCloser, e
 			}
 		}
 
-		return nil, fmt.Errorf("cannot get object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
+		return guard.Content{}, err
+	}
+	if output.Body == nil {
+		return guard.Content{}, errors.New("missing body")
 	}
 
-	return r.Body, nil
+	content := guard.Content{
+		ReadCloser: output.Body,
+		Size:       -1,
+		CanResume:  output.AcceptRanges != nil && *output.AcceptRanges == "bytes",
+	}
+	if output.ETag != nil {
+		content.Identity = *output.ETag
+	}
+	if output.ContentLength != nil {
+		content.Size = *output.ContentLength
+	}
+
+	return content, nil
 }
 
 func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader) error {
-	s3Client := p.clients()
-
-	if s3Client == nil {
+	if p.s3Client() == nil {
 		return errors.New("config not set")
 	}
 	ctx = log.WithValues(ctx, "source", p.Type())
 
 	log.Debug(ctx, "Putting object", "bucket", p.srcCfg.Bucket, "key", key)
-	_, err := s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:          &p.srcCfg.Bucket,
-		Key:             &key,
-		Body:            object,
-		ContentEncoding: new("utf-8"),
-		ContentType:     new("text/yaml"),
+	err := p.retrier.Do(ctx, "put object", func(ctx context.Context) error {
+		_, inErr := p.s3Client().PutObject(ctx, &s3.PutObjectInput{
+			Bucket:          &p.srcCfg.Bucket,
+			Key:             &key,
+			Body:            object,
+			ContentEncoding: new("utf-8"),
+			ContentType:     new("text/yaml"),
+		})
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot put object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
@@ -513,38 +645,37 @@ func (p *awsTarget) publish(ctx context.Context, source ArtifactSource, key, ima
 ) ([]awsPublishedImage, error) {
 	cld := "public"
 	region := p.pubCfg.Region
-	regions := p.regions
+	regions := p.getRegions(china)
 	taskImage := image
 	if china {
 		cld = "china"
 		region = p.pubCfg.RegionChina
-		regions = p.regionsChina
 		taskImage += "/china"
 	}
 
-	ctx = task.Begin(ctx, "publish/"+taskImage+"/"+region, &awsTaskState{
-		Region: region,
+	ctx = resilience.BeginOperation(ctx, "publish/"+taskImage+"/"+region, &awsOperationState{
 		China:  china,
+		Region: region,
 	})
 	snapshot, err := p.importSnapshot(ctx, source, key, image, china)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot import snapshot from %s for image %s: %w", key, image, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot import snapshot from %s for image %s: %w", key, image, err))
 	}
 	ctx = log.WithValues(ctx, "snapshot", snapshot)
 
 	err = p.attachTags(ctx, snapshot, tags, china)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot attach tags to snapshot %s: %w", snapshot, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot attach tags to snapshot %s: %w", snapshot, err))
 	}
 
 	var imageID string
 	imageID, err = p.registerImage(ctx, snapshot, image, arch, requireUEFI, uefiData, china)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot register image %s from snapshot %s: %w", image, snapshot, err))
 	}
 
 	images := make(map[string]string, len(regions))
-	publishImages := concurrency.NewLimitedActivitySync(ctx, 12)
+	publishImages := concurrency.NewActivitySync(ctx)
 	for _, toRegion := range regions {
 		publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
@@ -552,28 +683,28 @@ func (p *awsTarget) publish(ctx context.Context, source ArtifactSource, key, ima
 			var er error
 
 			if toRegion != region {
-				ctx = task.Begin(ctx, "publish/"+taskImage+"/"+toRegion, &awsTaskState{
-					Region: toRegion,
+				ctx = resilience.BeginOperation(ctx, "publish/"+taskImage+"/"+toRegion, &awsOperationState{
 					China:  china,
+					Region: toRegion,
 				})
 				localID, er = p.copyImage(ctx, image, imageID, region, toRegion, china)
 				if er != nil {
-					return nil, task.Fail(ctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region,
-						toRegion, er))
+					return nil, resilience.FailOperation(ctx,
+						fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, er))
 				}
 			}
 			ctx = log.WithValues(ctx, "imageID", localID)
 
 			er = p.waitForImage(ctx, localID, toRegion, china)
 			if er != nil {
-				return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
+				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
 			}
 
 			er = p.makePublic(ctx, localID, toRegion, china)
 			if er != nil {
-				return nil, task.Fail(ctx, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, er))
+				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, er))
 			}
-			task.Complete(ctx)
+			resilience.CompleteOperation(ctx)
 
 			return func() error {
 				images[toRegion] = localID
@@ -664,19 +795,22 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 	bucket := source.Repository()
 	ctx = log.WithValues(ctx, "key", key)
 
-	ec2Client := p.clients(china)
-
 	log.Info(ctx, "Importing snapshot")
-	r, err := ec2Client.ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
-		DiskContainer: &ec2types.SnapshotDiskContainer{
-			Description: &image,
-			Format:      new("raw"),
-			UserBucket: &ec2types.UserBucket{
-				S3Bucket: &bucket,
-				S3Key:    &key,
+	var r *ec2.ImportSnapshotOutput
+	err := p.getRetrier(china).Do(ctx, "import snapshot", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.ec2Client(china).ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
+			DiskContainer: &ec2types.SnapshotDiskContainer{
+				Description: &image,
+				Format:      new("raw"),
+				UserBucket: &ec2types.UserBucket{
+					S3Bucket: &bucket,
+					S3Key:    &key,
+				},
 			},
-		},
-		Encrypted: new(false),
+			Encrypted: new(false),
+		})
+		return inErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot import snapshot in bucket %s: %w", bucket, err)
@@ -685,7 +819,7 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 		return "", fmt.Errorf("cannot import snapshot in bucket %s: missing import task ID", bucket)
 	}
 	importTaskID := *r.ImportTaskId
-	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+	resilience.UpdateOperation(ctx, func(s *awsOperationState) *awsOperationState {
 		s.Import = importTaskID
 		return s
 	})
@@ -695,8 +829,12 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 	status := "active"
 	for status == "active" {
 		var s *ec2.DescribeImportSnapshotTasksOutput
-		s, err = ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
-			ImportTaskIds: []string{*r.ImportTaskId},
+		err = p.getRetrier(china).Do(ctx, "describe import snapshot tasks", func(ctx context.Context) error {
+			var inErr error
+			s, inErr = p.ec2Client(china).DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
+				ImportTaskIds: []string{*r.ImportTaskId},
+			})
+			return inErr
 		})
 		if err != nil {
 			return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: %w", *r.ImportTaskId, err)
@@ -714,7 +852,7 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 		}
 
 		if status == "active" {
-			time.Sleep(time.Second * 7)
+			time.Sleep(statusPollInterval)
 		}
 	}
 	if status != "completed" {
@@ -723,7 +861,7 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 	if snapshot == "" {
 		return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: missing snapshot ID", *r.ImportTaskId)
 	}
-	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+	resilience.UpdateOperation(ctx, func(s *awsOperationState) *awsOperationState {
 		s.Import = ""
 		s.Snapshot = snapshot
 		return s
@@ -734,12 +872,13 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 }
 
 func (p *awsTarget) attachTags(ctx context.Context, obj string, tags []ec2types.Tag, china bool) error {
-	ec2Client := p.clients(china)
-
 	log.Debug(ctx, "Attaching tags", "object", obj)
-	_, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
-		Resources: []string{obj},
-		Tags:      tags,
+	err := p.getRetrier(china).Do(ctx, "create tags", func(ctx context.Context) error {
+		_, inErr := p.ec2Client(china).CreateTags(ctx, &ec2.CreateTagsInput{
+			Resources: []string{obj},
+			Tags:      tags,
+		})
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot create tags for %s: %w", obj, err)
@@ -777,10 +916,13 @@ func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, a
 		params.UefiData = uefiData
 	}
 
-	ec2Client := p.clients(china)
-
 	log.Info(ctx, "Registering image")
-	r, err := ec2Client.RegisterImage(ctx, &params)
+	var r *ec2.RegisterImageOutput
+	err := p.getRetrier(china).Do(ctx, "register image", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.ec2Client(china).RegisterImage(ctx, &params)
+		return inErr
+	})
 	if err != nil {
 		return "", fmt.Errorf("cannot register image: %w", err)
 	}
@@ -788,7 +930,7 @@ func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, a
 		return "", errors.New("cannot register image: missing image ID")
 	}
 	imageID := *r.ImageId
-	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+	resilience.UpdateOperation(ctx, func(s *awsOperationState) *awsOperationState {
 		s.Snapshot = ""
 		s.Image = imageID
 		return s
@@ -798,15 +940,18 @@ func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, a
 }
 
 func (p *awsTarget) copyImage(ctx context.Context, image, imageID, region, toRegion string, china bool) (string, error) {
-	ec2Client := p.clients(china)
-
 	log.Info(ctx, "Copying image")
-	r, err := ec2Client.CopyImage(ctx, &ec2.CopyImageInput{
-		Name:          &image,
-		SourceImageId: &imageID,
-		SourceRegion:  &region,
-		CopyImageTags: new(true),
-	}, overrideRegion(toRegion))
+	var r *ec2.CopyImageOutput
+	err := p.getRetrier(china).Do(ctx, "copy image", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.ec2Client(china).CopyImage(ctx, &ec2.CopyImageInput{
+			Name:          &image,
+			SourceImageId: &imageID,
+			SourceRegion:  &region,
+			CopyImageTags: new(true),
+		}, overrideRegion(toRegion))
+		return inErr
+	})
 	if err != nil {
 		return "", fmt.Errorf("cannot copy image: %w", err)
 	}
@@ -814,7 +959,7 @@ func (p *awsTarget) copyImage(ctx context.Context, image, imageID, region, toReg
 		return "", errors.New("cannot copy image: missing image ID")
 	}
 	toImageID := *r.ImageId
-	task.Update(ctx, func(s *awsTaskState) *awsTaskState {
+	resilience.UpdateOperation(ctx, func(s *awsOperationState) *awsOperationState {
 		s.Image = toImageID
 		return s
 	})
@@ -823,13 +968,16 @@ func (p *awsTarget) copyImage(ctx context.Context, image, imageID, region, toReg
 }
 
 func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, china bool) error {
-	ec2Client := p.clients(china)
-
 	var state ec2types.ImageState
 	for state != ec2types.ImageStateAvailable {
-		r, err := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
-			ImageIds: []string{imageID},
-		}, overrideRegion(region))
+		var r *ec2.DescribeImagesOutput
+		err := p.getRetrier(china).Do(ctx, "describe images", func(ctx context.Context) error {
+			var inErr error
+			r, inErr = p.ec2Client(china).DescribeImages(ctx, &ec2.DescribeImagesInput{
+				ImageIds: []string{imageID},
+			}, overrideRegion(region))
+			return inErr
+		})
 		if err != nil {
 			return fmt.Errorf("cannot describe image: %w", err)
 		}
@@ -843,7 +991,7 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 				return fmt.Errorf("image has state %s", state)
 			}
 
-			time.Sleep(time.Second * 7)
+			time.Sleep(statusPollInterval)
 		}
 	}
 
@@ -851,20 +999,21 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 }
 
 func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, china bool) error {
-	ec2Client := p.clients(china)
-
 	log.Debug(ctx, "Adding launch permission to image")
-	_, err := ec2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
-		ImageId:   &imageID,
-		Attribute: new("launchPermission"),
-		LaunchPermission: &ec2types.LaunchPermissionModifications{
-			Add: []ec2types.LaunchPermission{
-				{
-					Group: ec2types.PermissionGroupAll,
+	err := p.getRetrier(china).Do(ctx, "modify image attribute", func(ctx context.Context) error {
+		_, inErr := p.ec2Client(china).ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
+			ImageId:   &imageID,
+			Attribute: new("launchPermission"),
+			LaunchPermission: &ec2types.LaunchPermissionModifications{
+				Add: []ec2types.LaunchPermission{
+					{
+						Group: ec2types.PermissionGroupAll,
+					},
 				},
 			},
-		},
-	}, overrideRegion(region))
+		}, overrideRegion(region))
+		return inErr
+	})
 	if err != nil {
 		return fmt.Errorf("cannot modify attribute: %w", err)
 	}
@@ -893,7 +1042,7 @@ func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	deregisterImages := concurrency.NewLimitedActivity(ctx, 3)
+	deregisterImages := concurrency.NewActivity(ctx)
 	for _, img := range pubOut.Images {
 		deregisterImages.Go(func(ctx context.Context) error {
 			lctx := log.WithValues(ctx, "cloud", img.Cloud, "region", img.Region, "imageID", img.ID, "image", img.Image)
@@ -912,13 +1061,16 @@ func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 }
 
 func (p *awsTarget) deregisterImage(ctx context.Context, imageID, region string, steamroll, china bool) error {
-	ec2Client := p.clients(china)
-
 	log.Info(ctx, "Deregistering image")
-	r, err := ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
-		ImageId:                   &imageID,
-		DeleteAssociatedSnapshots: new(true),
-	}, overrideRegion(region))
+	var r *ec2.DeregisterImageOutput
+	err := p.getRetrier(china).Do(ctx, "deregister image", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.ec2Client(china).DeregisterImage(ctx, &ec2.DeregisterImageInput{
+			ImageId:                   &imageID,
+			DeleteAssociatedSnapshots: new(true),
+		}, overrideRegion(region))
+		return inErr
+	})
 	if err != nil {
 		terr, ok := errors.AsType[*smithy.GenericAPIError](err)
 		if steamroll && ok && terr.Code == "InvalidAMIID.Unavailable" {
@@ -952,14 +1104,14 @@ func (p *awsTarget) RollbackDomain() string {
 	return "aws"
 }
 
-func (p *awsTarget) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+func (p *awsTarget) Rollback(ctx context.Context, operations map[string]resilience.Operation) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
-	for _, t := range tasks {
-		state, err := task.ParseState[*awsTaskState](t.State)
+	rollbackTasks := concurrency.NewActivity(ctx)
+	for _, op := range operations {
+		state, err := resilience.ParseOperationState[*awsOperationState](op.State)
 		if err != nil {
 			return err
 		}
@@ -1011,15 +1163,18 @@ func (p *awsTarget) Rollback(ctx context.Context, tasks map[string]task.Task) er
 }
 
 func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTaskID, region string, steamroll, china bool) error {
-	ec2Client := p.clients(china)
-
 	log.Debug(ctx, "Determining snapshot")
 	var snapshot string
 	status := "active"
 	for status == "active" {
-		s, err := ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
-			ImportTaskIds: []string{importTaskID},
-		}, overrideRegion(region))
+		var s *ec2.DescribeImportSnapshotTasksOutput
+		err := p.getRetrier(china).Do(ctx, "describe import snapshot tasks", func(ctx context.Context) error {
+			var inErr error
+			s, inErr = p.ec2Client(china).DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
+				ImportTaskIds: []string{importTaskID},
+			}, overrideRegion(region))
+			return inErr
+		})
 		if err != nil {
 			return fmt.Errorf("cannot describe import snapshot tasks: %w", err)
 		}
@@ -1043,7 +1198,7 @@ func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTask
 		}
 
 		if status == "active" {
-			time.Sleep(time.Second * 7)
+			time.Sleep(statusPollInterval)
 		}
 	}
 	if snapshot == "" {
@@ -1059,12 +1214,13 @@ func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTask
 }
 
 func (p *awsTarget) deleteSnapshot(ctx context.Context, snapshot, region string, steamroll, china bool) error {
-	ec2Client := p.clients(china)
-
 	log.Info(ctx, "Deleting snapshot")
-	_, err := ec2Client.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
-		SnapshotId: &snapshot,
-	}, overrideRegion(region))
+	err := p.getRetrier(china).Do(ctx, "delete snapshot", func(ctx context.Context) error {
+		_, inErr := p.ec2Client(china).DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
+			SnapshotId: &snapshot,
+		}, overrideRegion(region))
+		return inErr
+	})
 	if err != nil {
 		terr, ok := errors.AsType[*smithy.GenericAPIError](err)
 		if steamroll && ok && terr.Code == "InvalidSnapshot.NotFound" {

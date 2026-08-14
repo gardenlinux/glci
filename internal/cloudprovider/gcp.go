@@ -10,23 +10,27 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
 	"cloud.google.com/go/storage"
+	"github.com/googleapis/gax-go/v2"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+	transporthttp "google.golang.org/api/transport/http"
 
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
+	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -39,9 +43,14 @@ func init() {
 	env.Clean("STORAGE_EMULATOR_HOST")
 
 	module.RegisterImpl(PublishingTargetCategory, "GCP", func(b *module.Base) PublishingTarget {
-		return &gcp{
+		p := &gcp{
 			base: b,
 		}
+		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.clientsGen.Load()
+		}), guard.DelegatingTimeoutPolicy{})
+
+		return p
 	})
 }
 
@@ -57,11 +66,19 @@ type gcp struct {
 	credsSource credsprovider.CredsSource
 	source      ArtifactSource
 
-	pubCfg        gcpPublishingConfig
-	clientsMtx    sync.RWMutex
-	storageClient *storage.Client
-	imagesClient  *compute.ImagesClient
-	accessID      string
+	pubCfg  gcpPublishingConfig
+	retrier guard.Retrier
+
+	clientsMtx sync.RWMutex
+	clients    gcpClients
+	clientsGen atomic.Uint64
+}
+
+type gcpClients struct {
+	storage          *storage.Client
+	images           *compute.ImagesClient
+	globalOperations *compute.GlobalOperationsClient
+	accessID         string
 }
 
 type gcpPublishingConfig struct {
@@ -72,12 +89,12 @@ type gcpPublishingConfig struct {
 }
 
 func (p *gcp) isConfigured() bool {
-	stortageClient, imagesClient := p.clients()
+	clients := p.getClients()
 
-	return stortageClient != nil && imagesClient != nil
+	return clients.storage != nil && clients.images != nil && clients.globalOperations != nil
 }
 
-type gcpTaskState struct {
+type gcpOperationState struct {
 	Blob  string `json:"blob,omitzero"`
 	Image string `json:"image,omitzero"`
 }
@@ -103,7 +120,7 @@ func (p *gcp) createClients(ctx context.Context, rawCreds map[string]any) error 
 	p.clientsMtx.Lock()
 	defer p.clientsMtx.Unlock()
 
-	err = p.destroyClients(p.storageClient, p.imagesClient)
+	err = p.destroyClients(p.clients)
 	if err != nil {
 		return fmt.Errorf("cannot destroy existing clients: %w", err)
 	}
@@ -113,26 +130,62 @@ func (p *gcp) createClients(ctx context.Context, rawCreds map[string]any) error 
 		Expiry:      time.Unix(creds.Expiry, 0),
 	})
 
-	p.storageClient, err = storage.NewClient(ctx, option.WithTokenSource(tokenSrc))
+	p.clients.storage, err = storage.NewClient(ctx, option.WithTokenSource(tokenSrc))
 	if err != nil {
 		return fmt.Errorf("cannot create storage client: %w", err)
 	}
 
-	p.imagesClient, err = compute.NewImagesRESTClient(ctx, option.WithTokenSource(tokenSrc))
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return errors.New("unexpected default transport type")
+	}
+
+	t = t.Clone()
+	t.ResponseHeaderTimeout = guard.Timeout
+	var transport http.RoundTripper
+	transport, err = transporthttp.NewTransport(ctx, t, option.WithTokenSource(tokenSrc))
+	if err != nil {
+		return fmt.Errorf("cannot create compute transport: %w", err)
+	}
+	c := &http.Client{
+		Transport: transport,
+	}
+
+	p.clients.images, err = compute.NewImagesRESTClient(ctx, option.WithHTTPClient(c))
 	if err != nil {
 		return fmt.Errorf("cannot create images client: %w", err)
 	}
 
-	p.accessID = creds.ServiceAccountEmail
+	p.clients.globalOperations, err = compute.NewGlobalOperationsRESTClient(ctx, option.WithHTTPClient(c))
+	if err != nil {
+		return fmt.Errorf("cannot create global operations client: %w", err)
+	}
+
+	p.clients.accessID = creds.ServiceAccountEmail
+	p.clientsGen.Add(1)
 
 	return nil
 }
 
-func (p *gcp) clients() (*storage.Client, *compute.ImagesClient) {
+func (p *gcp) getClients() gcpClients {
 	p.clientsMtx.RLock()
 	defer p.clientsMtx.RUnlock()
 
-	return p.storageClient, p.imagesClient
+	return p.clients
+}
+
+func (p *gcp) storageClient() (*storage.Client, string) {
+	clients := p.getClients()
+
+	return clients.storage, clients.accessID
+}
+
+func (p *gcp) imagesClient() *compute.ImagesClient {
+	return p.getClients().images
+}
+
+func (p *gcp) globalOperationsClient() *compute.GlobalOperationsClient {
+	return p.getClients().globalOperations
 }
 
 func (*gcp) ImageSuffix() string {
@@ -211,28 +264,28 @@ func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.
 	}
 	ctx = log.WithValues(ctx, "secureBoot", secureBoot)
 
-	ctx = task.Begin(ctx, "publish/"+image, &gcpTaskState{})
+	ctx = resilience.BeginOperation(ctx, "publish/"+image, &gcpOperationState{})
 	var blob, blobURL string
 	blob, blobURL, err = p.uploadBlob(ctx, p.source, imagePath.S3Key, image)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
 	}
 
 	err = p.insertImage(ctx, blobURL, image, arch, secureBoot, pk, kek, db)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot insert image %s from blob %s: %w", image, blob, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot insert image %s from blob %s: %w", image, blob, err))
 	}
 
 	err = p.deleteBlob(ctx, blob, false)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot delete blob %s: %w", blob, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot delete blob %s: %w", blob, err))
 	}
 
 	err = p.makePublic(ctx, image)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot make image %s public: %w", image, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot make image %s public: %w", image, err))
 	}
-	task.Complete(ctx)
+	resilience.CompleteOperation(ctx)
 
 	return &gcpPublishingOutput{
 		Project: p.pubCfg.Project,
@@ -317,20 +370,26 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 		_ = obj.Close()
 	}()
 
-	storageClient, _ := p.clients()
+	storageClient, accessID := p.storageClient()
 
 	log.Info(ctx, "Uploading blob")
 	bucket := storageClient.Bucket(p.pubCfg.Bucket)
-	w := bucket.Object(blob).NewWriter(ctx)
+	w := bucket.Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1), storage.WithBackoff(gax.Backoff{
+		Initial: guard.RetryBaseDelay,
+		Max:     guard.RetryMaxDelay,
+	})).NewWriter(ctx)
+	w.ChunkRetryDeadline = guard.Timeout
+
 	_, err = io.Copy(w, obj)
 	if err != nil {
-		return "", "", fmt.Errorf("cannot write to object writer: %w", err)
+		return "", "", fmt.Errorf("cannot copy blob: %w", err)
 	}
+
 	err = w.Close()
 	if err != nil {
 		return "", "", fmt.Errorf("cannot close object writer: %w", err)
 	}
-	task.Update(ctx, func(s *gcpTaskState) *gcpTaskState {
+	resilience.UpdateOperation(ctx, func(s *gcpOperationState) *gcpOperationState {
 		s.Blob = blob
 		return s
 	})
@@ -343,7 +402,7 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 
 	var url string
 	url, err = bucket.SignedURL(blob, &storage.SignedURLOptions{
-		GoogleAccessID: p.accessID,
+		GoogleAccessID: accessID,
 		Method:         "GET",
 		Expires:        time.Now().Add(time.Hour * 7),
 		Scheme:         storage.SigningSchemeV4,
@@ -395,24 +454,37 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 		}
 	}
 
-	_, imagesClient := p.clients()
-
 	log.Info(ctx, "Inserting image")
-	op, err := imagesClient.Insert(ctx, &computepb.InsertImageRequest{
-		ImageResource: imageResource,
-		Project:       p.pubCfg.Project,
+	var op *compute.Operation
+	err := p.retrier.Do(ctx, "insert image", func(ctx context.Context) error {
+		var inErr error
+		op, inErr = p.imagesClient().Insert(ctx, &computepb.InsertImageRequest{
+			ImageResource: imageResource,
+			Project:       p.pubCfg.Project,
+		}, gax.WithRetry(func() gax.Retryer {
+			return &countingRetrier{
+				retrier: gax.OnHTTPCodes(gax.Backoff{
+					Initial:    guard.RetryBaseDelay,
+					Max:        guard.RetryMaxDelay,
+					Multiplier: 2,
+				}, http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable,
+					http.StatusGatewayTimeout),
+				retries: guard.Retries,
+			}
+		}))
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot insert image: %w", err)
 	}
-	task.Update(ctx, func(s *gcpTaskState) *gcpTaskState {
+	resilience.UpdateOperation(ctx, func(s *gcpOperationState) *gcpOperationState {
 		s.Image = image
 		return s
 	})
 
-	err = op.Wait(ctx)
+	err = p.awaitOperation(ctx, "await image insertion", op.Name())
 	if err != nil {
-		return fmt.Errorf("cannot insert image via operation %s: %w", op.Name(), err)
+		return fmt.Errorf("cannot insert image: %w", err)
 	}
 	log.Info(ctx, "Image ready")
 
@@ -420,10 +492,15 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 }
 
 func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error {
-	storageClient, _ := p.clients()
-
 	log.Info(ctx, "Deleting blob")
-	err := storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Delete(ctx)
+	err := p.retrier.Do(ctx, "delete blob", func(ctx context.Context) error {
+		storageClient, _ := p.storageClient()
+		return storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1),
+			storage.WithBackoff(gax.Backoff{
+				Initial: guard.RetryBaseDelay,
+				Max:     guard.RetryMaxDelay,
+			})).Delete(ctx)
+	})
 	if err != nil {
 		terr, ok := errors.AsType[*googleapi.Error](err)
 		if steamroll && ok && terr.Code == http.StatusNotFound {
@@ -432,7 +509,7 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 		}
 		return fmt.Errorf("cannot delete blob %s: %w", blob, err)
 	}
-	task.Update(ctx, func(s *gcpTaskState) *gcpTaskState {
+	resilience.UpdateOperation(ctx, func(s *gcpOperationState) *gcpOperationState {
 		s.Blob = ""
 		return s
 	})
@@ -441,26 +518,37 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 }
 
 func (p *gcp) makePublic(ctx context.Context, image string) error {
-	_, imagesClient := p.clients()
-
 	log.Debug(ctx, "Setting IAM policy")
-	_, err := imagesClient.SetIamPolicy(ctx, &computepb.SetIamPolicyImageRequest{
-		GlobalSetPolicyRequestResource: &computepb.GlobalSetPolicyRequest{
-			Policy: &computepb.Policy{
-				AuditConfigs: nil,
-				Bindings: []*computepb.Binding{
-					{
-						Members: []string{
-							"allAuthenticatedUsers",
+	err := p.retrier.Do(ctx, "set IAM policy", func(ctx context.Context) error {
+		_, inErr := p.imagesClient().SetIamPolicy(ctx, &computepb.SetIamPolicyImageRequest{
+			GlobalSetPolicyRequestResource: &computepb.GlobalSetPolicyRequest{
+				Policy: &computepb.Policy{
+					AuditConfigs: nil,
+					Bindings: []*computepb.Binding{
+						{
+							Members: []string{
+								"allAuthenticatedUsers",
+							},
+							Role: new("roles/compute.imageUser"),
 						},
-						Role: new("roles/compute.imageUser"),
 					},
+					Version: new(int32(3)),
 				},
-				Version: new(int32(3)),
 			},
-		},
-		Project:  p.pubCfg.Project,
-		Resource: image,
+			Project:  p.pubCfg.Project,
+			Resource: image,
+		}, gax.WithRetry(func() gax.Retryer {
+			return &countingRetrier{
+				retrier: gax.OnHTTPCodes(gax.Backoff{
+					Initial:    guard.RetryBaseDelay,
+					Max:        guard.RetryMaxDelay,
+					Multiplier: 2,
+				}, http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable,
+					http.StatusGatewayTimeout),
+				retries: guard.Retries,
+			}
+		}))
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot set IAM policy: %w", err)
@@ -500,12 +588,25 @@ func (p *gcp) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, ste
 }
 
 func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) error {
-	_, imagesClient := p.clients()
-
 	log.Info(ctx, "Deleting image")
-	op, err := imagesClient.Delete(ctx, &computepb.DeleteImageRequest{
-		Image:   image,
-		Project: p.pubCfg.Project,
+	var op *compute.Operation
+	err := p.retrier.Do(ctx, "delete image", func(ctx context.Context) error {
+		var inErr error
+		op, inErr = p.imagesClient().Delete(ctx, &computepb.DeleteImageRequest{
+			Image:   image,
+			Project: p.pubCfg.Project,
+		}, gax.WithRetry(func() gax.Retryer {
+			return &countingRetrier{
+				retrier: gax.OnHTTPCodes(gax.Backoff{
+					Initial:    guard.RetryBaseDelay,
+					Max:        guard.RetryMaxDelay,
+					Multiplier: 2,
+				}, http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable,
+					http.StatusGatewayTimeout),
+				retries: guard.Retries,
+			}
+		}))
+		return inErr
 	})
 	if err != nil {
 		terr, ok := errors.AsType[*googleapi.Error](err)
@@ -516,12 +617,40 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 		return fmt.Errorf("cannot delete image: %w", err)
 	}
 
-	err = op.Wait(ctx)
+	err = p.awaitOperation(ctx, "await image deletion", op.Name())
 	if err != nil {
-		return fmt.Errorf("cannot delete image via operation %s: %w", op.Name(), err)
+		return fmt.Errorf("cannot delete image: %w", err)
 	}
 
 	return nil
+}
+
+func (p *gcp) awaitOperation(ctx context.Context, operation, op string) error {
+	for {
+		var o *computepb.Operation
+		err := p.retrier.Do(ctx, operation, func(ctx context.Context) error {
+			var inErr error
+			o, inErr = p.globalOperationsClient().Get(ctx, &computepb.GetGlobalOperationRequest{
+				Operation: op,
+				Project:   p.pubCfg.Project,
+			})
+			return inErr
+		})
+		if err != nil {
+			return fmt.Errorf("cannot get operation status: %w", err)
+		}
+
+		if o.GetStatus() == computepb.Operation_DONE {
+			code := o.GetHttpErrorStatusCode()
+			if code != 0 && (code < 200 || code > 299) {
+				return fmt.Errorf("operation failed with status %d: %s", code, o.GetHttpErrorMessage())
+			}
+
+			return nil
+		}
+
+		time.Sleep(statusPollInterval)
+	}
 }
 
 func (p *gcp) RollbackDomain() string {
@@ -532,14 +661,14 @@ func (p *gcp) RollbackDomain() string {
 	return "gcp"
 }
 
-func (p *gcp) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+func (p *gcp) Rollback(ctx context.Context, operations map[string]resilience.Operation) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
-	for _, t := range tasks {
-		state, err := task.ParseState[*gcpTaskState](t.State)
+	rollbackTasks := concurrency.NewActivity(ctx)
+	for _, op := range operations {
+		state, err := resilience.ParseOperationState[*gcpOperationState](op.State)
 		if err != nil {
 			return err
 		}
@@ -629,25 +758,45 @@ func (p *gcp) Stop() error {
 		})
 	}
 
-	storageClient, imagesClient := p.clients()
-
-	return p.destroyClients(storageClient, imagesClient)
+	return p.destroyClients(p.getClients())
 }
 
-func (*gcp) destroyClients(storageClient *storage.Client, imagesClient *compute.ImagesClient) error {
-	if storageClient != nil {
-		err := storageClient.Close()
+func (*gcp) destroyClients(clients gcpClients) error {
+	if clients.storage != nil {
+		err := clients.storage.Close()
 		if err != nil {
 			return fmt.Errorf("cannot close storage client: %w", err)
 		}
 	}
 
-	if imagesClient != nil {
-		err := imagesClient.Close()
+	if clients.images != nil {
+		err := clients.images.Close()
 		if err != nil {
 			return fmt.Errorf("cannot close images client: %w", err)
 		}
 	}
 
+	if clients.globalOperations != nil {
+		err := clients.globalOperations.Close()
+		if err != nil {
+			return fmt.Errorf("cannot close global operations client: %w", err)
+		}
+	}
+
 	return nil
+}
+
+type countingRetrier struct {
+	retrier gax.Retryer
+	retries int
+}
+
+func (r *countingRetrier) Retry(err error) (time.Duration, bool) {
+	pause, shouldRetry := r.retrier.Retry(err)
+	if !shouldRetry || r.retries <= 0 {
+		return 0, false
+	}
+	r.retries--
+
+	return pause, true
 }

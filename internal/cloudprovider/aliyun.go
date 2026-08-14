@@ -4,25 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibabacloud-go/darabonba-openapi/v2/utils"
 	"github.com/alibabacloud-go/ecs-20140526/v7/client"
+	"github.com/alibabacloud-go/tea/dara"
 	"github.com/alibabacloud-go/tea/tea"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/retry"
 
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
+	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
+	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/slc"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -31,9 +36,15 @@ func init() {
 	env.Clean("ALIBABA_")
 
 	module.RegisterImpl(PublishingTargetCategory, "Aliyun", func(b *module.Base) PublishingTarget {
-		return &aliyun{
-			base: b,
+		p := &aliyun{
+			base:       b,
+			ecsRetrier: guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}),
 		}
+		p.ossRetrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.clientsGen.Load()
+		}), guard.DelegatingTimeoutPolicy{})
+
+		return p
 	})
 }
 
@@ -50,9 +61,17 @@ type aliyun struct {
 	source      ArtifactSource
 
 	pubCfg     aliyunPublishingConfig
+	ossRetrier guard.Retrier
+	ecsRetrier guard.Retrier
+
 	clientsMtx sync.RWMutex
-	ossClient  *oss.Client
-	ecsClients map[string]*client.Client
+	clients    aliyunClients
+	clientsGen atomic.Uint64
+}
+
+type aliyunClients struct {
+	oss *oss.Client
+	ecs map[string]*client.Client
 }
 
 type aliyunPublishingConfig struct {
@@ -64,12 +83,12 @@ type aliyunPublishingConfig struct {
 }
 
 func (p *aliyun) isConfigured() bool {
-	ossClient, ecsClients := p.clients()
+	clients := p.getClients()
 
-	return ossClient != nil && len(ecsClients) > 0
+	return clients.oss != nil && len(clients.ecs) > 0
 }
 
-type aliyunTaskState struct {
+type aliyunOperationState struct {
 	Region string `json:"region,omitzero"`
 	Blob   string `json:"blob,omitzero"`
 	Image  string `json:"image,omitzero"`
@@ -102,8 +121,13 @@ func (p *aliyun) createClients(ctx context.Context, rawCreds map[string]any) err
 	p.clientsMtx.Lock()
 	defer p.clientsMtx.Unlock()
 
-	p.ossClient = oss.NewClient(oss.LoadDefaultConfig().WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey,
-		creds.SecretKey, creds.SecurityToken)).WithRegion(p.pubCfg.Region))
+	p.clients.oss = oss.NewClient(oss.LoadDefaultConfig().WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey,
+		creds.SecretKey, creds.SecurityToken)).WithRegion(p.pubCfg.Region).WithConnectTimeout(guard.Timeout).
+		WithReadWriteTimeout(guard.Timeout).WithRetryer(retry.NewStandard(func(o *retry.RetryOptions) {
+		o.MaxAttempts = guard.Retries + 1
+		o.MaxBackoff = guard.RetryMaxDelay
+		o.BaseDelay = guard.RetryBaseDelay
+	})))
 
 	var ecsClient *client.Client
 	ecsClient, err = client.NewClient(&utils.Config{
@@ -122,7 +146,7 @@ func (p *aliyun) createClients(ctx context.Context, rawCreds map[string]any) err
 		return fmt.Errorf("cannot list regions: %w", err)
 	}
 	if len(p.pubCfg.Regions) > 0 {
-		regions = slc.Subset(regions, p.pubCfg.Regions)
+		regions = subset(regions, p.pubCfg.Regions)
 	}
 	if len(regions) == 0 {
 		return errors.New("no available regions")
@@ -131,14 +155,21 @@ func (p *aliyun) createClients(ctx context.Context, rawCreds map[string]any) err
 		return fmt.Errorf("region %s is not available", p.pubCfg.Region)
 	}
 
-	p.ecsClients = make(map[string]*client.Client, len(regions))
+	if len(p.clients.ecs) > 0 {
+		expectedRegions := slices.Collect(maps.Keys(p.clients.ecs))
+		if !equalSets(regions, expectedRegions) {
+			return errorreport.MarkCritical(errors.New("available regions changed"))
+		}
+	}
+
+	p.clients.ecs = make(map[string]*client.Client, len(regions))
 	for _, region := range regions {
 		if region == p.pubCfg.Region {
-			p.ecsClients[region] = ecsClient
+			p.clients.ecs[region] = ecsClient
 			continue
 		}
 
-		p.ecsClients[region], err = client.NewClient(&utils.Config{
+		p.clients.ecs[region], err = client.NewClient(&utils.Config{
 			RegionId:   &region,
 			Credential: ecsClient.Credential,
 		})
@@ -146,18 +177,24 @@ func (p *aliyun) createClients(ctx context.Context, rawCreds map[string]any) err
 			return fmt.Errorf("cannot create client for region %s: %w", region, err)
 		}
 	}
+	p.clientsGen.Add(1)
 
 	return nil
 }
 
-func (*aliyun) listRegions(ctx context.Context, c *client.Client) ([]string, error) {
+func (p *aliyun) listRegions(ctx context.Context, c *client.Client) ([]string, error) {
 	log.Debug(ctx, "Listing available regions")
-	err := ctx.Err()
-	if err != nil {
-		return nil, fmt.Errorf("cannot describe regions: %w", err)
-	}
 	var r *client.DescribeRegionsResponse
-	r, err = c.DescribeRegions(&client.DescribeRegionsRequest{})
+	err := p.ecsRetrier.Do(ctx, "describe regions", func(_ context.Context) error {
+		var inErr error
+		r, inErr = c.DescribeRegionsWithOptions(&client.DescribeRegionsRequest{}, &dara.RuntimeOptions{
+			Autoretry:      new(false),
+			MaxAttempts:    new(1),
+			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+		})
+		return inErr
+	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot describe regions: %w", err)
 	}
@@ -182,11 +219,19 @@ func (*aliyun) listRegions(ctx context.Context, c *client.Client) ([]string, err
 	return regions, nil
 }
 
-func (p *aliyun) clients() (*oss.Client, map[string]*client.Client) {
+func (p *aliyun) getClients() aliyunClients {
 	p.clientsMtx.RLock()
 	defer p.clientsMtx.RUnlock()
 
-	return p.ossClient, p.ecsClients
+	return p.clients
+}
+
+func (p *aliyun) ossClient() *oss.Client {
+	return p.getClients().oss
+}
+
+func (p *aliyun) ecsClient(region string) *client.Client {
+	return p.getClients().ecs[region]
 }
 
 func (*aliyun) ImageSuffix() string {
@@ -239,29 +284,29 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 	region := p.pubCfg.Region
 	ctx = log.WithValues(ctx, "image", image, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
 
-	ctx = task.Begin(ctx, "publish/"+image+"/"+region, &aliyunTaskState{
+	ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+region, &aliyunOperationState{
 		Region: region,
 	})
 	var blob string
 	blob, err = p.uploadBlob(ctx, p.source, imagePath.S3Key, image)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, err))
 	}
 
 	var imageID string
 	imageID, err = p.importImage(ctx, blob, image)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot import image %s from blob %s: %w", image, blob, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot import image %s from blob %s: %w", image, blob, err))
 	}
 
 	err = p.deleteBlob(ctx, image+p.ImageSuffix(), false)
 	if err != nil {
-		return nil, task.Fail(ctx, fmt.Errorf("cannot delete blob %s: %w", image, err))
+		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot delete blob %s: %w", image, err))
 	}
 
-	_, ecsClients := p.clients()
+	ecsClients := p.getClients().ecs
 	images := make(map[string]string, len(ecsClients))
-	publishImages := concurrency.NewLimitedActivitySync(ctx, 7)
+	publishImages := concurrency.NewActivitySync(ctx)
 	for toRegion := range ecsClients {
 		publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
@@ -271,27 +316,27 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 			if toRegion == region {
 				ctx = log.WithValues(ctx, "imageID", localID)
 			} else {
-				ctx = task.Begin(ctx, "publish/"+image+"/"+toRegion, &aliyunTaskState{
+				ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+toRegion, &aliyunOperationState{
 					Region: toRegion,
 				})
 				localID, er = p.copyImage(ctx, image, imageID, region, toRegion)
 				if er != nil {
-					return nil, task.Fail(ctx, fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion,
-						er))
+					return nil, resilience.FailOperation(ctx,
+						fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, er))
 				}
 				ctx = log.WithValues(ctx, "imageID", localID)
 
 				er = p.waitForImage(ctx, localID, toRegion)
 				if er != nil {
-					return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
+					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
 				}
 			}
 
 			er = p.makePublic(ctx, localID, toRegion, true, false)
 			if er != nil {
-				return nil, task.Fail(ctx, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion, er))
+				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion, er))
 			}
-			task.Complete(ctx)
+			resilience.CompleteOperation(ctx)
 
 			return func() error {
 				images[toRegion] = localID
@@ -331,18 +376,19 @@ func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, ima
 		_ = obj.Close()
 	}()
 
-	ossClient, _ := p.clients()
-
 	log.Info(ctx, "Uploading blob")
-	_, err = ossClient.PutObject(ctx, &oss.PutObjectRequest{
-		Bucket: &p.pubCfg.Bucket,
-		Key:    &ossKey,
-		Body:   obj,
+	err = p.ossRetrier.Do(ctx, "put object", func(ctx context.Context) error {
+		_, inErr := p.ossClient().PutObject(ctx, &oss.PutObjectRequest{
+			Bucket: &p.pubCfg.Bucket,
+			Key:    &ossKey,
+			Body:   obj,
+		})
+		return inErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot put object %s in bucket %s: %w", ossKey, p.pubCfg.Bucket, err)
 	}
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Blob = ossKey
 		return s
 	})
@@ -359,29 +405,31 @@ func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, ima
 func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, error) {
 	ctx = log.WithValues(ctx, "blob", blob, "region", p.pubCfg.Region)
 
-	_, ecsClients := p.clients()
-
 	log.Info(ctx, "Importing image")
-	err := ctx.Err()
-	if err != nil {
-		return "", fmt.Errorf("cannot import image: %w", err)
-	}
-	c := ecsClients[p.pubCfg.Region]
 	var r *client.ImportImageResponse
-	r, err = c.ImportImage(&client.ImportImageRequest{
-		DiskDeviceMapping: []*client.ImportImageRequestDiskDeviceMapping{
-			{
-				DiskImageSize: new(int32(20)),
-				Format:        new("qcow2"),
-				OSSBucket:     &p.pubCfg.Bucket,
-				OSSObject:     &blob,
+	err := p.ecsRetrier.Do(ctx, "import image", func(_ context.Context) error {
+		var inErr error
+		r, inErr = p.ecsClient(p.pubCfg.Region).ImportImageWithOptions(&client.ImportImageRequest{
+			DiskDeviceMapping: []*client.ImportImageRequestDiskDeviceMapping{
+				{
+					DiskImageSize: new(int32(20)),
+					Format:        new("qcow2"),
+					OSSBucket:     &p.pubCfg.Bucket,
+					OSSObject:     &blob,
+				},
 			},
-		},
-		Features: &client.ImportImageRequestFeatures{
-			NvmeSupport: new("supported"),
-		},
-		ImageName: &image,
-		RegionId:  &p.pubCfg.Region,
+			Features: &client.ImportImageRequestFeatures{
+				NvmeSupport: new("supported"),
+			},
+			ImageName: &image,
+			RegionId:  &p.pubCfg.Region,
+		}, &dara.RuntimeOptions{
+			Autoretry:      new(false),
+			MaxAttempts:    new(1),
+			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+		})
+		return inErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot import image: %w", err)
@@ -393,7 +441,7 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 		return "", errors.New("cannot import image: missing image ID")
 	}
 	imageID := *r.Body.ImageId
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Image = imageID
 		return s
 	})
@@ -411,17 +459,18 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
 	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "blob", blob)
 
-	ossClient, _ := p.clients()
-
 	log.Info(ctx, "Deleting blob")
-	_, err := ossClient.DeleteObject(ctx, &oss.DeleteObjectRequest{
-		Bucket: &p.pubCfg.Bucket,
-		Key:    &blob,
+	err := p.ossRetrier.Do(ctx, "delete object", func(ctx context.Context) error {
+		_, inErr := p.ossClient().DeleteObject(ctx, &oss.DeleteObjectRequest{
+			Bucket: &p.pubCfg.Bucket,
+			Key:    &blob,
+		})
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot delete object %s in bucket %s: %w", blob, p.pubCfg.Bucket, err)
 	}
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Blob = ""
 		return s
 	})
@@ -430,20 +479,22 @@ func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
 }
 
 func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion string) (string, error) {
-	_, ecsClients := p.clients()
-
 	log.Info(ctx, "Copying image")
-	err := ctx.Err()
-	if err != nil {
-		return "", fmt.Errorf("cannot copy image: %w", err)
-	}
-	c := ecsClients[region]
 	var r *client.CopyImageResponse
-	r, err = c.CopyImage(&client.CopyImageRequest{
-		DestinationImageName: &image,
-		DestinationRegionId:  &toRegion,
-		ImageId:              &imageID,
-		RegionId:             &region,
+	err := p.ecsRetrier.Do(ctx, "copy image", func(_ context.Context) error {
+		var inErr error
+		r, inErr = p.ecsClient(region).CopyImageWithOptions(&client.CopyImageRequest{
+			DestinationImageName: &image,
+			DestinationRegionId:  &toRegion,
+			ImageId:              &imageID,
+			RegionId:             &region,
+		}, &dara.RuntimeOptions{
+			Autoretry:      new(false),
+			MaxAttempts:    new(1),
+			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+		})
+		return inErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot copy image: %w", err)
@@ -455,7 +506,7 @@ func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion
 		return "", errors.New("cannot copy image: missing image ID")
 	}
 	toImageID := *r.Body.ImageId
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Image = toImageID
 		return s
 	})
@@ -464,19 +515,21 @@ func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion
 }
 
 func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error {
-	_, ecsClients := p.clients()
-
-	c := ecsClients[region]
 	var status string
 	for status != "Available" {
-		err := ctx.Err()
-		if err != nil {
-			return fmt.Errorf("cannot describe image: %w", err)
-		}
 		var r *client.DescribeImagesResponse
-		r, err = c.DescribeImages(&client.DescribeImagesRequest{
-			ImageId:  &imageID,
-			RegionId: &region,
+		err := p.ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
+			var inErr error
+			r, inErr = p.ecsClient(region).DescribeImagesWithOptions(&client.DescribeImagesRequest{
+				ImageId:  &imageID,
+				RegionId: &region,
+			}, &dara.RuntimeOptions{
+				Autoretry:      new(false),
+				MaxAttempts:    new(1),
+				ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+				ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+			})
+			return inErr
 		})
 		if err != nil {
 			return fmt.Errorf("cannot describe image: %w", err)
@@ -502,7 +555,7 @@ func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error
 				return fmt.Errorf("image has status %s", status)
 			}
 
-			time.Sleep(time.Second * 7)
+			time.Sleep(statusPollInterval)
 		}
 	}
 
@@ -510,22 +563,23 @@ func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error
 }
 
 func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public, steamroll bool) error {
-	_, ecsClients := p.clients()
-
 	if public {
 		log.Debug(ctx, "Adding share permission to image")
 	} else {
 		log.Debug(ctx, "Removing share permission from image")
 	}
-	err := ctx.Err()
-	if err != nil {
-		return fmt.Errorf("cannot modify share permission: %w", err)
-	}
-	c := ecsClients[region]
-	_, err = c.ModifyImageSharePermission(&client.ModifyImageSharePermissionRequest{
-		ImageId:  &imageID,
-		IsPublic: &public,
-		RegionId: &region,
+	err := p.ecsRetrier.Do(ctx, "modify image share permission", func(_ context.Context) error {
+		_, inErr := p.ecsClient(region).ModifyImageSharePermissionWithOptions(&client.ModifyImageSharePermissionRequest{
+			ImageId:  &imageID,
+			IsPublic: &public,
+			RegionId: &region,
+		}, &dara.RuntimeOptions{
+			Autoretry:      new(false),
+			MaxAttempts:    new(1),
+			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+		})
+		return inErr
 	})
 	if err != nil {
 		terr, ok := errors.AsType[*tea.SDKError](err)
@@ -541,7 +595,7 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 		}
 		return fmt.Errorf("cannot modify share permission: %w", err)
 	}
-	task.Update(ctx, func(s *aliyunTaskState) *aliyunTaskState {
+	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Public = public
 		return s
 	})
@@ -570,7 +624,7 @@ func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, 
 		return errors.New("invalid manifest: missing published images")
 	}
 
-	removeImages := concurrency.NewLimitedActivity(ctx, 3)
+	removeImages := concurrency.NewActivity(ctx)
 	for _, img := range pubOut.Images {
 		removeImages.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "image", img.ID, "region", img.Region)
@@ -587,18 +641,20 @@ func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, 
 }
 
 func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region string, steamroll bool) error {
-	_, ecsClients := p.clients()
-
 	log.Debug(ctx, "Getting image status")
-	err := ctx.Err()
-	if err != nil {
-		return fmt.Errorf("cannot describe image: %w", err)
-	}
-	c := ecsClients[region]
 	var r *client.DescribeImagesResponse
-	r, err = c.DescribeImages(&client.DescribeImagesRequest{
-		ImageId:  &imageID,
-		RegionId: &region,
+	err := p.ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
+		var inErr error
+		r, inErr = p.ecsClient(region).DescribeImagesWithOptions(&client.DescribeImagesRequest{
+			ImageId:  &imageID,
+			RegionId: &region,
+		}, &dara.RuntimeOptions{
+			Autoretry:      new(false),
+			MaxAttempts:    new(1),
+			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+		})
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot describe image: %w", err)
@@ -642,17 +698,18 @@ func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region st
 }
 
 func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool) error {
-	_, ecsClients := p.clients()
-
 	log.Info(ctx, "Deleting image")
-	err := ctx.Err()
-	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
-	}
-	c := ecsClients[region]
-	_, err = c.DeleteImage(&client.DeleteImageRequest{
-		ImageId:  &imageID,
-		RegionId: &region,
+	err := p.ecsRetrier.Do(ctx, "delete image", func(_ context.Context) error {
+		_, inErr := p.ecsClient(region).DeleteImageWithOptions(&client.DeleteImageRequest{
+			ImageId:  &imageID,
+			RegionId: &region,
+		}, &dara.RuntimeOptions{
+			Autoretry:      new(false),
+			MaxAttempts:    new(1),
+			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+		})
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot delete image: %w", err)
@@ -669,14 +726,14 @@ func (p *aliyun) RollbackDomain() string {
 	return "aliyun"
 }
 
-func (p *aliyun) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+func (p *aliyun) Rollback(ctx context.Context, operations map[string]resilience.Operation) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
-	for _, t := range tasks {
-		state, err := task.ParseState[*aliyunTaskState](t.State)
+	rollbackTasks := concurrency.NewActivity(ctx)
+	for _, op := range operations {
+		state, err := resilience.ParseOperationState[*aliyunOperationState](op.State)
 		if err != nil {
 			return err
 		}

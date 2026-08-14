@@ -12,16 +12,16 @@ import (
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/ocm"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
 
 // Publish publishes a release to all configured cloud providers.
 func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool) error {
 	ctx = log.WithValues(ctx, "op", "publish", "version", version, "commit", commit)
 
-	ctx = task.WithStatePersistor(ctx, p.state, fmt.Sprintf("%s-%.8s", version, commit))
+	ctx = resilience.WithStatePersistor(ctx, p.state, fmt.Sprintf("%s-%.8s", version, commit))
 	err := p.publish(ctx, version, commit, omitIrreversible, omitComponentDescriptor)
-	stateErr := task.PersistorError(ctx)
+	stateErr := resilience.PersistorError(ctx)
 	if stateErr != nil {
 		criticalStateErr := errorreport.MarkCritical(fmt.Errorf("cannot maintain state: %w", stateErr))
 		if errors.Is(err, stateErr) {
@@ -34,7 +34,7 @@ func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrr
 }
 
 func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool) error {
-	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
+	rollbackHandlers := make([]resilience.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
 		if !target.CanUnpublish() {
 			continue
@@ -42,7 +42,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 		rollbackHandlers = append(rollbackHandlers, target)
 	}
-	err := task.Rollback(ctx, rollbackHandlers)
+	err := resilience.Rollback(ctx, rollbackHandlers)
 	if err != nil {
 		return fmt.Errorf("cannot roll back: %w", err)
 	}
@@ -116,8 +116,8 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		return fmt.Errorf("cannot publish targets: %w", err)
 	}
 
-	task.Clear(ctx)
-	err = task.PersistorError(ctx)
+	resilience.ClearState(ctx)
+	err = resilience.PersistorError(ctx)
 	if err != nil {
 		return err
 	}
@@ -219,7 +219,7 @@ func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 	if pub.PublishingGroup != "" {
 		batch = pub.PublishingGroup
 	}
-	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, batch), true), pub.Target.RollbackDomain())
+	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, batch), true), pub.Target.RollbackDomain())
 
 	pub.Manifest.PublishedImageMetadata = nil
 	pub.Manifest.IndividualPublishedImageMetadata = nil
@@ -238,7 +238,7 @@ func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 
 	if pub.PublishingGroup == "" {
 		log.Info(ctx, "Updating manifest")
-		task.RemoveCompleted(ctx, pub.Flavor)
+		resilience.RemoveCompletedOperations(ctx, pub.Flavor)
 		err = cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
 		if err != nil {
 			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err))
@@ -250,7 +250,8 @@ func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 
 func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication) error {
 	ctx = log.WithValues(ctx, "group", groupPub.Group, "targetType", groupPub.Target.Type())
-	ctx = task.WithDomain(task.WithUndeadMode(task.WithBatch(ctx, groupPub.Group), true), groupPub.Target.RollbackDomain())
+	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, groupPub.Group), true),
+		groupPub.Target.RollbackDomain())
 
 	manifests := make([]gardenlinux.FlavorManifest, len(groupPub.publications))
 	for i, pub := range groupPub.publications {
@@ -283,7 +284,7 @@ func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication
 	}
 
 	log.Info(ctx, "Updating group manifest")
-	task.RemoveCompleted(ctx, groupPub.Group)
+	resilience.RemoveCompletedOperations(ctx, groupPub.Group)
 	err = cloudprovider.PutGroupManifest(ctx, p.manifestTarget, groupPub.manifestKey(), groupPub.GroupManifest)
 	if err != nil {
 		return errorreport.MarkCritical(fmt.Errorf("cannot put group manifest for %s: %w", groupPub.Group, err))
