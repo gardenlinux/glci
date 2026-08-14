@@ -1,16 +1,18 @@
-package task
+package resilience
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
+	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/module"
 )
 
@@ -28,9 +31,13 @@ func init() {
 	env.Clean("_X_AMZN_")
 
 	module.RegisterImpl(Category, "AWS", func(b *module.Base) StatePersistor {
-		return &aws{
+		p := &aws{
 			base: b,
 		}
+		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.clientsGen.Load()
+		}), guard.DelegatingTimeoutPolicy{})
+		return p
 	})
 }
 
@@ -43,10 +50,17 @@ type aws struct {
 
 	credsSource credsprovider.CredsSource
 
-	stateCfg   awsStateConfig
-	key        string
+	stateCfg awsStateConfig
+	key      string
+	retrier  guard.Retrier
+
 	clientsMtx sync.RWMutex
-	s3Client   *s3.Client
+	clients    awsClients
+	clientsGen atomic.Uint64
+}
+
+type awsClients struct {
+	s3 *s3.Client
 }
 
 type awsStateConfig struct {
@@ -80,15 +94,31 @@ func (p *aws) createClients(ctx context.Context, rawCreds map[string]any) error 
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, creds.SessionToken)),
 		config.WithRetryer(func() awssdk.Retryer {
 			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.MaxAttempts = guard.Retries + 1
+				o.MaxBackoff = guard.RetryMaxDelay
 				o.RateLimiter = ratelimit.None
 			})
-		}))
+		}), config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
+			t.ResponseHeaderTimeout = guard.Timeout
+		})))
 	if err != nil {
 		return fmt.Errorf("cannot load default config: %w", err)
 	}
-	p.s3Client = s3.NewFromConfig(awsCfg)
+	p.clients.s3 = s3.NewFromConfig(awsCfg)
+	p.clientsGen.Add(1)
 
 	return nil
+}
+
+func (p *aws) getClients() awsClients {
+	p.clientsMtx.RLock()
+	defer p.clientsMtx.RUnlock()
+
+	return p.clients
+}
+
+func (p *aws) s3Client() *s3.Client {
+	return p.getClients().s3
 }
 
 func (p *aws) SetID(id string) {
@@ -100,15 +130,14 @@ func (p *aws) Load() ([]byte, error) {
 		return nil, errors.New("config or ID not set")
 	}
 
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
-	defer cancel()
-
-	r, err := p.s3Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: &p.stateCfg.Bucket,
-		Key:    &p.key,
+	var r *s3.GetObjectOutput
+	err := p.retrier.Do(context.Background(), "get object", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.s3Client().GetObject(ctx, &s3.GetObjectInput{
+			Bucket: &p.stateCfg.Bucket,
+			Key:    &p.key,
+		})
+		return inErr
 	})
 	if err != nil {
 		_, ok := errors.AsType[*s3types.NoSuchKey](err)
@@ -140,18 +169,15 @@ func (p *aws) Save(state []byte) error {
 		return errors.New("config or ID not set")
 	}
 
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
-	defer cancel()
-
-	_, err := p.s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:          &p.stateCfg.Bucket,
-		Key:             &p.key,
-		Body:            bytes.NewReader(state),
-		ContentEncoding: new("utf-8"),
-		ContentType:     new("application/json"),
+	err := p.retrier.Do(context.Background(), "put object", func(ctx context.Context) error {
+		_, inErr := p.s3Client().PutObject(ctx, &s3.PutObjectInput{
+			Bucket:          &p.stateCfg.Bucket,
+			Key:             &p.key,
+			Body:            bytes.NewReader(state),
+			ContentEncoding: new("utf-8"),
+			ContentType:     new("application/json"),
+		})
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot put object %s to bucket %s: %w", p.key, p.stateCfg.Bucket, err)
@@ -165,15 +191,12 @@ func (p *aws) Clear() error {
 		return errors.New("config or ID not set")
 	}
 
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*37)
-	defer cancel()
-
-	_, err := p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: &p.stateCfg.Bucket,
-		Key:    &p.key,
+	err := p.retrier.Do(context.Background(), "delete object", func(ctx context.Context) error {
+		_, inErr := p.s3Client().DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: &p.stateCfg.Bucket,
+			Key:    &p.key,
+		})
+		return inErr
 	})
 	if err != nil {
 		return fmt.Errorf("cannot delete object %s in bucket %s: %w", p.key, p.stateCfg.Bucket, err)

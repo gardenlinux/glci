@@ -9,14 +9,13 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/api/auth/approle"
 	"github.com/wandb/parallel"
 
-	"github.com/gardenlinux/glci/internal/ch"
 	"github.com/gardenlinux/glci/internal/env"
+	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
 )
@@ -28,6 +27,7 @@ func init() {
 	module.RegisterImpl(Category, "Vault", func(b *module.Base) CredsSource {
 		return &vault{
 			base:          b,
+			retrier:       guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}),
 			activeCreds:   make(map[CredsID]vaultCreds),
 			activeSecrets: make(map[string]vaultSecret),
 			events:        make(chan vaultWatchEvent),
@@ -48,6 +48,7 @@ type vault struct {
 	vaultClient    *api.Client
 	vaultSecret    *api.Secret
 	vaultWatcher   *api.LifetimeWatcher
+	retrier        guard.Retrier
 	maintainExec   parallel.ErrGroupExecutor
 	activeCreds    map[CredsID]vaultCreds
 	activeCredsMtx sync.Mutex
@@ -70,9 +71,8 @@ type vaultConfig struct {
 }
 
 type vaultCreds struct {
-	secrets  []string
-	validate ValidateFunc
-	updated  UpdatedFunc
+	secrets []string
+	updated UpdatedFunc
 }
 
 type vaultSecret struct {
@@ -118,8 +118,8 @@ func (p *vault) maintain(ctx context.Context) error {
 		default:
 		}
 
-		retry, err := p.maintainVault(ctx)
-		if err != nil || !retry {
+		shouldReestablish, err := p.maintainVault(ctx)
+		if err != nil || !shouldReestablish {
 			return err
 		}
 
@@ -207,7 +207,7 @@ func (p *vault) processWatchEvent(ctx context.Context, event vaultWatchEvent) er
 				owner.Config, owner.Role)
 		}
 
-		err = p.validateAndAnnounceNewCreds(ctx, creds)
+		err = p.announceNewCreds(ctx, creds)
 		if err != nil {
 			return fmt.Errorf("cannot update credentials %s/%s/%s: %w", owner.Type, owner.Config, owner.Role, err)
 		}
@@ -223,7 +223,6 @@ func (p *vault) reestablishVault(ctx context.Context) error {
 	for key, secret := range p.activeSecrets {
 		p.deactivateSecret(key, secret)
 	}
-	ch.Drain(p.events)
 	p.activeSecrets = make(map[string]vaultSecret)
 	inactiveCreds := p.activeCreds
 	p.activeCreds = make(map[CredsID]vaultCreds)
@@ -234,7 +233,7 @@ func (p *vault) reestablishVault(ctx context.Context) error {
 	}
 
 	for id, creds := range inactiveCreds {
-		err = p.renewCreds(ctx, id, creds.validate, creds.updated)
+		err = p.renewCreds(ctx, id, creds.updated)
 		if err != nil {
 			return fmt.Errorf("cannot renew credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 		}
@@ -255,7 +254,11 @@ func (p *vault) login(ctx context.Context) error {
 		}
 		p.vaultClient.SetToken(token)
 		var err error
-		p.vaultSecret, err = p.vaultClient.Auth().Token().LookupSelfWithContext(ctx)
+		err = p.retrier.Do(ctx, "look up token", func(ctx context.Context) error {
+			var inErr error
+			p.vaultSecret, inErr = p.vaultClient.Auth().Token().LookupSelfWithContext(ctx)
+			return inErr
+		})
 		return err
 
 	case p.credsCfg.TokenFile != "":
@@ -265,7 +268,11 @@ func (p *vault) login(ctx context.Context) error {
 			return fmt.Errorf("cannot read token file %s: %w", p.credsCfg.TokenFile, err)
 		}
 		p.vaultClient.SetToken(strings.TrimSpace(string(t)))
-		p.vaultSecret, err = p.vaultClient.Auth().Token().LookupSelfWithContext(ctx)
+		err = p.retrier.Do(ctx, "look up token", func(ctx context.Context) error {
+			var inErr error
+			p.vaultSecret, inErr = p.vaultClient.Auth().Token().LookupSelfWithContext(ctx)
+			return inErr
+		})
 		return err
 
 	case p.credsCfg.RoleID != "" && p.credsCfg.SecretID != "":
@@ -276,7 +283,11 @@ func (p *vault) login(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("cannot create AppRole: %w", err)
 		}
-		p.vaultSecret, err = p.vaultClient.Auth().Login(ctx, appRole)
+		err = p.retrier.Do(ctx, "log in", func(ctx context.Context) error {
+			var inErr error
+			p.vaultSecret, inErr = p.vaultClient.Auth().Login(ctx, appRole)
+			return inErr
+		})
 		if err != nil {
 			return fmt.Errorf("cannot login using AppRole: %w", err)
 		}
@@ -329,10 +340,6 @@ func (*vault) secretKeys(id CredsID) []string {
 }
 
 func (p *vault) AcquireCreds(ctx context.Context, id CredsID, updated UpdatedFunc) error {
-	return p.AcquireValidatedCreds(ctx, id, nil, updated)
-}
-
-func (p *vault) AcquireValidatedCreds(ctx context.Context, id CredsID, validate ValidateFunc, updated UpdatedFunc) error {
 	err := p.ensureNoError()
 	if err != nil {
 		return err
@@ -345,11 +352,10 @@ func (p *vault) AcquireValidatedCreds(ctx context.Context, id CredsID, validate 
 	if ok {
 		ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Role)
 
-		creds.validate = validate
 		creds.updated = updated
 		p.activeCreds[id] = creds
 
-		err = p.validateAndAnnounceNewCreds(ctx, creds)
+		err = p.announceNewCreds(ctx, creds)
 		if err != nil {
 			return fmt.Errorf("cannot update credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 		}
@@ -357,7 +363,7 @@ func (p *vault) AcquireValidatedCreds(ctx context.Context, id CredsID, validate 
 		return nil
 	}
 
-	err = p.renewCreds(ctx, id, validate, updated)
+	err = p.renewCreds(ctx, id, updated)
 	if err != nil {
 		return fmt.Errorf("cannot renew credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 	}
@@ -365,7 +371,7 @@ func (p *vault) AcquireValidatedCreds(ctx context.Context, id CredsID, validate 
 	return nil
 }
 
-func (p *vault) validateAndAnnounceNewCreds(ctx context.Context, creds vaultCreds) error {
+func (p *vault) announceNewCreds(ctx context.Context, creds vaultCreds) error {
 	allData := make(map[string]any)
 	for _, key := range creds.secrets {
 		secret, ok := p.activeSecrets[key]
@@ -380,34 +386,10 @@ func (p *vault) validateAndAnnounceNewCreds(ctx context.Context, creds vaultCred
 		maps.Copy(allData, secretData)
 	}
 
-	if creds.validate != nil {
-		err := p.validateCreds(ctx, creds.validate, allData)
-		if err != nil {
-			return fmt.Errorf("cannot validate credentials: %w", err)
-		}
-	}
-
 	return creds.updated(ctx, allData)
 }
 
-func (*vault) validateCreds(ctx context.Context, validate ValidateFunc, data map[string]any) error {
-	var attempt int
-	for attempt < 11 {
-		log.Debug(ctx, "Validating credentials", "attempt", attempt)
-		good, err := validate(ctx, data)
-		if err != nil {
-			return err
-		}
-		if good {
-			return nil
-		}
-		time.Sleep(time.Second * 3)
-		attempt++
-	}
-	return errors.New("maximum number of attempts exceeded")
-}
-
-func (p *vault) renewCreds(ctx context.Context, id CredsID, validate ValidateFunc, updated UpdatedFunc) error {
+func (p *vault) renewCreds(ctx context.Context, id CredsID, updated UpdatedFunc) error {
 	ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Role)
 
 	keys := p.secretKeys(id)
@@ -425,13 +407,12 @@ func (p *vault) renewCreds(ctx context.Context, id CredsID, validate ValidateFun
 	}
 
 	creds := vaultCreds{
-		secrets:  keys,
-		validate: validate,
-		updated:  updated,
+		secrets: keys,
+		updated: updated,
 	}
 	p.activeCreds[id] = creds
 
-	err := p.validateAndAnnounceNewCreds(ctx, creds)
+	err := p.announceNewCreds(ctx, creds)
 	if err != nil {
 		return fmt.Errorf("cannot update credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
 	}
@@ -467,7 +448,11 @@ func (p *vault) activateSecret(ctx context.Context, key string, owners []CredsID
 	var err error
 
 	log.Debug(ctx, "Reading Vault secret")
-	secret.secret, err = p.vaultClient.Logical().ReadWithContext(ctx, key)
+	err = p.retrier.Do(ctx, "read secret", func(ctx context.Context) error {
+		var inErr error
+		secret.secret, inErr = p.vaultClient.Logical().ReadWithContext(ctx, key)
+		return inErr
+	})
 	if err != nil {
 		return vaultSecret{}, fmt.Errorf("cannot get secret: %w", err)
 	}
@@ -504,31 +489,29 @@ func (p *vault) monitor(done <-chan struct{}, key string, watcher *api.LifetimeW
 			return
 
 		case err := <-watcher.DoneCh():
-			select {
-			case <-done:
-				return
-			default:
-			}
-
 			if errors.Is(err, api.ErrLifetimeWatcherNotRenewable) {
 				return
 			}
 
-			p.events <- vaultWatchEvent{
+			select {
+			case p.events <- vaultWatchEvent{
 				key: key,
 				err: err,
+			}:
+
+			case <-done:
+				return
 			}
 
 		case renewal := <-watcher.RenewCh():
 			select {
-			case <-done:
-				return
-			default:
-			}
-
-			p.events <- vaultWatchEvent{
+			case p.events <- vaultWatchEvent{
 				key:    key,
 				secret: renewal.Secret,
+			}:
+
+			case <-done:
+				return
 			}
 		}
 	}
@@ -590,6 +573,10 @@ func (p *vault) Configure(rawCfg map[string]any) error {
 
 	c := api.DefaultConfig()
 	c.Address = p.credsCfg.Server
+	c.MaxRetries = guard.Retries
+	c.MinRetryWait = guard.RetryBaseDelay
+	c.MaxRetryWait = guard.RetryMaxDelay
+	c.Timeout = guard.Timeout
 
 	p.vaultClient, err = api.NewClient(c)
 	if err != nil {
@@ -621,6 +608,7 @@ func (p *vault) Start(ctx context.Context) error {
 			p.err = err
 			close(p.errCh)
 		}
+
 		return err
 	})
 
@@ -634,15 +622,23 @@ func (p *vault) Stop() error {
 	if p.closed {
 		return nil
 	}
-
 	close(p.closeCh)
 	p.closed = true
 
+	var err error
 	if p.maintainExec != nil {
-		err := p.maintainExec.Wait()
-		if err != nil {
-			return fmt.Errorf("error encountered while renewing credentials: %w", err)
-		}
+		err = p.maintainExec.Wait()
+	}
+
+	p.activeCredsMtx.Lock()
+	defer p.activeCredsMtx.Unlock()
+
+	for key, secret := range p.activeSecrets {
+		p.deactivateSecret(key, secret)
+	}
+
+	if err != nil {
+		return fmt.Errorf("error encountered while renewing credentials: %w", err)
 	}
 
 	return nil

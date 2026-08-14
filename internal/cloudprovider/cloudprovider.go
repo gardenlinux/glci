@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/goccy/go-yaml"
@@ -15,8 +17,10 @@ import (
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
+
+const statusPollInterval = time.Second * 3
 
 // ArtifactSourceCategory is the module framework registry for ArtifactSource implementations.
 //
@@ -102,7 +106,7 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 		return fmt.Errorf("cannot encode manifest: %w", err)
 	}
 
-	return source.PutObject(ctx, key, &buf)
+	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()))
 }
 
 // GetGroupManifest retrieves a group manifest from an artifact source.
@@ -162,7 +166,7 @@ func PutGroupManifest(ctx context.Context, source ArtifactSource, key string, gr
 		return fmt.Errorf("cannot encode group manifest: %w", err)
 	}
 
-	return source.PutObject(ctx, key, &buf)
+	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()))
 }
 
 // PublishingTarget is a target onto which GLCI can publish Garden Linux images.
@@ -179,7 +183,7 @@ type PublishingTarget interface {
 	CanFuse() bool
 	Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error)
 	Unfuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest, steamroll bool) error
-	task.RollbackHandler
+	resilience.RollbackHandler
 }
 
 // PublishingOutput is an opaque representation of the result of a publishing operation.
@@ -259,7 +263,7 @@ func (notUnpublishableTarget) RollbackDomain() string {
 }
 
 //nolint:unused // Canonical base for targets that cannot be unpublished.
-func (notUnpublishableTarget) Rollback(_ context.Context, _ map[string]task.Task) error {
+func (notUnpublishableTarget) Rollback(_ context.Context, _ map[string]resilience.Operation) error {
 	return errors.New("target cannot rollback")
 }
 
@@ -365,4 +369,33 @@ func getObjectFile(ctx context.Context, source ArtifactSource, key string) (stri
 
 	success = true
 	return f.Name(), nil
+}
+
+func subset(original, subset []string) []string {
+	res := make([]string, 0, min(len(original), len(subset)))
+	for _, e := range original {
+		if slices.Contains(subset, e) {
+			res = append(res, e)
+		}
+	}
+	return res
+}
+
+func equalSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	present := make(map[string]struct{}, len(a))
+	for _, e := range a {
+		present[e] = struct{}{}
+	}
+	for _, e := range b {
+		_, ok := present[e]
+		if !ok {
+			return false
+		}
+	}
+
+	return true
 }

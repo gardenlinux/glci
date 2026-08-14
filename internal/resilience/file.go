@@ -1,4 +1,4 @@
-package task
+package resilience
 
 import (
 	"context"

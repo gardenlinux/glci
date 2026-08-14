@@ -10,16 +10,16 @@ import (
 	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
 
 // Unpublish unpublishes a release from all configured cloud providers.
 func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steamroll bool) error {
 	ctx = log.WithValues(ctx, "op", "unpublish", "version", version, "commit", commit)
 
-	ctx = task.WithStatePersistor(ctx, p.state, fmt.Sprintf("%s-%.8s", version, commit))
+	ctx = resilience.WithStatePersistor(ctx, p.state, fmt.Sprintf("%s-%.8s", version, commit))
 	err := p.unpublish(ctx, version, commit, steamroll)
-	stateErr := task.PersistorError(ctx)
+	stateErr := resilience.PersistorError(ctx)
 	if stateErr != nil {
 		criticalStateErr := errorreport.MarkCritical(fmt.Errorf("cannot maintain state: %w", stateErr))
 		if errors.Is(err, stateErr) {
@@ -32,7 +32,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 }
 
 func (p *Publisher) unpublish(ctx context.Context, version, commit string, steamroll bool) error {
-	rollbackHandlers := make([]task.RollbackHandler, 0, len(p.targets))
+	rollbackHandlers := make([]resilience.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
 		if !target.CanUnpublish() {
 			continue
@@ -40,13 +40,13 @@ func (p *Publisher) unpublish(ctx context.Context, version, commit string, steam
 
 		rollbackHandlers = append(rollbackHandlers, target)
 	}
-	err := task.Rollback(ctx, rollbackHandlers)
+	err := resilience.Rollback(ctx, rollbackHandlers)
 	if err != nil {
 		return fmt.Errorf("cannot roll back: %w", err)
 	}
 
-	task.Clear(ctx)
-	err = task.PersistorError(ctx)
+	resilience.ClearState(ctx)
+	err = resilience.PersistorError(ctx)
 	if err != nil {
 		return err
 	}

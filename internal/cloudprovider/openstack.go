@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,10 +18,12 @@ import (
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
+	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
+	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -29,7 +32,8 @@ func init() {
 
 	module.RegisterImpl(PublishingTargetCategory, "OpenStack", func(b *module.Base) PublishingTarget {
 		return &openstack{
-			base: b,
+			base:    b,
+			retrier: guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
 		}
 	})
 }
@@ -47,9 +51,16 @@ type openstack struct {
 	source      ArtifactSource
 	sourceChina ArtifactSource
 
-	pubCfg        openstackPublishingConfig
-	clientsMtx    sync.RWMutex
-	imagesClients map[string]*gophercloud.ServiceClient
+	pubCfg  openstackPublishingConfig
+	retrier guard.Retrier
+
+	clientsMtx      sync.RWMutex
+	clients         openstackClients
+	expectedRegions map[string][]string
+}
+
+type openstackClients struct {
+	images map[string]*gophercloud.ServiceClient
 }
 
 type openstackPublishingConfig struct {
@@ -75,12 +86,10 @@ const (
 )
 
 func (p *openstack) isConfigured() bool {
-	imagesClients := p.clients()
-
-	return len(imagesClients) > 0
+	return len(p.getClients().images) > 0
 }
 
-type openstackTaskState struct {
+type openstackOperationState struct {
 	Region string `json:"region,omitzero"`
 	Image  string `json:"image,omitzero"`
 }
@@ -111,18 +120,35 @@ func (p *openstack) createClients(ctx context.Context, config openstackPublishin
 	p.clientsMtx.Lock()
 	defer p.clientsMtx.Unlock()
 
-	initClients := concurrency.NewLimitedActivitySync(ctx, 7)
+	expectedRegions, ok := p.expectedRegions[config.Config]
+	if ok {
+		if !equalSets(config.Regions, expectedRegions) {
+			return errorreport.MarkCritical(errors.New("available regions changed"))
+		}
+	} else {
+		p.expectedRegions[config.Config] = config.Regions
+	}
+
+	imagesClients := make(map[string]*gophercloud.ServiceClient, len(p.clients.images))
+	maps.Copy(imagesClients, p.clients.images)
+
+	initClients := concurrency.NewActivitySync(ctx)
 	for _, region := range config.Regions {
 		initClients.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
-			providerClient, er := openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
-				IdentityEndpoint: strings.Replace(config.Endpoint, "{region}", region, 1),
-				Username:         creds.Username,
-				Password:         creds.Password,
-				DomainName:       config.Domain,
-				Scope: &gophercloud.AuthScope{
-					ProjectName: config.Project,
-					DomainName:  config.Domain,
-				},
+			var providerClient *gophercloud.ProviderClient
+			er := p.retrier.Do(ctx, "authenticate", func(ctx context.Context) error {
+				var inErr error
+				providerClient, inErr = openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
+					IdentityEndpoint: strings.Replace(config.Endpoint, "{region}", region, 1),
+					Username:         creds.Username,
+					Password:         creds.Password,
+					DomainName:       config.Domain,
+					Scope: &gophercloud.AuthScope{
+						ProjectName: config.Project,
+						DomainName:  config.Domain,
+					},
+				})
+				return inErr
 			})
 			if er != nil {
 				return nil, fmt.Errorf("cannot create provider client for region %s: %w", region, er)
@@ -137,21 +163,32 @@ func (p *openstack) createClients(ctx context.Context, config openstackPublishin
 			}
 
 			return func() error {
-				p.imagesClients[region] = client
+				imagesClients[region] = client
 
 				return nil
 			}, nil
 		})
 	}
 
-	return initClients.Wait()
+	err = initClients.Wait()
+	if err != nil {
+		return err
+	}
+
+	p.clients.images = imagesClients
+
+	return nil
 }
 
-func (p *openstack) clients() map[string]*gophercloud.ServiceClient {
+func (p *openstack) getClients() openstackClients {
 	p.clientsMtx.RLock()
 	defer p.clientsMtx.RUnlock()
 
-	return p.imagesClients
+	return p.clients
+}
+
+func (p *openstack) imagesClient(region string) *gophercloud.ServiceClient {
+	return p.getClients().images[region]
 }
 
 func (*openstack) ImageSuffix() string {
@@ -259,12 +296,10 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
 	}
 
-	imagesClients := p.clients()
-	outImages := make(map[string]string, len(imagesClients))
+	outImages := make(map[string]string, len(p.getClients().images))
 	publishImages := concurrency.NewActivitySync(ctx)
 	for _, config := range p.pubCfg.Configs {
 		for _, region := range config.Regions {
-			imageClient := imagesClients[region]
 			source := p.source
 			if strings.HasPrefix(region, "ap-cn-") && p.sourceChina != nil {
 				source = p.sourceChina
@@ -273,20 +308,20 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 			publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 				ctx = log.WithValues(ctx, "region", region)
 
-				ctx = task.Begin(ctx, "publish/"+image+"/"+region, &openstackTaskState{
+				ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+region, &openstackOperationState{
 					Region: region,
 				})
-				imageID, er := p.createImage(ctx, imageClient, source, imagePath.S3Key, image, variant)
+				imageID, er := p.createImage(ctx, region, source, imagePath.S3Key, image, variant)
 				if er != nil {
-					return nil, task.Fail(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
+					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
 				}
 				ctx = log.WithValues(ctx, "region", region)
 
 				er = p.waitForImage(ctx, imageID, region)
 				if er != nil {
-					return nil, task.Fail(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, er))
+					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, er))
 				}
-				task.Complete(ctx)
+				resilience.CompleteOperation(ctx)
 
 				return func() error {
 					outImages[region] = imageID
@@ -316,7 +351,7 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 	}, nil
 }
 
-func (*openstack) createImage(ctx context.Context, imageClient *gophercloud.ServiceClient, source ArtifactSource, key, image string,
+func (p *openstack) createImage(ctx context.Context, region string, source ArtifactSource, key, image string,
 	variant openstackVariant,
 ) (string, error) {
 	var properties map[string]string
@@ -353,27 +388,33 @@ func (*openstack) createImage(ctx context.Context, imageClient *gophercloud.Serv
 
 	log.Info(ctx, "Creating image")
 	var img *images.Image
-	img, err = images.Create(ctx, imageClient, images.CreateOpts{
-		Name:            image,
-		Visibility:      &visibility,
-		ContainerFormat: "bare",
-		DiskFormat:      "vmdk",
-		Properties:      properties,
-	}).Extract()
+	err = p.retrier.Do(ctx, "create image", func(ctx context.Context) error {
+		var inErr error
+		img, inErr = images.Create(ctx, p.imagesClient(region), images.CreateOpts{
+			Name:            image,
+			Visibility:      &visibility,
+			ContainerFormat: "bare",
+			DiskFormat:      "vmdk",
+			Properties:      properties,
+		}).Extract()
+		return inErr
+	})
 	if err != nil {
 		return "", fmt.Errorf("cannot create image: %w", err)
 	}
-	task.Update(ctx, func(s *openstackTaskState) *openstackTaskState {
+	resilience.UpdateOperation(ctx, func(s *openstackOperationState) *openstackOperationState {
 		s.Image = img.ID
 		return s
 	})
 	ctx = log.WithValues(ctx, "imageID", img.ID)
 
 	log.Debug(ctx, "Importing image")
-	err = imageimport.Create(ctx, imageClient, img.ID, imageimport.CreateOpts{
-		Name: imageimport.WebDownloadMethod,
-		URI:  url,
-	}).ExtractErr()
+	err = p.retrier.Do(ctx, "import image", func(ctx context.Context) error {
+		return imageimport.Create(ctx, p.imagesClient(region), img.ID, imageimport.CreateOpts{
+			Name: imageimport.WebDownloadMethod,
+			URI:  url,
+		}).ExtractErr()
+	})
 	if err != nil {
 		return "", fmt.Errorf("cannot import image: %w", err)
 	}
@@ -382,11 +423,14 @@ func (*openstack) createImage(ctx context.Context, imageClient *gophercloud.Serv
 }
 
 func (p *openstack) waitForImage(ctx context.Context, imageID, region string) error {
-	imagesClients := p.clients()
-
 	var status images.ImageStatus
 	for status != images.ImageStatusActive {
-		img, err := images.Get(ctx, imagesClients[region], imageID).Extract()
+		var img *images.Image
+		err := p.retrier.Do(ctx, "get image", func(ctx context.Context) error {
+			var inErr error
+			img, inErr = images.Get(ctx, p.imagesClient(region), imageID).Extract()
+			return inErr
+		})
 		if err != nil {
 			return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, err)
 		}
@@ -397,7 +441,7 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 				return fmt.Errorf("image %s in region %s has status %s", imageID, region, status)
 			}
 
-			time.Sleep(time.Second * 7)
+			time.Sleep(statusPollInterval)
 		}
 	}
 
@@ -429,12 +473,9 @@ func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 
 	ctx = log.WithValues(ctx, "variant", variant)
 
-	imagesClients := p.clients()
-
-	removeImages := concurrency.NewLimitedActivity(ctx, 3)
+	removeImages := concurrency.NewActivity(ctx)
 	for _, img := range pubOut.Images {
-		_, ok := imagesClients[img.Region]
-		if !ok {
+		if p.imagesClient(img.Region) == nil {
 			return fmt.Errorf("image %s is in unknown region %s", img.ID, img.Region)
 		}
 
@@ -453,10 +494,10 @@ func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 }
 
 func (p *openstack) deleteImage(ctx context.Context, id, region string, steamroll bool) error {
-	imagesClients := p.clients()
-
 	log.Info(ctx, "Deleting image")
-	err := images.Delete(ctx, imagesClients[region], id).ExtractErr()
+	err := p.retrier.Do(ctx, "delete image", func(ctx context.Context) error {
+		return images.Delete(ctx, p.imagesClient(region), id).ExtractErr()
+	})
 	if err != nil {
 		terr, ok := errors.AsType[gophercloud.ErrUnexpectedResponseCode](err)
 		if steamroll && ok && terr.Actual == http.StatusNotFound {
@@ -477,14 +518,14 @@ func (p *openstack) RollbackDomain() string {
 	return "openstack"
 }
 
-func (p *openstack) Rollback(ctx context.Context, tasks map[string]task.Task) error {
+func (p *openstack) Rollback(ctx context.Context, operations map[string]resilience.Operation) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
 
-	rollbackTasks := concurrency.NewLimitedActivity(ctx, 3)
-	for _, t := range tasks {
-		state, err := task.ParseState[*openstackTaskState](t.State)
+	rollbackTasks := concurrency.NewActivity(ctx)
+	for _, op := range operations {
+		state, err := resilience.ParseOperationState[*openstackOperationState](op.State)
 		if err != nil {
 			return err
 		}
@@ -553,7 +594,8 @@ func (p *openstack) Configure(rawCfg map[string]any) error {
 		}
 	}
 
-	p.imagesClients = make(map[string]*gophercloud.ServiceClient, len(rs))
+	p.clients.images = make(map[string]*gophercloud.ServiceClient, len(rs))
+	p.expectedRegions = make(map[string][]string, len(p.pubCfg.Configs))
 
 	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
 	if err != nil {

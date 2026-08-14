@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/concurrency"
@@ -12,7 +11,7 @@ import (
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-	"github.com/gardenlinux/glci/internal/task"
+	"github.com/gardenlinux/glci/internal/resilience"
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -30,7 +29,7 @@ type Publisher struct {
 	manifestTarget cloudprovider.ArtifactSource
 	targets        []cloudprovider.PublishingTarget
 	ocmTarget      cloudprovider.OCMTarget
-	state          task.StatePersistor
+	state          resilience.StatePersistor
 
 	cfg     publisherConfig
 	flavors []FlavorConfig
@@ -52,7 +51,7 @@ type publisherConfig struct {
 	ManifestTarget string                                           `mapstructure:"manifest_target,omitzero"`
 	Targets        module.SliceSlot[cloudprovider.PublishingTarget] `mapstructure:"targets"`
 	OCM            module.Slot[cloudprovider.OCMTarget]             `mapstructure:"ocm"`
-	State          module.Slot[task.StatePersistor]                 `mapstructure:"state"`
+	State          module.Slot[resilience.StatePersistor]           `mapstructure:"state"`
 	Flavors        []FlavorConfig                                   `mapstructure:"flavors"`
 	Aliases        map[string][]string                              `mapstructure:"aliases,omitempty"`
 }
@@ -109,7 +108,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if p.cfg.State == nil {
 		return errors.New("missing state")
 	}
-	p.state, err = module.ConfigureModule(p.base, task.Category, p.cfg.State)
+	p.state, err = module.ConfigureModule(p.base, resilience.Category, p.cfg.State)
 	if err != nil {
 		return fmt.Errorf("cannot configure state: %w", err)
 	}
@@ -146,7 +145,6 @@ func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, 
 	error,
 ) {
 	publications := make([]publication, len(p.flavors))
-	expandCommit := sync.Once{}
 	fetchManifests := concurrency.NewActivitySync(ctx)
 	for i, flavorConfig := range p.flavors {
 		fetchManifests.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
@@ -164,9 +162,6 @@ func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, 
 			if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
 				return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavorConfig.Flavor, manifest.BuildCommittish)
 			}
-			expandCommit.Do(func() {
-				commit = manifest.BuildCommittish
-			})
 
 			if p.manifestTarget != p.manifestSource {
 				log.Debug(ctx, "Retrieving target manifest")
@@ -181,7 +176,7 @@ func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, 
 						return nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavorConfig.Flavor,
 							targetManifest.Version)
 					}
-					if targetManifest.BuildCommittish != commit {
+					if targetManifest.BuildCommittish != manifest.BuildCommittish {
 						return nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavorConfig.Flavor,
 							targetManifest.BuildCommittish)
 					}
@@ -228,6 +223,16 @@ func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, 
 		return nil, nil, "", err
 	}
 
+	if len(publications) != 0 {
+		commit = publications[0].Manifest.BuildCommittish
+		for i := range publications {
+			if publications[i].Manifest.BuildCommittish != commit {
+				return nil, nil, "", fmt.Errorf("manifests for %s and %s have a different commit", publications[0].Flavor,
+					publications[i].Flavor)
+			}
+		}
+	}
+
 	groups := make(map[string][]*publication)
 	for i := range publications {
 		if publications[i].PublishingGroup == "" {
@@ -272,7 +277,7 @@ func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, 
 				for i := range pub.publications {
 					manifestKeys[i] = pub.publications[i].manifestKey()
 				}
-				if !p.equalSets(manifestKeys, pub.GroupManifest.Manifests) {
+				if !equalSets(manifestKeys, pub.GroupManifest.Manifests) {
 					return nil, fmt.Errorf("publishing group %s has incorrect members", group)
 				}
 
@@ -329,7 +334,7 @@ func (p *Publisher) selectTarget(manifest *gardenlinux.Manifest, flavor string) 
 	return target, nil
 }
 
-func (*Publisher) equalSets(a, b []string) bool {
+func equalSets(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}

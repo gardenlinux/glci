@@ -20,7 +20,6 @@ type CredsSource interface {
 
 	Type() string
 	AcquireCreds(ctx context.Context, id CredsID, updated UpdatedFunc) error
-	AcquireValidatedCreds(ctx context.Context, id CredsID, validate ValidateFunc, updated UpdatedFunc) error
 	ReleaseCreds(id CredsID)
 }
 
@@ -30,9 +29,6 @@ type CredsID struct {
 	Config string
 	Role   string
 }
-
-// ValidateFunc is a callback function that checks whether the credentials work correctly.
-type ValidateFunc func(ctx context.Context, creds map[string]any) (bool, error)
 
 // UpdatedFunc is a callback function that is invoked when credentials are updated.
 type UpdatedFunc func(ctx context.Context, creds map[string]any) error
