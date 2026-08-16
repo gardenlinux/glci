@@ -73,8 +73,6 @@ type azure struct {
 	sourceChina ArtifactSource
 
 	pubCfg              azurePublishingConfig
-	regions             []string
-	regionsChina        []string
 	enableChina         bool
 	retrier             guard.Retrier
 	storageRetrier      guard.Retrier
@@ -87,6 +85,8 @@ type azure struct {
 	clientsGenChina        atomic.Uint64
 	storageClientsGen      atomic.Uint64
 	storageClientsGenChina atomic.Uint64
+	regions                []string
+	regionsChina           []string
 }
 
 type azureClients struct {
@@ -1749,13 +1749,13 @@ func (p *azure) Start(ctx context.Context) error {
 
 func (p *azure) Stop() error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type() + "_storage",
 			Config: p.pubCfg.Config,
 			Role:   "target",
 		})
 
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",
@@ -1763,13 +1763,13 @@ func (p *azure) Stop() error {
 	}
 
 	if p.pubCfg.ConfigChina != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type() + "_storage",
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",
 		})
 
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",

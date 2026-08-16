@@ -511,7 +511,7 @@ func (p *ociTarget) Start(ctx context.Context) error {
 
 func (p *ociTarget) Stop() error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
 			Config: p.pubCfg.Config,
 			Role:   "target",
@@ -844,7 +844,7 @@ func (p *ociOCMTarget) Start(ctx context.Context) error {
 
 func (p *ociOCMTarget) Stop() error {
 	if p.ocmCfg.Config != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
 			Config: p.ocmCfg.Config,
 			Role:   "oci",

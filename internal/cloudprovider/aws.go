@@ -101,8 +101,6 @@ type awsTarget struct {
 	sourceChina ArtifactSource
 
 	pubCfg       awsPublishingConfig
-	regions      []string
-	regionsChina []string
 	enableChina  bool
 	retrier      guard.Retrier
 	retrierChina guard.Retrier
@@ -111,6 +109,8 @@ type awsTarget struct {
 	clients         awsTargetClients
 	clientsGen      atomic.Uint64
 	clientsGenChina atomic.Uint64
+	regions         []string
+	regionsChina    []string
 }
 
 type awsTargetClients struct {
@@ -424,7 +424,7 @@ func (p *awsSource) GetObjectSize(ctx context.Context, key string) (int64, error
 	if err != nil {
 		_, ok := errors.AsType[*s3types.NoSuchKey](err)
 		if ok {
-			err = KeyNotFoundError{
+			err = &KeyNotFoundError{
 				err: err,
 			}
 		}
@@ -481,7 +481,7 @@ func (s awsContentSource) Open(ctx context.Context, offset int64, identity strin
 	if err != nil {
 		_, ok := errors.AsType[*s3types.NoSuchKey](err)
 		if ok {
-			err = KeyNotFoundError{
+			err = &KeyNotFoundError{
 				err: err,
 			}
 		}
@@ -852,7 +852,12 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 		}
 
 		if status == "active" {
-			time.Sleep(statusPollInterval)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+
+			case <-time.After(statusPollInterval):
+			}
 		}
 	}
 	if status != "completed" {
@@ -991,7 +996,12 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 				return fmt.Errorf("image has state %s", state)
 			}
 
-			time.Sleep(statusPollInterval)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+
+			case <-time.After(statusPollInterval):
+			}
 		}
 	}
 
@@ -1198,7 +1208,12 @@ func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTask
 		}
 
 		if status == "active" {
-			time.Sleep(statusPollInterval)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+
+			case <-time.After(statusPollInterval):
+			}
 		}
 	}
 	if snapshot == "" {
@@ -1275,7 +1290,7 @@ func (p *awsSource) Start(ctx context.Context) error {
 
 func (p *awsSource) Stop() error {
 	if p.srcCfg.Config != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.srcCfg.Config,
 			Role:   "source",
@@ -1374,7 +1389,7 @@ func (p *awsTarget) Start(ctx context.Context) error {
 
 func (p *awsTarget) Stop() error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",
@@ -1382,7 +1397,7 @@ func (p *awsTarget) Stop() error {
 	}
 
 	if p.pubCfg.ConfigChina != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",

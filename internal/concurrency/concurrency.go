@@ -23,23 +23,23 @@ type loggedError struct {
 	err error
 }
 
-func (e loggedError) Error() string {
+func (e *loggedError) Error() string {
 	return e.err.Error()
 }
 
-func (e loggedError) Unwrap() error {
+func (e *loggedError) Unwrap() error {
 	return e.err
 }
 
 func logOnce(ctx context.Context, err error) error {
-	_, ok := errors.AsType[loggedError](err)
+	_, ok := errors.AsType[*loggedError](err)
 	if ok {
 		return err
 	}
 
 	log.Error(ctx, err)
 
-	return loggedError{
+	return &loggedError{
 		err: err,
 	}
 }

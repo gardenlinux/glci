@@ -555,7 +555,12 @@ func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error
 				return fmt.Errorf("image has status %s", status)
 			}
 
-			time.Sleep(statusPollInterval)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+
+			case <-time.After(statusPollInterval):
+			}
 		}
 	}
 
@@ -833,7 +838,7 @@ func (p *aliyun) Start(ctx context.Context) error {
 
 func (p *aliyun) Stop() error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",

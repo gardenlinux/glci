@@ -240,7 +240,7 @@ type KeyNotFoundError struct {
 	err error
 }
 
-func (e KeyNotFoundError) Error() string {
+func (e *KeyNotFoundError) Error() string {
 	return e.err.Error()
 }
 

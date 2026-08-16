@@ -19,8 +19,8 @@ type CredsSource interface {
 	module.Module
 
 	Type() string
-	AcquireCreds(ctx context.Context, id CredsID, updated UpdatedFunc) error
-	ReleaseCreds(id CredsID)
+	AcquireCreds(ctx context.Context, id CredsID, apply ApplyCredsFunc) error
+	ReleaseCreds(ctx context.Context, id CredsID)
 }
 
 // CredsID is an identifier consisting of the type of credential and the specific configuration within that type.
@@ -30,8 +30,8 @@ type CredsID struct {
 	Role   string
 }
 
-// UpdatedFunc is a callback function that is invoked when credentials are updated.
-type UpdatedFunc func(ctx context.Context, creds map[string]any) error
+// ApplyCredsFunc is a callback function that applies updated credentials.
+type ApplyCredsFunc func(ctx context.Context, creds map[string]any) error
 
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)

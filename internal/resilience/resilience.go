@@ -39,10 +39,11 @@ type StatePersistor interface {
 }
 
 type operationSet struct {
+	domainsMtx   sync.Mutex
 	domains      map[string]operationDomain
-	mtx          sync.Mutex
-	persistor    StatePersistor
 	persistorErr error
+
+	persistor StatePersistor
 }
 
 type operationDomain struct {
@@ -82,8 +83,8 @@ func WithDomain(ctx context.Context, domain string) context.Context {
 		return ctx
 	}
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	if opset.domains == nil {
 		return ctx
@@ -129,8 +130,8 @@ func BeginOperation[STATE any](ctx context.Context, id string, state STATE) cont
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
 	batch, _ := ctx.Value(ctxkBatch{}).(string)
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	if opset.domains == nil {
 		return ctx
@@ -160,8 +161,8 @@ func UpdateOperation[STATE any](ctx context.Context, update func(STATE) STATE) {
 
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	if opset.domains == nil {
 		return
@@ -199,8 +200,8 @@ func CompleteOperation(ctx context.Context) {
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
 	undead, _ := ctx.Value(ctxkUndead{}).(bool)
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	if opset.domains == nil {
 		return
@@ -237,8 +238,8 @@ func FailOperation(ctx context.Context, err error) error {
 
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	if opset.domains == nil {
 		return err
@@ -265,8 +266,8 @@ func RemoveCompletedOperations(ctx context.Context, batch string) {
 
 	domain, _ := ctx.Value(ctxkDomain{}).(string)
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	if opset.domains == nil {
 		return
@@ -310,8 +311,8 @@ func ClearState(ctx context.Context) {
 		return
 	}
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	opset.domains = nil
 	log.Debug(ctx, "Clearing state", "persistor", opset.persistor.Type())
@@ -328,8 +329,8 @@ func PersistorError(ctx context.Context) error {
 		return errors.New("missing state")
 	}
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	return opset.persistorErr
 }
@@ -376,8 +377,8 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 		domainHandlers[domain] = handler
 	}
 
-	opset.mtx.Lock()
-	defer opset.mtx.Unlock()
+	opset.domainsMtx.Lock()
+	defer opset.domainsMtx.Unlock()
 
 	if opset.persistorErr != nil {
 		return fmt.Errorf("invalid state due to persistor error: %w", opset.persistorErr)
