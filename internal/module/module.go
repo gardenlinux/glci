@@ -39,10 +39,12 @@ type Root struct {
 	self              Configurable
 	namedModules      map[string]Module
 	namedModuleSlices map[string][]Module
-	startedModules    map[Module]int
+
 	startedModulesMtx sync.Mutex
-	refs              []refEntry
-	configured        bool
+	startedModules    map[Module]int
+
+	refs       []refEntry
+	configured bool
 }
 
 type refEntry struct {

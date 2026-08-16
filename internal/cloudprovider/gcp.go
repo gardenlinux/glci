@@ -649,7 +649,12 @@ func (p *gcp) awaitOperation(ctx context.Context, operation, op string) error {
 			return nil
 		}
 
-		time.Sleep(statusPollInterval)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		case <-time.After(statusPollInterval):
+		}
 	}
 }
 
@@ -751,7 +756,7 @@ func (p *gcp) Start(ctx context.Context) error {
 
 func (p *gcp) Stop() error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",

@@ -32,7 +32,7 @@ const (
 //nolint:gochecknoglobals // Cached CRC table for content integrity checks.
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
-// RetryPolicy decides how failed operations are retried by producing a fresh RetryDecider per operation.
+// RetryPolicy decides how failed operations are retried.
 type RetryPolicy interface {
 	Begin() RetryDecider
 }
@@ -154,7 +154,7 @@ func (d *countingRetryDecider) NextRetry(_ error) (time.Duration, bool) {
 // DelegatingRetryPolicy never retries because the underlying function performs its own retries.
 type DelegatingRetryPolicy struct{}
 
-// Begin returns a decider that never retries because retries are delegated.
+// Begin starts a sequence that never retries because retries are delegated.
 func (DelegatingRetryPolicy) Begin() RetryDecider {
 	return DelegatingRetryPolicy{}
 }
@@ -199,6 +199,46 @@ func (d *generationalRetryDecider) NextRetry(_ error) (time.Duration, bool) {
 	d.currentGen = gen
 
 	return RetryBaseDelay, true
+}
+
+// ConflictError is a failure caused by an operation observeing a state different from the one it expected.
+type ConflictError struct{}
+
+func (*ConflictError) Error() string {
+	return "conflicting concurrent modification"
+}
+
+// ConflictAwarePolicy retries a ConflictError immediately and delegates every other failure to a wrapped policy.
+type ConflictAwarePolicy struct {
+	policy RetryPolicy
+}
+
+// NewConflictAwarePolicy creates a ConflictAwarePolicy that that retries conflicts and delegates other failures to the wrapped policy.
+func NewConflictAwarePolicy(policy RetryPolicy) ConflictAwarePolicy {
+	return ConflictAwarePolicy{
+		policy: policy,
+	}
+}
+
+// Begin starts a sequence that retries conflicts immediately and delegates other failures to the wrapped policy.
+func (p ConflictAwarePolicy) Begin() RetryDecider {
+	return &conflictAwareDecider{
+		decider: p.policy.Begin(),
+	}
+}
+
+type conflictAwareDecider struct {
+	decider RetryDecider
+}
+
+// NextRetry retries immediately on a ConflictError and delegates the decision to the wrapped policy otherwise.
+func (d *conflictAwareDecider) NextRetry(err error) (time.Duration, bool) {
+	_, ok := errors.AsType[*ConflictError](err)
+	if ok {
+		return RetryBaseDelay, true
+	}
+
+	return d.decider.NextRetry(err)
 }
 
 // DelegatingTimeoutPolicy never bounds an operation because the underlying function enforces its own timeouts.
@@ -261,7 +301,7 @@ type retryingReader struct {
 
 type prefixChangedError struct{}
 
-func (prefixChangedError) Error() string {
+func (*prefixChangedError) Error() string {
 	return "content changed under read"
 }
 
@@ -275,7 +315,7 @@ func (r *retryingReader) Read(p []byte) (int, error) {
 	var retry int
 	for {
 		if r.readErr != nil {
-			_, ok := errors.AsType[prefixChangedError](r.readErr)
+			_, ok := errors.AsType[*prefixChangedError](r.readErr)
 			if r.content.Identity == "" || ok {
 				return 0, fmt.Errorf("cannot read content: %w", r.readErr)
 			}
@@ -422,7 +462,7 @@ func (r *retryingReader) open(offset int64) error {
 			}
 
 			if offset == r.offset && rereadChecksum.Sum32() != r.prefixChecksum.Sum32() {
-				return prefixChangedError{}
+				return &prefixChangedError{}
 			}
 
 			r.prefixChecksum = rereadChecksum

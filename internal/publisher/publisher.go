@@ -167,7 +167,7 @@ func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, 
 				log.Debug(ctx, "Retrieving target manifest")
 				var targetManifest *gardenlinux.Manifest
 				targetManifest, er = cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
-				_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
+				_, ok := errors.AsType[*cloudprovider.KeyNotFoundError](er)
 				if er != nil && !ok {
 					return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavorConfig.Flavor, er)
 				}
@@ -267,7 +267,7 @@ func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, 
 			log.Debug(ctx, "Retrieving group manifest")
 			var er error
 			pub.GroupManifest, er = cloudprovider.GetGroupManifest(ctx, p.manifestTarget, pub.manifestKey())
-			_, ok := errors.AsType[cloudprovider.KeyNotFoundError](er)
+			_, ok := errors.AsType[*cloudprovider.KeyNotFoundError](er)
 			if er != nil && !ok {
 				return nil, fmt.Errorf("cannot get group manifest for %s: %w", group, er)
 			}

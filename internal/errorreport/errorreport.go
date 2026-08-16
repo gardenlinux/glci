@@ -13,9 +13,9 @@ type RenderedError struct {
 }
 
 // Render walks an error tree, rendering it as an indented representation and collecting any critical errors within.
-func Render(err error) RenderedError {
+func Render(err error) *RenderedError {
 	if err == nil {
-		return RenderedError{}
+		return &RenderedError{}
 	}
 
 	var lines []string
@@ -42,7 +42,7 @@ func Render(err error) RenderedError {
 		return nil
 	})
 
-	return RenderedError{
+	return &RenderedError{
 		err:            strings.Join(lines, "\n"),
 		CriticalErrors: criticalErrors,
 	}
@@ -71,7 +71,7 @@ func resolveEntry(outerErr error, depth int) renderEntry {
 
 	err := outerErr
 	for {
-		criticalErr, ok := err.(criticalError) //nolint:errorlint // Intentional exact error assertion.
+		criticalErr, ok := err.(*criticalError) //nolint:errorlint // Intentional exact error assertion.
 		if ok {
 			entry.criticalErrors = append(entry.criticalErrors, criticalErr.Unwrap())
 		}
@@ -119,12 +119,12 @@ func linePrefix(depth int) string {
 	return strings.Repeat("  ", depth-1) + "- "
 }
 
-func (e RenderedError) Error() string {
+func (e *RenderedError) Error() string {
 	return e.err
 }
 
 // Banner renders the critical errors into a prominent block, or an empty string if there are none.
-func (e RenderedError) Banner() string {
+func (e *RenderedError) Banner() string {
 	if len(e.CriticalErrors) == 0 {
 		return ""
 	}
@@ -173,15 +173,15 @@ func MarkCritical(err error) error {
 		return nil
 	}
 
-	return criticalError{
+	return &criticalError{
 		err: err,
 	}
 }
 
-func (e criticalError) Error() string {
+func (e *criticalError) Error() string {
 	return e.err.Error()
 }
 
-func (e criticalError) Unwrap() error {
+func (e *criticalError) Unwrap() error {
 	return e.err
 }

@@ -441,7 +441,12 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 				return fmt.Errorf("image %s in region %s has status %s", imageID, region, status)
 			}
 
-			time.Sleep(statusPollInterval)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+
+			case <-time.After(statusPollInterval):
+			}
 		}
 	}
 
@@ -640,7 +645,7 @@ func (p *openstack) Start(ctx context.Context) error {
 
 func (p *openstack) Stop() error {
 	for _, config := range p.pubCfg.Configs {
-		p.credsSource.ReleaseCreds(credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: config.Config,
 			Role:   "target",
