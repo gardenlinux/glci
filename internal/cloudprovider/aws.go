@@ -18,6 +18,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -360,6 +361,29 @@ func (*awsTarget) ImageSuffix() string {
 	return ".raw"
 }
 
+func (p *awsTarget) Replications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
+		return nil, nil
+	}
+	if manifest.Platform != "aws" {
+		return nil, nil
+	}
+	if manifest.SecureBoot {
+		return nil, nil
+	}
+
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	if err != nil {
+		return nil, fmt.Errorf("missing image: %w", err)
+	}
+
+	return []Replication{{
+		Origin:      p.source,
+		Destination: p.sourceChina,
+		Key:         imagePath.S3Key,
+	}}, nil
+}
+
 func (*awsTarget) imageName(flavor, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
@@ -526,6 +550,40 @@ func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader)
 	})
 	if err != nil {
 		return fmt.Errorf("cannot put object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
+	}
+
+	return nil
+}
+
+// UploadObject uploads a potentially large binary artifact under key. Unlike PutObject, which is specialized for small text
+// manifests, it sets no manifest-specific content type and uses the S3 transfer manager to upload in parts so that a failed part
+// is retried without restarting the whole transfer.
+func (p *awsSource) UploadObject(ctx context.Context, key string, object io.Reader) error {
+	if p.s3Client() == nil {
+		return errors.New("config not set")
+	}
+	ctx = log.WithValues(ctx, "source", p.Type())
+
+	log.Debug(ctx, "Uploading object", "bucket", p.srcCfg.Bucket, "key", key)
+	err := p.retrier.Do(ctx, "upload object", func(ctx context.Context) error {
+		seeker, ok := object.(io.Seeker)
+		if ok {
+			_, seekErr := seeker.Seek(0, io.SeekStart)
+			if seekErr != nil {
+				return fmt.Errorf("cannot rewind object: %w", seekErr)
+			}
+		}
+
+		uploader := transfermanager.New(p.s3Client())
+		_, inErr := uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
+			Bucket: &p.srcCfg.Bucket,
+			Key:    &key,
+			Body:   object,
+		})
+		return inErr
+	})
+	if err != nil {
+		return fmt.Errorf("cannot upload object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
 	}
 
 	return nil

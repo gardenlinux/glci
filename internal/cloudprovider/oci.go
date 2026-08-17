@@ -67,6 +67,8 @@ func (*ociTarget) Type() string {
 }
 
 type ociTarget struct {
+	nonReplicatingTarget
+
 	base *module.Base
 
 	credsSource credsprovider.CredsSource

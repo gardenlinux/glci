@@ -485,6 +485,26 @@ func (*azure) ImageSuffix() string {
 	return ".vhd"
 }
 
+func (p *azure) Replications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
+		return nil, nil
+	}
+	if manifest.Platform != "azure" {
+		return nil, nil
+	}
+
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	if err != nil {
+		return nil, fmt.Errorf("missing image: %w", err)
+	}
+
+	return []Replication{{
+		Origin:      p.source,
+		Destination: p.sourceChina,
+		Key:         imagePath.S3Key,
+	}}, nil
+}
+
 func (*azure) imageName(flavor, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }

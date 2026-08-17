@@ -47,6 +47,30 @@ type ArtifactSource interface {
 	GetObjectSize(ctx context.Context, key string) (int64, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, object io.Reader) error
+	UploadObject(ctx context.Context, key string, object io.Reader) error
+}
+
+// ReplicateArtifact copies an artifact object under key from one artifact source to another.
+func ReplicateArtifact(ctx context.Context, origin, destination ArtifactSource, key string) error {
+	body, err := origin.GetObject(ctx, key)
+	if err != nil {
+		return fmt.Errorf("cannot get object %s: %w", key, err)
+	}
+	defer func() {
+		_ = body.Close()
+	}()
+
+	err = destination.UploadObject(ctx, key, body)
+	if err != nil {
+		return err
+	}
+
+	err = body.Close()
+	if err != nil {
+		return fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return nil
 }
 
 // GetManifest retrieves a manifest from an artifact source.
@@ -183,7 +207,15 @@ type PublishingTarget interface {
 	CanFuse() bool
 	Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error)
 	Unfuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest, steamroll bool) error
+	Replications(manifest *gardenlinux.Manifest) ([]Replication, error)
 	resilience.RollbackHandler
+}
+
+// Replication is a single artifact object that a target needs copied from one artifact source to another before it can publish.
+type Replication struct {
+	Origin      ArtifactSource
+	Destination ArtifactSource
+	Key         string
 }
 
 // PublishingOutput is an opaque representation of the result of a publishing operation.
@@ -279,6 +311,12 @@ func (nonFusableTarget) Fuse(_ context.Context, _ []gardenlinux.FlavorManifest) 
 
 func (nonFusableTarget) Unfuse(_ context.Context, _ []gardenlinux.FlavorManifest, _ bool) error {
 	return errors.New("target cannot unfuse")
+}
+
+type nonReplicatingTarget struct{}
+
+func (nonReplicatingTarget) Replications(_ *gardenlinux.Manifest) ([]Replication, error) {
+	return nil, nil
 }
 
 func platform(flavor string) string {

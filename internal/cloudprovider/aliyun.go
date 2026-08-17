@@ -54,6 +54,7 @@ func (*aliyun) Type() string {
 
 type aliyun struct {
 	nonFusableTarget
+	nonReplicatingTarget
 
 	base *module.Base
 

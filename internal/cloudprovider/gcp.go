@@ -60,6 +60,7 @@ func (*gcp) Type() string {
 
 type gcp struct {
 	nonFusableTarget
+	nonReplicatingTarget
 
 	base *module.Base
 

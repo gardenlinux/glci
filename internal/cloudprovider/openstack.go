@@ -195,6 +195,50 @@ func (*openstack) ImageSuffix() string {
 	return ".vmdk"
 }
 
+func (p *openstack) replicatesPlatform(manifest *gardenlinux.Manifest) bool {
+	if manifest.Platform != "openstack" && manifest.Platform != "openstackbaremetal" {
+		return false
+	}
+
+	_, err := p.variant(manifest.Platform, manifest.PlatformVariant)
+	return err == nil
+}
+
+func (p *openstack) replicatesChina() bool {
+	for _, config := range p.pubCfg.Configs {
+		for _, region := range config.Regions {
+			if strings.HasPrefix(region, "ap-cn-") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func (p *openstack) Replications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if p.sourceChina == nil || p.sourceChina == p.source {
+		return nil, nil
+	}
+	if !p.replicatesPlatform(manifest) {
+		return nil, nil
+	}
+	if !p.replicatesChina() {
+		return nil, nil
+	}
+
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	if err != nil {
+		return nil, fmt.Errorf("missing image: %w", err)
+	}
+
+	return []Replication{{
+		Origin:      p.source,
+		Destination: p.sourceChina,
+		Key:         imagePath.S3Key,
+	}}, nil
+}
+
 func (p *openstack) imageName(flavor, version, committish string) string {
 	if p.pubCfg.Test {
 		flavor += "-test"

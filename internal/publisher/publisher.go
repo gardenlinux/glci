@@ -141,6 +141,16 @@ func (p *Publisher) Configurables() []module.Configurable {
 	return configurables
 }
 
+// ReplicationSources returns the artifact sources that must be started to replicate artifacts, so that replication need not start
+// any cloud publishing targets.
+func (p *Publisher) ReplicationSources() []module.Configurable {
+	sources := make([]module.Configurable, len(p.sources))
+	for i := range p.sources {
+		sources[i] = p.sources[i]
+	}
+	return sources
+}
+
 func (p *Publisher) fetchManifests(ctx context.Context, version, commit string, steamroll bool) ([]publication, []groupPublication, string,
 	error,
 ) {
