@@ -18,7 +18,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.45.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.37
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.1
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.321.2
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.325.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.109.1
 	github.com/aws/smithy-go v1.28.1
 	github.com/go-logr/logr v1.4.4
