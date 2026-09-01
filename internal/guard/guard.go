@@ -257,6 +257,23 @@ func (BoundedTimeoutPolicy) Timeout() time.Duration {
 	return Timeout
 }
 
+// CustomTimeoutPolicy bounds every operation by a given fixed timeout.
+type CustomTimeoutPolicy struct {
+	timeout time.Duration
+}
+
+// NewCustomTimeoutPolicy creates a CustomTimeoutPolicy that bounds every operation by the given timeout.
+func NewCustomTimeoutPolicy(timeout time.Duration) CustomTimeoutPolicy {
+	return CustomTimeoutPolicy{
+		timeout: timeout,
+	}
+}
+
+// Timeout bounds an operation by the given timeout.
+func (p CustomTimeoutPolicy) Timeout() time.Duration {
+	return p.timeout
+}
+
 // ContentSource is a source that Content can be opened from.
 type ContentSource interface {
 	Open(ctx context.Context, offset int64, identity string) (Content, error)
