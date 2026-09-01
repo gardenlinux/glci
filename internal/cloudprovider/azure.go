@@ -344,6 +344,8 @@ func (*azure) prepareClients(creds azureCredentials, china bool) (*armsubscripti
 func (*azure) listRegions(ctx context.Context, subscriptionsClient *armsubscriptions.Client, subscriptionID string) ([]string, error) {
 	unusableRegions := []string{
 		"jioindiacentral",
+		"chinaeast",
+		"chinanorth",
 	}
 
 	log.Debug(ctx, "Listing available locations")
