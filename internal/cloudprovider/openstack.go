@@ -32,8 +32,9 @@ func init() {
 
 	module.RegisterImpl(PublishingTargetCategory, "OpenStack", func(b *module.Base) PublishingTarget {
 		return &openstack{
-			base:    b,
-			retrier: guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
+			base:         b,
+			retrier:      guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
+			imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(time.Minute*21)),
 		}
 	})
 }
@@ -51,8 +52,9 @@ type openstack struct {
 	source      ArtifactSource
 	sourceChina ArtifactSource
 
-	pubCfg  openstackPublishingConfig
-	retrier guard.Retrier
+	pubCfg       openstackPublishingConfig
+	retrier      guard.Retrier
+	imageRetrier guard.Retrier
 
 	clientsMtx      sync.RWMutex
 	clients         openstackClients
@@ -423,34 +425,36 @@ func (p *openstack) createImage(ctx context.Context, region string, source Artif
 }
 
 func (p *openstack) waitForImage(ctx context.Context, imageID, region string) error {
-	var status images.ImageStatus
-	for status != images.ImageStatusActive {
-		var img *images.Image
-		err := p.retrier.Do(ctx, "get image", func(ctx context.Context) error {
-			var inErr error
-			img, inErr = images.Get(ctx, p.imagesClient(region), imageID).Extract()
-			return inErr
-		})
-		if err != nil {
-			return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, err)
-		}
-		status = img.Status
-
-		if status != images.ImageStatusActive {
-			if status != images.ImageStatusQueued && status != images.ImageStatusSaving && status != images.ImageStatusImporting {
-				return fmt.Errorf("image %s in region %s has status %s", imageID, region, status)
+	return p.imageRetrier.Do(ctx, "wait for image", func(ctx context.Context) error {
+		var status images.ImageStatus
+		for status != images.ImageStatusActive {
+			var img *images.Image
+			inErr := p.retrier.Do(ctx, "get image", func(ctx context.Context) error {
+				var inErr error
+				img, inErr = images.Get(ctx, p.imagesClient(region), imageID).Extract()
+				return inErr
+			})
+			if inErr != nil {
+				return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, inErr)
 			}
+			status = img.Status
 
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			if status != images.ImageStatusActive {
+				if status != images.ImageStatusQueued && status != images.ImageStatusSaving && status != images.ImageStatusImporting {
+					return fmt.Errorf("image %s in region %s has status %s", imageID, region, status)
+				}
 
-			case <-time.After(statusPollInterval):
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+
+				case <-time.After(statusPollInterval):
+				}
 			}
 		}
-	}
 
-	return nil
+		return nil
+	})
 }
 
 func (*openstack) CanUnpublish() bool {
