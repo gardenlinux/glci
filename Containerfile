@@ -1,23 +1,6 @@
 FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.6 AS builder
 ARG TARGETARCH
 
-RUN export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && \
-    apt-get --no-install-suggests --no-install-recommends -o Dpkg::Options::="--force-confnew" --allow-downgrades --allow-remove-essential \
-    --allow-change-held-packages -fuy install \
-    \
-    ca-certificates \
-    curl \
-    lsb-release \
-    \
-    && \
-    curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
-    printf "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
-    apt-get update && \
-    apt-get install vault && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
 WORKDIR /glci
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -41,7 +24,6 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-COPY --from=builder /usr/bin/vault /usr/bin/vault
 
 ENTRYPOINT ["/glci"]
 COPY --from=builder /glci/glci .

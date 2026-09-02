@@ -68,10 +68,16 @@ type vault struct {
 type vaultConfig struct {
 	Server    string `mapstructure:"server"`
 	Namespace string `mapstructure:"namespace,omitzero"`
-	Token     string `mapstructure:"token"`
+
+	Token     string `mapstructure:"token,omitzero"`
 	TokenFile string `mapstructure:"token_file,omitzero"`
-	RoleID    string `mapstructure:"role_id,omitzero"`
-	SecretID  string `mapstructure:"secret_id,omitzero"`
+
+	RoleID   string `mapstructure:"role_id,omitzero"`
+	SecretID string `mapstructure:"secret_id,omitzero"`
+
+	JWT          string `mapstructure:"jwt,omitzero"`
+	JWTMountPath string `mapstructure:"jwt_mount_path,omitzero"`
+	JWTRole      string `mapstructure:"jwt_role,omitzero"`
 }
 
 type vaultCreds struct {
@@ -429,6 +435,34 @@ func (p *vault) login(ctx context.Context) error {
 			return fmt.Errorf("cannot login using AppRole: %w", err)
 		}
 
+		p.ownToken = true
+
+		return nil
+
+	case p.credsCfg.JWT != "" && p.credsCfg.JWTMountPath != "" && p.credsCfg.JWTRole != "":
+		log.Debug(ctx, "Using JWT")
+		jwt := strings.TrimSpace(p.credsCfg.JWT)
+		if jwt == "" {
+			return errors.New("empty JWT")
+		}
+
+		err := p.retrier.Do(ctx, "log in", func(ctx context.Context) error {
+			var inErr error
+			mountPath := fmt.Sprintf("auth/%s/login", p.credsCfg.JWTMountPath)
+			p.vaultSecret, inErr = p.vaultClient.Logical().WriteWithContext(ctx, mountPath, map[string]any{
+				"role": p.credsCfg.JWTRole,
+				"jwt":  jwt,
+			})
+			return inErr
+		})
+		if err != nil {
+			return fmt.Errorf("cannot login using JWT: %w", err)
+		}
+		if p.vaultSecret == nil || p.vaultSecret.Auth == nil {
+			return errors.New("cannot login using JWT: missing authentication information")
+		}
+
+		p.vaultClient.SetToken(p.vaultSecret.Auth.ClientToken)
 		p.ownToken = true
 
 		return nil

@@ -58,6 +58,9 @@ publishing:
     token_file:
     role_id:
     secret_id:
+    jwt:
+    jwt_mount_path: jwt-ghtools
+    jwt_role: prod-glci
   manifest_source: S3
   sources:
   - id: S3
