@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.6 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.1 AS builder
 ARG TARGETARCH
 
 WORKDIR /glci
