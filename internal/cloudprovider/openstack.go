@@ -70,9 +70,9 @@ type openstackPublishingConfig struct {
 }
 
 type openstackPublishingConfigConfig struct {
-	Config   string   `mapstructure:"config"`
-	Domain   string   `mapstructure:"domain"`
-	Regions  []string `mapstructure:"regions"`
+	Config  string   `mapstructure:"config"`
+	Domain  string   `mapstructure:"domain"`
+	Regions []string `mapstructure:"regions"`
 }
 
 type openstackVariant string
