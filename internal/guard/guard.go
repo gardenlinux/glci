@@ -27,6 +27,8 @@ const (
 	Timeout = time.Second * 49
 
 	retryJitter = time.Second * 3
+
+	generationalRetries = 2
 )
 
 //nolint:gochecknoglobals // Cached CRC table for content integrity checks.
@@ -187,6 +189,7 @@ func (p GenerationalRetryPolicy) Begin() RetryDecider {
 type generationalRetryDecider struct {
 	generation func() uint64
 	currentGen uint64
+	retry      int
 }
 
 // NextRetry retries immediately if the generation has advanced since the last attempt, otherwise declines.
@@ -197,6 +200,11 @@ func (d *generationalRetryDecider) NextRetry(_ error) (time.Duration, bool) {
 	}
 
 	d.currentGen = gen
+
+	d.retry++
+	if d.retry > generationalRetries {
+		return 0, false
+	}
 
 	return RetryBaseDelay, true
 }
