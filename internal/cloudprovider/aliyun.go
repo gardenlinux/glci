@@ -54,6 +54,7 @@ func (*aliyun) Type() string {
 
 type aliyun struct {
 	nonFusableTarget
+	noReplicationsTarget
 
 	base *module.Base
 
@@ -242,11 +243,7 @@ func (*aliyun) imageName(flavor, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
 
-func (p *aliyun) CanPublish(manifest *gardenlinux.Manifest) bool {
-	if !p.isConfigured() {
-		return false
-	}
-
+func (*aliyun) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "ali"
 }
 
@@ -282,7 +279,7 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
 	region := p.pubCfg.Region
-	ctx = log.WithValues(ctx, "image", image, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
+	ctx = log.WithValues(ctx, "image", image, "source", p.pubCfg.Source)
 
 	ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+region, &aliyunOperationState{
 		Region: region,
@@ -311,7 +308,7 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 		publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
 			localID := imageID
-			var er error
+			var inErr error
 
 			if toRegion == region {
 				ctx = log.WithValues(ctx, "imageID", localID)
@@ -319,22 +316,24 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 				ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+toRegion, &aliyunOperationState{
 					Region: toRegion,
 				})
-				localID, er = p.copyImage(ctx, image, imageID, region, toRegion)
-				if er != nil {
+				localID, inErr = p.copyImage(ctx, image, imageID, region, toRegion)
+				if inErr != nil {
 					return nil, resilience.FailOperation(ctx,
-						fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, er))
+						fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, inErr))
 				}
 				ctx = log.WithValues(ctx, "imageID", localID)
 
-				er = p.waitForImage(ctx, localID, toRegion)
-				if er != nil {
-					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
+				inErr = p.waitForImage(ctx, localID, toRegion)
+				if inErr != nil {
+					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion,
+						inErr))
 				}
 			}
 
-			er = p.makePublic(ctx, localID, toRegion, true, false)
-			if er != nil {
-				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion, er))
+			inErr = p.makePublic(ctx, localID, toRegion, true, false)
+			if inErr != nil {
+				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot make image %s in region %s public: %w", image, toRegion,
+					inErr))
 			}
 			resilience.CompleteOperation(ctx)
 
@@ -634,9 +633,9 @@ func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, 
 		removeImages.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "image", img.ID, "region", img.Region)
 
-			er := p.unpublishAndDeleteImage(ctx, img.ID, img.Region, steamroll)
-			if er != nil {
-				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, er)
+			inErr := p.unpublishAndDeleteImage(ctx, img.ID, img.Region, steamroll)
+			if inErr != nil {
+				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, inErr)
 			}
 
 			return nil
@@ -751,9 +750,9 @@ func (p *aliyun) Rollback(ctx context.Context, operations map[string]resilience.
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "region", state.Region, "blob", state.Blob)
 
-				er := p.deleteBlob(ctx, state.Blob, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				inErr := p.deleteBlob(ctx, state.Blob, true)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, inErr)
 				}
 
 				return nil
@@ -765,15 +764,15 @@ func (p *aliyun) Rollback(ctx context.Context, operations map[string]resilience.
 				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
 
 				if state.Public {
-					er := p.makePublic(ctx, state.Image, state.Region, false, true)
-					if er != nil {
-						return fmt.Errorf("cannot make image %s in region %s not public: %w", state.Image, state.Region, er)
+					inErr := p.makePublic(ctx, state.Image, state.Region, false, true)
+					if inErr != nil {
+						return fmt.Errorf("cannot make image %s in region %s not public: %w", state.Image, state.Region, inErr)
 					}
 				}
 
-				er := p.deleteImage(ctx, state.Image, state.Region, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
+				inErr := p.deleteImage(ctx, state.Image, state.Region, true)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, inErr)
 				}
 
 				return nil
@@ -836,9 +835,9 @@ func (p *aliyun) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *aliyun) Stop() error {
+func (p *aliyun) Stop(ctx context.Context) error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",

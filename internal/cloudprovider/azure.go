@@ -487,6 +487,26 @@ func (*azure) ImageSuffix() string {
 	return ".vhd"
 }
 
+func (p *azure) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
+		return nil, nil
+	}
+
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	if err != nil {
+		return nil, err
+	}
+
+	return []Replication{{
+		Origin:        p.source,
+		OriginID:      p.pubCfg.Source,
+		Destination:   p.sourceChina,
+		DestinationID: p.pubCfg.SourceChina,
+		Key:           imagePath.S3Key,
+		SHA256:        imagePath.SHA256Sum,
+	}}, nil
+}
+
 func (*azure) imageName(flavor, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
@@ -518,11 +538,7 @@ func (*azure) sku(base, flavor string, bios bool) string {
 	return fmt.Sprintf("%s-%s", base, suffix)
 }
 
-func (p *azure) CanPublish(manifest *gardenlinux.Manifest) bool {
-	if !p.isConfigured() {
-		return false
-	}
-
+func (*azure) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "azure"
 }
 
@@ -552,9 +568,9 @@ func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinu
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	ctx = log.WithValues(ctx, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
+	ctx = log.WithValues(ctx, "source", p.pubCfg.Source)
 	if p.pubCfg.SourceChina != "" {
-		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
+		ctx = log.WithValues(ctx, "sourceChina", p.pubCfg.SourceChina)
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
@@ -590,9 +606,9 @@ func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinu
 	publish.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
-		images, er := p.publish(ctx, flavor, p.source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
-		if er != nil {
-			return nil, er
+		images, inErr := p.publish(ctx, flavor, p.source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db, false)
+		if inErr != nil {
+			return nil, inErr
 		}
 		return func() error {
 			outputImages = append(outputImages, images...)
@@ -610,10 +626,10 @@ func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinu
 				source = p.source
 			}
 
-			images, er := p.publish(ctx, flavor, source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db,
+			images, inErr := p.publish(ctx, flavor, source, imagePath.S3Key, image, imageVersion, arch, bios, secureBoot, pk, kek, db,
 				true)
-			if er != nil {
-				return nil, er
+			if inErr != nil {
+				return nil, inErr
 			}
 
 			return func() error {
@@ -662,10 +678,10 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 		createBlobAndImage.Go(func(_ context.Context) error {
 			imageDefinitionBIOS = p.sku(p.pubCfg.ImagePrefix, flavor, true)
 
-			er := p.createImageDefinition(bctx, imageDefinitionBIOS, flavor, arch, true, false, china)
-			if er != nil {
+			inErr := p.createImageDefinition(bctx, imageDefinitionBIOS, flavor, arch, true, false, china)
+			if inErr != nil {
 				return resilience.FailOperation(bctx,
-					fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinitionBIOS, image, er))
+					fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinitionBIOS, image, inErr))
 			}
 
 			return nil
@@ -673,10 +689,10 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 	}
 
 	createBlobAndImage.Go(func(ctx context.Context) error {
-		er := p.createImageDefinition(ctx, imageDefinition, flavor, arch, false, secureBoot, china)
-		if er != nil {
+		inErr := p.createImageDefinition(ctx, imageDefinition, flavor, arch, false, secureBoot, china)
+		if inErr != nil {
 			return resilience.FailOperation(ctx,
-				fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinition, image, er))
+				fmt.Errorf("cannot create image definition %s for image %s: %w", imageDefinition, image, inErr))
 		}
 
 		return nil
@@ -684,10 +700,10 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 
 	var blob, blobURL string
 	createBlobAndImage.Go(func(ctx context.Context) error {
-		var er error
-		blob, blobURL, er = p.importBlob(ctx, source, key, image, china)
-		if er != nil {
-			return resilience.FailOperation(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, er))
+		var inErr error
+		blob, blobURL, inErr = p.importBlob(ctx, source, key, image, china)
+		if inErr != nil {
+			return resilience.FailOperation(ctx, fmt.Errorf("cannot upload blob for image %s: %w", image, inErr))
 		}
 
 		return nil
@@ -706,25 +722,25 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 	if bios {
 		blobUsed.Add(1)
 		createImageVersion.Go(func(_ context.Context) (concurrency.ResultSyncFunc, error) {
-			imageID, er := func() (string, error) {
+			imageID, inErr := func() (string, error) {
 				defer blobUsed.Done()
 				return p.createImage(bctx, blobURL, image, true, china)
 			}()
-			if er != nil {
-				return nil, resilience.FailOperation(bctx, fmt.Errorf("cannot create image %s: %w", image, er))
+			if inErr != nil {
+				return nil, resilience.FailOperation(bctx, fmt.Errorf("cannot create image %s: %w", image, inErr))
 			}
 
-			er = p.createImageVersion(bctx, imageDefinitionBIOS, imageVersion, imageID, false, "", "", "", china)
-			if er != nil {
+			inErr = p.createImageVersion(bctx, imageDefinitionBIOS, imageVersion, imageID, false, "", "", "", china)
+			if inErr != nil {
 				return nil, resilience.FailOperation(bctx,
-					fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, er))
+					fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, inErr))
 			}
 
 			var publicID string
-			publicID, er = p.getPublicID(bctx, imageDefinitionBIOS, imageVersion, china)
-			if er != nil {
+			publicID, inErr = p.getPublicID(bctx, imageDefinitionBIOS, imageVersion, china)
+			if inErr != nil {
 				return nil, resilience.FailOperation(bctx,
-					fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, er))
+					fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, inErr))
 			}
 			resilience.CompleteOperation(bctx)
 
@@ -741,24 +757,24 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 	}
 
 	createImageVersion.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
-		imageID, er := func() (string, error) {
+		imageID, inErr := func() (string, error) {
 			defer blobUsed.Done()
 			return p.createImage(ctx, blobURL, image, false, china)
 		}()
-		if er != nil {
-			return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot create image %s: %w", image, er))
+		if inErr != nil {
+			return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot create image %s: %w", image, inErr))
 		}
 
-		er = p.createImageVersion(ctx, imageDefinition, imageVersion, imageID, secureBoot, pk, kek, db, china)
-		if er != nil {
+		inErr = p.createImageVersion(ctx, imageDefinition, imageVersion, imageID, secureBoot, pk, kek, db, china)
+		if inErr != nil {
 			return nil, resilience.FailOperation(ctx,
-				fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, er))
+				fmt.Errorf("cannot create image version %s for image %s: %w", imageVersion, image, inErr))
 		}
 
 		var publicID string
-		publicID, er = p.getPublicID(ctx, imageDefinition, imageVersion, china)
-		if er != nil {
-			return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, er))
+		publicID, inErr = p.getPublicID(ctx, imageDefinition, imageVersion, china)
+		if inErr != nil {
+			return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot get public ID of %s for image %s: %w", imageVersion, image, inErr))
 		}
 
 		return func() error {
@@ -775,9 +791,9 @@ func (p *azure) publish(ctx context.Context, flavor string, source ArtifactSourc
 	createImageVersion.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 		blobUsed.Wait()
 
-		er := p.deleteBlob(ctx, blob, false, china)
-		if er != nil {
-			return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot delete blob %s for image %s: %w", blob, image, er))
+		inErr := p.deleteBlob(ctx, blob, false, china)
+		if inErr != nil {
+			return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot delete blob %s for image %s: %w", blob, image, inErr))
 		}
 
 		return nil, nil
@@ -802,15 +818,15 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 		fetchCertificates := concurrency.NewActivity(ctx)
 
 		fetchCertificates.Go(func(ctx context.Context) error {
-			pkFile, er := manifest.PathBySuffix(".secureboot.pk.der")
-			if er != nil {
-				return fmt.Errorf("missing secureboot PK: %w", er)
+			pkFile, inErr := manifest.PathBySuffix(".secureboot.pk.der")
+			if inErr != nil {
+				return fmt.Errorf("missing secureboot PK: %w", inErr)
 			}
 
 			var rawPK []byte
-			rawPK, er = getObjectBytes(ctx, source, pkFile.S3Key)
-			if er != nil {
-				return fmt.Errorf("cannot get PK: %w", er)
+			rawPK, inErr = getObjectBytes(ctx, source, pkFile.S3Key)
+			if inErr != nil {
+				return fmt.Errorf("cannot get PK: %w", inErr)
 			}
 			pk = base64.StdEncoding.EncodeToString(rawPK)
 
@@ -818,15 +834,15 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 		})
 
 		fetchCertificates.Go(func(ctx context.Context) error {
-			kekFile, er := manifest.PathBySuffix(".secureboot.kek.der")
-			if er != nil {
-				return fmt.Errorf("missing KEK: %w", er)
+			kekFile, inErr := manifest.PathBySuffix(".secureboot.kek.der")
+			if inErr != nil {
+				return fmt.Errorf("missing KEK: %w", inErr)
 			}
 
 			var rawKEK []byte
-			rawKEK, er = getObjectBytes(ctx, source, kekFile.S3Key)
-			if er != nil {
-				return fmt.Errorf("cannot get KEK: %w", er)
+			rawKEK, inErr = getObjectBytes(ctx, source, kekFile.S3Key)
+			if inErr != nil {
+				return fmt.Errorf("cannot get KEK: %w", inErr)
 			}
 			kek = base64.StdEncoding.EncodeToString(rawKEK)
 
@@ -834,15 +850,15 @@ func (*azure) prepareSecureBoot(ctx context.Context, source ArtifactSource, mani
 		})
 
 		fetchCertificates.Go(func(ctx context.Context) error {
-			dbFile, er := manifest.PathBySuffix(".secureboot.db.der")
-			if er != nil {
-				return fmt.Errorf("missing DB: %w", er)
+			dbFile, inErr := manifest.PathBySuffix(".secureboot.db.der")
+			if inErr != nil {
+				return fmt.Errorf("missing DB: %w", inErr)
 			}
 
 			var rawDB []byte
-			rawDB, er = getObjectBytes(ctx, source, dbFile.S3Key)
-			if er != nil {
-				return fmt.Errorf("cannot get DB: %w", er)
+			rawDB, inErr = getObjectBytes(ctx, source, dbFile.S3Key)
+			if inErr != nil {
+				return fmt.Errorf("cannot get DB: %w", inErr)
 			}
 			db = base64.StdEncoding.EncodeToString(rawDB)
 
@@ -971,11 +987,11 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, flav
 
 func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, image string, china bool) (string, string, error) {
 	blob := image + p.ImageSuffix()
-	size, err := source.GetObjectSize(ctx, key)
+	properties, err := source.GetObjectProperties(ctx, key)
 	if err != nil {
-		return "", "", fmt.Errorf("cannot get object size: %w", err)
+		return "", "", fmt.Errorf("cannot get object properties: %w", err)
 	}
-	ctx = log.WithValues(ctx, "key", key, "container", p.pubCfg.StorageContainer, "blob", blob, "size", size)
+	ctx = log.WithValues(ctx, "key", key, "container", p.pubCfg.StorageContainer, "blob", blob, "size", properties.Size)
 
 	log.Info(ctx, "Uploading blob")
 	var url string
@@ -985,7 +1001,7 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 	}
 
 	err = p.storageGetRetrier(china).Do(ctx, "create blob", func(ctx context.Context) error {
-		_, inErr := p.pageBlobClient(blob, china).Create(ctx, size, nil)
+		_, inErr := p.pageBlobClient(blob, china).Create(ctx, properties.Size, nil)
 		return inErr
 	})
 	if err != nil {
@@ -996,8 +1012,8 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 		return s
 	})
 	var offset int64
-	for offset < size {
-		block := min(size-offset, 4*1024*1024)
+	for offset < properties.Size {
+		block := min(properties.Size-offset, 4*1024*1024)
 		err = p.storageGetRetrier(china).Do(ctx, "upload blob pages", func(ctx context.Context) error {
 			_, inErr := p.pageBlobClient(blob, china).UploadPagesFromURL(ctx, url, offset, offset, block, nil)
 			return inErr
@@ -1308,30 +1324,30 @@ func (p *azure) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, s
 
 			china := img.Cloud == "china"
 
-			imageDefinition, image, imageVersion, er := p.getMetadata(ctx, img.ID, china)
-			if er != nil {
-				ter, ok := errors.AsType[*azcore.ResponseError](er)
+			imageDefinition, image, imageVersion, inErr := p.getMetadata(ctx, img.ID, china)
+			if inErr != nil {
+				ter, ok := errors.AsType[*azcore.ResponseError](inErr)
 				if steamroll && ok && ter.StatusCode == http.StatusNotFound {
 					log.Debug(ctx, "Image not found but the steamroller keeps going")
 					return nil
 				}
-				return fmt.Errorf("cannot get metadata: %w", er)
+				return fmt.Errorf("cannot get metadata: %w", inErr)
 			}
 			ctx = log.WithValues(ctx, "imageDefinition", imageDefinition, "imageVersion", imageVersion, "image", image)
 
-			er = p.deleteImageVersion(ctx, imageDefinition, imageVersion, steamroll, china)
-			if er != nil {
-				return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, er)
+			inErr = p.deleteImageVersion(ctx, imageDefinition, imageVersion, steamroll, china)
+			if inErr != nil {
+				return fmt.Errorf("cannot delete image version %s for image definition %s: %w", imageVersion, imageDefinition, inErr)
 			}
 
-			er = p.deleteImage(ctx, image, steamroll, china)
-			if er != nil {
-				return fmt.Errorf("cannot delete image %s: %w", image, er)
+			inErr = p.deleteImage(ctx, image, steamroll, china)
+			if inErr != nil {
+				return fmt.Errorf("cannot delete image %s: %w", image, inErr)
 			}
 
-			er = p.deleteEmptyImageDefinition(ctx, imageDefinition, china)
-			if er != nil {
-				return fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, er)
+			inErr = p.deleteEmptyImageDefinition(ctx, imageDefinition, china)
+			if inErr != nil {
+				return fmt.Errorf("cannot delete image definition %s: %w", imageDefinition, inErr)
 			}
 
 			return nil
@@ -1579,9 +1595,9 @@ func (p *azure) Rollback(ctx context.Context, operations map[string]resilience.O
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "blob", state.Blob)
 
-				er := p.deleteBlob(ctx, state.Blob, true, state.China)
-				if er != nil {
-					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				inErr := p.deleteBlob(ctx, state.Blob, true, state.China)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, inErr)
 				}
 
 				return nil
@@ -1592,9 +1608,9 @@ func (p *azure) Rollback(ctx context.Context, operations map[string]resilience.O
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "image", state.Image)
 
-				er := p.deleteImage(ctx, state.Image, true, state.China)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
+				inErr := p.deleteImage(ctx, state.Image, true, state.China)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete image %s: %w", state.Image, inErr)
 				}
 
 				return nil
@@ -1605,10 +1621,10 @@ func (p *azure) Rollback(ctx context.Context, operations map[string]resilience.O
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "imageDefinition", state.Version.Definition, "imageVersion", state.Version.Version)
 
-				er := p.deleteImageVersion(ctx, state.Version.Definition, state.Version.Version, true, state.China)
-				if er != nil {
+				inErr := p.deleteImageVersion(ctx, state.Version.Definition, state.Version.Version, true, state.China)
+				if inErr != nil {
 					return fmt.Errorf("cannot delete image version %s for image definition %s: %w", state.Version, state.Version.Definition,
-						er)
+						inErr)
 				}
 
 				return nil
@@ -1749,15 +1765,15 @@ func (p *azure) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *azure) Stop() error {
+func (p *azure) Stop(ctx context.Context) error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type() + "_storage",
 			Config: p.pubCfg.Config,
 			Role:   "target",
 		})
 
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",
@@ -1765,13 +1781,13 @@ func (p *azure) Stop() error {
 	}
 
 	if p.pubCfg.ConfigChina != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type() + "_storage",
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",
 		})
 
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",

@@ -53,7 +53,7 @@ func (p *Publisher) unpublish(ctx context.Context, version, commit string, steam
 
 	var publications []publication
 	var groupPublications []groupPublication
-	publications, groupPublications, _, err = p.fetchManifests(ctx, version, commit, steamroll)
+	publications, groupPublications, _, err = p.fetchAllManifests(ctx, version, commit, steamroll)
 	if err != nil {
 		return fmt.Errorf("cannot fetch manifests: %w", err)
 	}

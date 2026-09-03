@@ -24,12 +24,18 @@ type Module interface {
 	Configurable
 
 	Start(ctx context.Context) error
-	Stop() error
+	Stop(ctx context.Context) error
 }
 
 // Base is the handle a Configurable holds (or embeds via Root) to participate in the module framework.
 type Base struct {
 	root *Root
+	id   string
+}
+
+// ID returns the config ID under which the module was registered, or "" if it has none.
+func (b *Base) ID() string {
+	return b.id
 }
 
 // Root is embedded in the root Configurable and exposes root-only operations.

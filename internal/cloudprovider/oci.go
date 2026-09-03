@@ -67,6 +67,8 @@ func (*ociTarget) Type() string {
 }
 
 type ociTarget struct {
+	noReplicationsTarget
+
 	base *module.Base
 
 	credsSource credsprovider.CredsSource
@@ -148,11 +150,7 @@ func (*ociTarget) ImageSuffix() string {
 	return ".oci"
 }
 
-func (p *ociTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
-	if !p.isConfigured() {
-		return false
-	}
-
+func (*ociTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "container"
 }
 
@@ -186,7 +184,7 @@ func (p *ociTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
-	ctx = log.WithValues(ctx, "key", imagePath.S3Key, "repository", p.pubCfg.Repository)
+	ctx = log.WithValues(ctx, "key", imagePath.S3Key, "repository", p.pubCfg.Repository, "source", p.pubCfg.Source)
 
 	log.Info(ctx, "Publishing OCI artifact")
 	var archive string
@@ -509,9 +507,9 @@ func (p *ociTarget) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *ociTarget) Stop() error {
+func (p *ociTarget) Stop(ctx context.Context) error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
 			Config: p.pubCfg.Config,
 			Role:   "target",
@@ -842,9 +840,9 @@ func (p *ociOCMTarget) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *ociOCMTarget) Stop() error {
+func (p *ociOCMTarget) Stop(ctx context.Context) error {
 	if p.ocmCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
 			Config: p.ocmCfg.Config,
 			Role:   "oci",

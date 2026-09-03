@@ -69,8 +69,7 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 		}, nil
 	}, concurrency.FailureModeSkipDependents)
 	if err != nil {
-		//nolint:contextcheck // Independent lifecycle, runs detached from parent ctx.
-		stopErr := stop(started, moduleDeps)
+		stopErr := stop(context.WithoutCancel(ctx), started, moduleDeps)
 		return nil, errors.Join(err, stopErr)
 	}
 
@@ -79,7 +78,6 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 	}
 
 	var stopped bool
-	//nolint:contextcheck // Independent lifecycle, runs detached from parent ctx.
 	return func() error {
 		r.startedModulesMtx.Lock()
 		defer r.startedModulesMtx.Unlock()
@@ -98,11 +96,11 @@ func (r *Root) Start(ctx context.Context, targets ...Configurable) (func() error
 			}
 		}
 
-		return stop(stoppable, moduleDeps)
+		return stop(context.WithoutCancel(ctx), stoppable, moduleDeps)
 	}, nil
 }
 
-func stop(modules []Module, moduleDeps map[Module][]Module) error {
+func stop(ctx context.Context, modules []Module, moduleDeps map[Module][]Module) error {
 	stoppable := make(map[Module]struct{}, len(modules))
 	for _, m := range modules {
 		stoppable[m] = struct{}{}
@@ -118,10 +116,10 @@ func stop(modules []Module, moduleDeps map[Module][]Module) error {
 		}
 	}
 
-	return concurrency.RunTasks(context.Background(), modules, func(m Module) ([]Module, error) {
+	return concurrency.RunTasks(ctx, modules, func(m Module) ([]Module, error) {
 		return stopAfter[m], nil
-	}, func(_ context.Context, m Module) error {
-		inErr := m.Stop()
+	}, func(ctx context.Context, m Module) error {
+		inErr := m.Stop(ctx)
 		if inErr != nil {
 			return fmt.Errorf("cannot stop %T: %w", m, inErr)
 		}

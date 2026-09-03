@@ -78,6 +78,6 @@ func (*file) Start(_ context.Context) error {
 	return nil
 }
 
-func (*file) Stop() error {
+func (*file) Stop(_ context.Context) error {
 	return nil
 }
