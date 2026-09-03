@@ -127,9 +127,7 @@ publishing:
     source_china: S3-China
     configs:
     - config: gardenlinux
-      endpoint: https://identity-3.{region}.cloud.sap/v3
       domain: monsoon3
-      project: gardenlinux
       regions:
       - ap-ae-1
       - ap-au-1
@@ -146,9 +144,7 @@ publishing:
       - na-us-2
       - na-us-3
     - config: gardenlinux-qa
-      endpoint: https://identity-3.{region}.cloud.sap/v3
       domain: monsoon3
-      project: gardenlinux-live
       regions:
       - qa-de-1
   ocm:

@@ -117,9 +117,7 @@ publishing:
     source: S3
     configs:
     - config: gardenlinux
-      endpoint: https://identity-3.{region}.cloud.sap/v3
       domain: monsoon3
-      project: gardenlinux
       regions: [ eu-nl-1 ]
     test: true
   ocm:

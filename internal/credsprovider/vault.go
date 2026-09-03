@@ -715,7 +715,7 @@ func (*vault) secretKeys(id CredsID) []string {
 		}
 	case "OpenStack":
 		return []string{
-			fmt.Sprintf("se-sci-%s-old/data/creds", id.Config),
+			fmt.Sprintf("se-sci-%s/data/application/%s", id.Config, id.Role),
 		}
 	default:
 		return nil
