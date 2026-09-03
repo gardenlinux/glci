@@ -98,7 +98,10 @@ func configureModule[T Module](b *Base, cat *Category[T], rawCfg map[string]any)
 	if !ok {
 		return zero, fmt.Errorf("unknown type %q", typ)
 	}
-	mod := ctor(b)
+	mod := ctor(&Base{
+		root: b.root,
+		id:   cfg.ID,
+	})
 
 	if cfg.ID != "" {
 		err = b.root.registerID(cfg.ID, mod)

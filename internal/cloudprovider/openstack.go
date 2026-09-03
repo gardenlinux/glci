@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +35,7 @@ func init() {
 		return &openstack{
 			base:         b,
 			retrier:      guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
-			imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(time.Minute*14)),
+			imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(time.Minute*7)),
 		}
 	})
 }
@@ -138,7 +139,7 @@ func (p *openstack) createClients(ctx context.Context, config openstackPublishin
 	for _, region := range config.Regions {
 		initClients.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			var providerClient *gophercloud.ProviderClient
-			er := p.retrier.Do(ctx, "authenticate", func(ctx context.Context) error {
+			inErr := p.retrier.Do(ctx, "authenticate", func(ctx context.Context) error {
 				var inErr error
 				providerClient, inErr = openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
 					IdentityEndpoint: strings.Replace(config.Endpoint, "{region}", region, 1),
@@ -152,16 +153,16 @@ func (p *openstack) createClients(ctx context.Context, config openstackPublishin
 				})
 				return inErr
 			})
-			if er != nil {
-				return nil, fmt.Errorf("cannot create provider client for region %s: %w", region, er)
+			if inErr != nil {
+				return nil, fmt.Errorf("cannot create provider client for region %s: %w", region, inErr)
 			}
 
 			var client *gophercloud.ServiceClient
-			client, er = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
+			client, inErr = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
 				Region: region,
 			})
-			if er != nil {
-				return nil, fmt.Errorf("cannot create image client for region %s: %w", region, er)
+			if inErr != nil {
+				return nil, fmt.Errorf("cannot create image client for region %s: %w", region, inErr)
 			}
 
 			return func() error {
@@ -195,6 +196,34 @@ func (p *openstack) imagesClient(region string) *gophercloud.ServiceClient {
 
 func (*openstack) ImageSuffix() string {
 	return ".vmdk"
+}
+
+func (p *openstack) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if p.sourceChina == nil || p.sourceChina == p.source {
+		return nil, nil
+	}
+
+	if !slices.ContainsFunc(p.pubCfg.Configs, func(config openstackPublishingConfigConfig) bool {
+		return slices.ContainsFunc(config.Regions, func(region string) bool {
+			return strings.HasPrefix(region, "ap-cn-")
+		})
+	}) {
+		return nil, nil
+	}
+
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	if err != nil {
+		return nil, err
+	}
+
+	return []Replication{{
+		Origin:        p.source,
+		OriginID:      p.pubCfg.Source,
+		Destination:   p.sourceChina,
+		DestinationID: p.pubCfg.SourceChina,
+		Key:           imagePath.S3Key,
+		SHA256:        imagePath.SHA256Sum,
+	}}, nil
 }
 
 func (p *openstack) imageName(flavor, version, committish string) string {
@@ -237,10 +266,6 @@ func (*openstack) architecture(arch gardenlinux.Architecture) (string, error) {
 }
 
 func (p *openstack) CanPublish(manifest *gardenlinux.Manifest) bool {
-	if !p.isConfigured() {
-		return false
-	}
-
 	if manifest.Platform != "openstack" && manifest.Platform != "openstackbaremetal" {
 		return false
 	}
@@ -291,11 +316,10 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest %s: %w", flavor, err)
 	}
-	ctx = log.WithValues(ctx, "image", image, "variant", variant, "architecture", arch, "sourceType", p.source.Type(),
-		"sourceRepo", p.source.Repository())
+	ctx = log.WithValues(ctx, "image", image, "variant", variant, "architecture", arch, "source", p.pubCfg.Source)
 
 	if p.pubCfg.SourceChina != "" {
-		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
+		ctx = log.WithValues(ctx, "sourceChina", p.pubCfg.SourceChina)
 	}
 
 	outImages := make(map[string]string, len(p.getClients().images))
@@ -313,15 +337,16 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 				ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+region, &openstackOperationState{
 					Region: region,
 				})
-				imageID, er := p.createImage(ctx, region, source, imagePath.S3Key, image, variant)
-				if er != nil {
-					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot create image for region %s: %w", region, er))
+				imageID, inErr := p.createImage(ctx, region, source, imagePath.S3Key, image, variant)
+				if inErr != nil {
+					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot create image for region %s: %w", region, inErr))
 				}
 				ctx = log.WithValues(ctx, "region", region)
 
-				er = p.waitForImage(ctx, imageID, region)
-				if er != nil {
-					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, er))
+				inErr = p.waitForImage(ctx, imageID, region)
+				if inErr != nil {
+					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region,
+						inErr))
 				}
 				resilience.CompleteOperation(ctx)
 
@@ -491,9 +516,9 @@ func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 		removeImages.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "region", img.Region, "imageID", img.ID)
 
-			er := p.deleteImage(ctx, img.ID, img.Region, steamroll)
+			inErr := p.deleteImage(ctx, img.ID, img.Region, steamroll)
 			if err != nil {
-				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, er)
+				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, inErr)
 			}
 
 			return nil
@@ -547,9 +572,9 @@ func (p *openstack) Rollback(ctx context.Context, operations map[string]resilien
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
 
-				er := p.deleteImage(ctx, state.Image, state.Region, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
+				inErr := p.deleteImage(ctx, state.Image, state.Region, true)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, inErr)
 				}
 
 				return nil
@@ -647,9 +672,9 @@ func (p *openstack) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *openstack) Stop() error {
+func (p *openstack) Stop(ctx context.Context) error {
 	for _, config := range p.pubCfg.Configs {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: config.Config,
 			Role:   "target",

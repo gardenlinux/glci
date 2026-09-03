@@ -37,16 +37,51 @@ var PublishingTargetCategory = module.NewCategory[PublishingTarget]("target")
 //nolint:gochecknoglobals // Required for automatic registration.
 var OCMTargetCategory = module.NewCategory[OCMTarget]("target")
 
+// ObjectProperties holds the system properties of an artifact object.
+type ObjectProperties struct {
+	Size        int64
+	ContentType string
+	SHA256      string
+}
+
 // ArtifactSource is a source of artifacts which can retrieve arbitrary objects as well as retrieve and publish manifests.
 type ArtifactSource interface {
 	module.Module
 
-	Type() string
 	Repository() string
 	GetObjectURL(ctx context.Context, key string) (string, error)
-	GetObjectSize(ctx context.Context, key string) (int64, error)
+	GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
-	PutObject(ctx context.Context, key string, object io.Reader) error
+	PutObject(ctx context.Context, key string, object io.Reader, contentType string) error
+}
+
+// ReplicateArtifact copies an artifact object under key from one artifact source to another.
+func ReplicateArtifact(ctx context.Context, origin, destination ArtifactSource, key string) error {
+	properties, err := origin.GetObjectProperties(ctx, key)
+	if err != nil {
+		return fmt.Errorf("cannot get properties of object %s: %w", key, err)
+	}
+
+	var object io.ReadCloser
+	object, err = origin.GetObject(ctx, key)
+	if err != nil {
+		return fmt.Errorf("cannot get object %s: %w", key, err)
+	}
+	defer func() {
+		_ = object.Close()
+	}()
+
+	err = destination.PutObject(ctx, key, object, properties.ContentType)
+	if err != nil {
+		return fmt.Errorf("cannot put object %s: %w", key, err)
+	}
+
+	err = object.Close()
+	if err != nil {
+		return fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return nil
 }
 
 // GetManifest retrieves a manifest from an artifact source.
@@ -106,7 +141,7 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 		return fmt.Errorf("cannot encode manifest: %w", err)
 	}
 
-	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()))
+	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()), "text/yaml")
 }
 
 // GetGroupManifest retrieves a group manifest from an artifact source.
@@ -166,7 +201,7 @@ func PutGroupManifest(ctx context.Context, source ArtifactSource, key string, gr
 		return fmt.Errorf("cannot encode group manifest: %w", err)
 	}
 
-	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()))
+	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()), "text/yaml")
 }
 
 // PublishingTarget is a target onto which GLCI can publish Garden Linux images.
@@ -175,6 +210,7 @@ type PublishingTarget interface {
 
 	Type() string
 	ImageSuffix() string
+	RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error)
 	CanPublish(manifest *gardenlinux.Manifest) bool
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
 	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
@@ -184,6 +220,44 @@ type PublishingTarget interface {
 	Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error)
 	Unfuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest, steamroll bool) error
 	resilience.RollbackHandler
+}
+
+// Replication describes an artifact object to be copied from one artifact source to another.
+type Replication struct {
+	Origin        ArtifactSource
+	OriginID      string
+	Destination   ArtifactSource
+	DestinationID string
+	Key           string
+	SHA256        string
+}
+
+// IsReplicated reports whether the destination already holds the artifact with the expected content digest and type.
+func (r Replication) IsReplicated(ctx context.Context) (bool, error) {
+	if r.SHA256 == "" {
+		return false, nil
+	}
+
+	destination, err := r.Destination.GetObjectProperties(ctx, r.Key)
+	if err != nil {
+		_, ok := errors.AsType[*KeyNotFoundError](err)
+		if ok {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("cannot get destination object properties: %w", err)
+	}
+	if destination.SHA256 == "" || destination.SHA256 != r.SHA256 {
+		return false, nil
+	}
+
+	var origin ObjectProperties
+	origin, err = r.Origin.GetObjectProperties(ctx, r.Key)
+	if err != nil {
+		return false, fmt.Errorf("cannot get origin object properties: %w", err)
+	}
+
+	return destination.ContentType == origin.ContentType, nil
 }
 
 // PublishingOutput is an opaque representation of the result of a publishing operation.
@@ -279,6 +353,12 @@ func (nonFusableTarget) Fuse(_ context.Context, _ []gardenlinux.FlavorManifest) 
 
 func (nonFusableTarget) Unfuse(_ context.Context, _ []gardenlinux.FlavorManifest, _ bool) error {
 	return errors.New("target cannot unfuse")
+}
+
+type noReplicationsTarget struct{}
+
+func (noReplicationsTarget) RequiredReplications(_ *gardenlinux.Manifest) ([]Replication, error) {
+	return nil, nil
 }
 
 func platform(flavor string) string {

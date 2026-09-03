@@ -30,7 +30,7 @@ func run() int {
 		c.PersistentFlags().Bool("debug", false, "log at debug level")
 		c.PersistentFlags().Bool("glacial", false, "disable all parallelism")
 		c.PersistentFlags().String("config-file", "", "path to configuration file")
-		c.AddCommand(publishCmd(), unpublishCmd())
+		c.AddCommand(publishCmd(), unpublishCmd(), replicateCmd())
 	}, func(ctx context.Context, cfg *viper.Viper) (context.Context, error) {
 		ctx = log.Setup(ctx, cfg.GetBool("debug"), false, os.Stderr)
 		if cfg.GetBool("glacial") {

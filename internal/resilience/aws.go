@@ -245,9 +245,9 @@ func (p *aws) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *aws) Stop() error {
+func (p *aws) Stop(ctx context.Context) error {
 	if p.stateCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.stateCfg.Config,
 			Role:   "state",

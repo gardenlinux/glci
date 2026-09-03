@@ -1,7 +1,10 @@
 package cloudprovider
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +21,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -360,6 +364,30 @@ func (*awsTarget) ImageSuffix() string {
 	return ".raw"
 }
 
+func (p *awsTarget) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
+		return nil, nil
+	}
+
+	if manifest.SecureBoot {
+		return nil, nil
+	}
+
+	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	if err != nil {
+		return nil, err
+	}
+
+	return []Replication{{
+		Origin:        p.source,
+		OriginID:      p.pubCfg.Source,
+		Destination:   p.sourceChina,
+		DestinationID: p.pubCfg.SourceChina,
+		Key:           imagePath.S3Key,
+		SHA256:        imagePath.SHA256Sum,
+	}}, nil
+}
+
 func (*awsTarget) imageName(flavor, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
@@ -383,8 +411,6 @@ func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error
 	if p.s3Client() == nil {
 		return "", errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "source", p.Type())
-
 	log.Debug(ctx, "Getting presigned URL", "bucket", p.srcCfg.Bucket, "key", key)
 	var presigned *signer.PresignedHTTPRequest
 	err := p.retrier.Do(ctx, "presign get object", func(ctx context.Context) error {
@@ -405,45 +431,57 @@ func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error
 	return presigned.URL, nil
 }
 
-func (p *awsSource) GetObjectSize(ctx context.Context, key string) (int64, error) {
+func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error) {
 	if p.s3Client() == nil {
-		return 0, errors.New("config not set")
+		return ObjectProperties{}, errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "source", p.Type())
-
 	log.Debug(ctx, "Heading object", "bucket", p.srcCfg.Bucket, "key", key)
 	var r *s3.HeadObjectOutput
 	err := p.retrier.Do(ctx, "head object", func(ctx context.Context) error {
 		var inErr error
 		r, inErr = p.s3Client().HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket: &p.srcCfg.Bucket,
-			Key:    &key,
+			Bucket:       &p.srcCfg.Bucket,
+			Key:          &key,
+			ChecksumMode: s3types.ChecksumModeEnabled,
 		})
 		return inErr
 	})
 	if err != nil {
-		_, ok := errors.AsType[*s3types.NoSuchKey](err)
+		_, ok := errors.AsType[*s3types.NotFound](err)
 		if ok {
 			err = &KeyNotFoundError{
 				err: err,
 			}
 		}
 
-		return 0, fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
+		return ObjectProperties{}, fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
 	}
 	if r.ContentLength == nil {
-		return 0, fmt.Errorf("cannot head object %s from bucket %s: missing content length", key, p.srcCfg.Bucket)
+		return ObjectProperties{}, fmt.Errorf("cannot head object %s from bucket %s: missing content length", key, p.srcCfg.Bucket)
 	}
 
-	return *r.ContentLength, nil
+	properties := ObjectProperties{
+		Size: *r.ContentLength,
+	}
+	if r.ContentType != nil {
+		properties.ContentType = *r.ContentType
+	}
+	if r.ChecksumType == s3types.ChecksumTypeFullObject && r.ChecksumSHA256 != nil {
+		var sum []byte
+		sum, err = base64.StdEncoding.DecodeString(*r.ChecksumSHA256)
+		if err != nil {
+			return ObjectProperties{}, fmt.Errorf("cannot decode object checksum: %w", err)
+		}
+		properties.SHA256 = hex.EncodeToString(sum)
+	}
+
+	return properties, nil
 }
 
 func (p *awsSource) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	if p.s3Client() == nil {
 		return nil, errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "source", p.Type())
-
 	log.Debug(ctx, "Getting object", "bucket", p.srcCfg.Bucket, "key", key)
 
 	return guard.NewRetryingReader(ctx, guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}), awsContentSource{
@@ -507,21 +545,38 @@ func (s awsContentSource) Open(ctx context.Context, offset int64, identity strin
 	return content, nil
 }
 
-func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader) error {
+func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader, contentType string) error {
 	if p.s3Client() == nil {
 		return errors.New("config not set")
 	}
-	ctx = log.WithValues(ctx, "source", p.Type())
+	obj, ok := object.(io.ReadSeeker)
+	if !ok {
+		data, err := io.ReadAll(object)
+		if err != nil {
+			return fmt.Errorf("cannot read object: %w", err)
+		}
+
+		obj = bytes.NewReader(data)
+	}
 
 	log.Debug(ctx, "Putting object", "bucket", p.srcCfg.Bucket, "key", key)
 	err := p.retrier.Do(ctx, "put object", func(ctx context.Context) error {
-		_, inErr := p.s3Client().PutObject(ctx, &s3.PutObjectInput{
-			Bucket:          &p.srcCfg.Bucket,
-			Key:             &key,
-			Body:            object,
-			ContentEncoding: new("utf-8"),
-			ContentType:     new("text/yaml"),
-		})
+		_, inErr := obj.Seek(0, io.SeekStart)
+		if inErr != nil {
+			return fmt.Errorf("cannot rewind object: %w", inErr)
+		}
+
+		input := &transfermanager.UploadObjectInput{
+			Bucket: &p.srcCfg.Bucket,
+			Key:    &key,
+			Body:   obj,
+		}
+		if contentType != "" {
+			input.ContentType = &contentType
+		}
+
+		uploader := transfermanager.New(p.s3Client())
+		_, inErr = uploader.UploadObject(ctx, input)
 		return inErr
 	})
 	if err != nil {
@@ -531,11 +586,7 @@ func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader)
 	return nil
 }
 
-func (p *awsTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
-	if !p.isConfigured() {
-		return false
-	}
-
+func (*awsTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "aws"
 }
 
@@ -565,9 +616,9 @@ func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *garden
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	ctx = log.WithValues(ctx, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository())
+	ctx = log.WithValues(ctx, "source", p.pubCfg.Source)
 	if p.pubCfg.SourceChina != "" {
-		ctx = log.WithValues(ctx, "sourceChinaType", p.sourceChina.Type(), "sourceChinaRepo", p.sourceChina.Repository())
+		ctx = log.WithValues(ctx, "sourceChina", p.pubCfg.SourceChina)
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
@@ -598,9 +649,9 @@ func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	publish.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 		ctx = log.WithValues(ctx, "cloud", "public")
 
-		images, er := p.publish(ctx, p.source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, false)
-		if er != nil {
-			return nil, er
+		images, inErr := p.publish(ctx, p.source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, false)
+		if inErr != nil {
+			return nil, inErr
 		}
 		return func() error {
 			outputImages = append(outputImages, images...)
@@ -618,9 +669,9 @@ func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *garden
 				source = p.source
 			}
 
-			images, er := p.publish(ctx, source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, true)
-			if er != nil {
-				return nil, er
+			images, inErr := p.publish(ctx, source, imagePath.S3Key, image, tags, arch, requireUEFI, uefiData, true)
+			if inErr != nil {
+				return nil, inErr
 			}
 			return func() error {
 				outputImages = append(outputImages, images...)
@@ -680,29 +731,30 @@ func (p *awsTarget) publish(ctx context.Context, source ArtifactSource, key, ima
 		publishImages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
 			ctx = log.WithValues(ctx, "region", toRegion)
 			localID := imageID
-			var er error
+			var inErr error
 
 			if toRegion != region {
 				ctx = resilience.BeginOperation(ctx, "publish/"+taskImage+"/"+toRegion, &awsOperationState{
 					China:  china,
 					Region: toRegion,
 				})
-				localID, er = p.copyImage(ctx, image, imageID, region, toRegion, china)
-				if er != nil {
+				localID, inErr = p.copyImage(ctx, image, imageID, region, toRegion, china)
+				if inErr != nil {
 					return nil, resilience.FailOperation(ctx,
-						fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, er))
+						fmt.Errorf("cannot copy image %s from region %s to region %s: %w", image, region, toRegion, inErr))
 				}
 			}
 			ctx = log.WithValues(ctx, "imageID", localID)
 
-			er = p.waitForImage(ctx, localID, toRegion, china)
-			if er != nil {
-				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, er))
+			inErr = p.waitForImage(ctx, localID, toRegion, china)
+			if inErr != nil {
+				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", image, toRegion, inErr))
 			}
 
-			er = p.makePublic(ctx, localID, toRegion, china)
-			if er != nil {
-				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion, er))
+			inErr = p.makePublic(ctx, localID, toRegion, china)
+			if inErr != nil {
+				return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot make image %s public in region %s: %w", image, toRegion,
+					inErr))
 			}
 			resilience.CompleteOperation(ctx)
 
@@ -767,15 +819,15 @@ func (*awsTarget) prepareSecureBoot(ctx context.Context, source ArtifactSource, 
 		fetchCertificates := concurrency.NewActivity(ctx)
 
 		fetchCertificates.Go(func(ctx context.Context) error {
-			efivarsFile, er := manifest.PathBySuffix(".secureboot.aws-efivars")
-			if er != nil {
-				return fmt.Errorf("missing efivars: %w", er)
+			efivarsFile, inErr := manifest.PathBySuffix(".secureboot.aws-efivars")
+			if inErr != nil {
+				return fmt.Errorf("missing efivars: %w", inErr)
 			}
 
 			var efivars []byte
-			efivars, er = getObjectBytes(ctx, source, efivarsFile.S3Key)
-			if er != nil {
-				return fmt.Errorf("cannot get efivars: %w", er)
+			efivars, inErr = getObjectBytes(ctx, source, efivarsFile.S3Key)
+			if inErr != nil {
+				return fmt.Errorf("cannot get efivars: %w", inErr)
 			}
 			uefiData = new(string(efivars))
 
@@ -1059,9 +1111,9 @@ func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 
 			china := img.Cloud == "china"
 
-			er := p.deregisterImage(lctx, img.ID, img.Region, steamroll, china)
-			if er != nil {
-				return fmt.Errorf("cannot deregister image %s in region %s: %w", img.ID, img.Region, er)
+			inErr := p.deregisterImage(lctx, img.ID, img.Region, steamroll, china)
+			if inErr != nil {
+				return fmt.Errorf("cannot deregister image %s in region %s: %w", img.ID, img.Region, inErr)
 			}
 
 			return nil
@@ -1134,9 +1186,9 @@ func (p *awsTarget) Rollback(ctx context.Context, operations map[string]resilien
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "region", state.Region, "importTask", state.Import)
 
-				er := p.deleteSnapshotFromImportTask(ctx, state.Import, state.Region, true, state.China)
-				if er != nil {
-					return fmt.Errorf("cannot delete snapshot from task ID %s in region %s: %w", state.Import, state.Region, er)
+				inErr := p.deleteSnapshotFromImportTask(ctx, state.Import, state.Region, true, state.China)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete snapshot from task ID %s in region %s: %w", state.Import, state.Region, inErr)
 				}
 
 				return nil
@@ -1147,9 +1199,9 @@ func (p *awsTarget) Rollback(ctx context.Context, operations map[string]resilien
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "region", state.Region, "snapshot", state.Snapshot)
 
-				er := p.deleteSnapshot(ctx, state.Snapshot, state.Region, true, state.China)
-				if er != nil {
-					return fmt.Errorf("cannot delete snapshot %s in region %s: %w", state.Snapshot, state.Region, er)
+				inErr := p.deleteSnapshot(ctx, state.Snapshot, state.Region, true, state.China)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete snapshot %s in region %s: %w", state.Snapshot, state.Region, inErr)
 				}
 
 				return nil
@@ -1160,9 +1212,9 @@ func (p *awsTarget) Rollback(ctx context.Context, operations map[string]resilien
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "region", state.Region, "image", state.Image)
 
-				er := p.deregisterImage(ctx, state.Image, state.Region, true, state.China)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, er)
+				inErr := p.deregisterImage(ctx, state.Image, state.Region, true, state.China)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete image %s in region %s: %w", state.Image, state.Region, inErr)
 				}
 
 				return nil
@@ -1288,9 +1340,9 @@ func (p *awsSource) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *awsSource) Stop() error {
+func (p *awsSource) Stop(ctx context.Context) error {
 	if p.srcCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.srcCfg.Config,
 			Role:   "source",
@@ -1387,9 +1439,9 @@ func (p *awsTarget) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *awsTarget) Stop() error {
+func (p *awsTarget) Stop(ctx context.Context) error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",
@@ -1397,7 +1449,7 @@ func (p *awsTarget) Stop() error {
 	}
 
 	if p.pubCfg.ConfigChina != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",

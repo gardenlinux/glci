@@ -49,7 +49,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	var publications []publication
 	var groupPublications []groupPublication
-	publications, groupPublications, commit, err = p.fetchManifests(ctx, version, commit, false)
+	publications, groupPublications, commit, err = p.fetchAllManifests(ctx, version, commit, false)
 	if err != nil {
 		return fmt.Errorf("cannot fetch manifests: %w", err)
 	}

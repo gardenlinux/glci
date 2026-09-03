@@ -531,7 +531,7 @@ func (p *vault) deliverCreds(ctx context.Context, id CredsID, reactivate func(ct
 	return nil
 }
 
-func (p *vault) Stop() error {
+func (p *vault) Stop(ctx context.Context) error {
 	p.closeMtx.Lock()
 	defer p.closeMtx.Unlock()
 
@@ -559,7 +559,7 @@ func (p *vault) Stop() error {
 	}()
 
 	if ownToken {
-		p.revokeVault(context.Background(), p.vaultClient)
+		p.revokeVault(ctx, p.vaultClient)
 	}
 
 	if err != nil {

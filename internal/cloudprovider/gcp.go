@@ -60,6 +60,7 @@ func (*gcp) Type() string {
 
 type gcp struct {
 	nonFusableTarget
+	noReplicationsTarget
 
 	base *module.Base
 
@@ -209,11 +210,7 @@ func (*gcp) architecture(arch gardenlinux.Architecture) (string, error) {
 	}
 }
 
-func (p *gcp) CanPublish(manifest *gardenlinux.Manifest) bool {
-	if !p.isConfigured() {
-		return false
-	}
-
+func (*gcp) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "gcp"
 }
 
@@ -253,8 +250,7 @@ func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest %s: %w", flavor, err)
 	}
-	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "sourceType", p.source.Type(), "sourceRepo", p.source.Repository(),
-		"project", p.pubCfg.Project)
+	ctx = log.WithValues(ctx, "image", image, "architecture", arch, "source", p.pubCfg.Source, "project", p.pubCfg.Project)
 
 	var secureBoot bool
 	var pk, kek, db string
@@ -302,15 +298,15 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		fetchCertificates := concurrency.NewActivity(ctx)
 
 		fetchCertificates.Go(func(ctx context.Context) error {
-			pkFile, er := manifest.PathBySuffix(".secureboot.pk.der")
-			if er != nil {
-				return fmt.Errorf("missing secureboot PK: %w", er)
+			pkFile, inErr := manifest.PathBySuffix(".secureboot.pk.der")
+			if inErr != nil {
+				return fmt.Errorf("missing secureboot PK: %w", inErr)
 			}
 
 			var rawPK []byte
-			rawPK, er = getObjectBytes(ctx, source, pkFile.S3Key)
-			if er != nil {
-				return fmt.Errorf("cannot get PK: %w", er)
+			rawPK, inErr = getObjectBytes(ctx, source, pkFile.S3Key)
+			if inErr != nil {
+				return fmt.Errorf("cannot get PK: %w", inErr)
 			}
 			pk = base64.StdEncoding.EncodeToString(rawPK)
 
@@ -318,15 +314,15 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		})
 
 		fetchCertificates.Go(func(ctx context.Context) error {
-			kekFile, er := manifest.PathBySuffix(".secureboot.kek.der")
-			if er != nil {
-				return fmt.Errorf("missing KEK: %w", er)
+			kekFile, inErr := manifest.PathBySuffix(".secureboot.kek.der")
+			if inErr != nil {
+				return fmt.Errorf("missing KEK: %w", inErr)
 			}
 
 			var rawKEK []byte
-			rawKEK, er = getObjectBytes(ctx, source, kekFile.S3Key)
-			if er != nil {
-				return fmt.Errorf("cannot get KEK: %w", er)
+			rawKEK, inErr = getObjectBytes(ctx, source, kekFile.S3Key)
+			if inErr != nil {
+				return fmt.Errorf("cannot get KEK: %w", inErr)
 			}
 			kek = base64.StdEncoding.EncodeToString(rawKEK)
 
@@ -334,15 +330,15 @@ func (*gcp) prepareSecureBoot(ctx context.Context, source ArtifactSource, manife
 		})
 
 		fetchCertificates.Go(func(ctx context.Context) error {
-			dbFile, er := manifest.PathBySuffix(".secureboot.db.der")
-			if er != nil {
-				return fmt.Errorf("missing DB: %w", er)
+			dbFile, inErr := manifest.PathBySuffix(".secureboot.db.der")
+			if inErr != nil {
+				return fmt.Errorf("missing DB: %w", inErr)
 			}
 
 			var rawDB []byte
-			rawDB, er = getObjectBytes(ctx, source, dbFile.S3Key)
-			if er != nil {
-				return fmt.Errorf("cannot get DB: %w", er)
+			rawDB, inErr = getObjectBytes(ctx, source, dbFile.S3Key)
+			if inErr != nil {
+				return fmt.Errorf("cannot get DB: %w", inErr)
 			}
 			db = base64.StdEncoding.EncodeToString(rawDB)
 
@@ -682,9 +678,9 @@ func (p *gcp) Rollback(ctx context.Context, operations map[string]resilience.Ope
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "blob", state.Blob)
 
-				er := p.deleteBlob(ctx, state.Blob, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, er)
+				inErr := p.deleteBlob(ctx, state.Blob, true)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete blob %s: %w", state.Blob, inErr)
 				}
 
 				return nil
@@ -695,9 +691,9 @@ func (p *gcp) Rollback(ctx context.Context, operations map[string]resilience.Ope
 			rollbackTasks.Go(func(ctx context.Context) error {
 				ctx = log.WithValues(ctx, "image", state.Image)
 
-				er := p.deleteImage(ctx, state.Image, true)
-				if er != nil {
-					return fmt.Errorf("cannot delete image %s: %w", state.Image, er)
+				inErr := p.deleteImage(ctx, state.Image, true)
+				if inErr != nil {
+					return fmt.Errorf("cannot delete image %s: %w", state.Image, inErr)
 				}
 
 				return nil
@@ -754,9 +750,9 @@ func (p *gcp) Start(ctx context.Context) error {
 	return nil
 }
 
-func (p *gcp) Stop() error {
+func (p *gcp) Stop(ctx context.Context) error {
 	if p.pubCfg.Config != "" {
-		p.credsSource.ReleaseCreds(context.Background(), credsprovider.CredsID{
+		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
 			Type:   p.Type(),
 			Config: p.pubCfg.Config,
 			Role:   "target",
