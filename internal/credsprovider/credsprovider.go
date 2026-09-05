@@ -25,9 +25,10 @@ type CredsSource interface {
 
 // CredsID is an identifier consisting of the type of credential and the specific configuration within that type.
 type CredsID struct {
-	Type   string
-	Config string
-	Role   string
+	Type      string
+	Config    string
+	Qualifier string
+	Role      string
 }
 
 // ApplyCredsFunc is a callback function that applies updated credentials.

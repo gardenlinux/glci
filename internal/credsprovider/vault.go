@@ -250,7 +250,7 @@ func (p *vault) processWatchEvent(ctx context.Context, event vaultWatchEvent) er
 	for _, owner := range owners {
 		err = p.deliverCreds(ctx, owner, nil)
 		if err != nil {
-			return fmt.Errorf("cannot update credentials %s/%s/%s: %w", owner.Type, owner.Config, owner.Role, err)
+			return fmt.Errorf("cannot update credentials %s/%s/%s/%s: %w", owner.Type, owner.Config, owner.Qualifier, owner.Role, err)
 		}
 	}
 
@@ -360,7 +360,7 @@ func (p *vault) reestablishVault(ctx context.Context) error {
 			})
 		})
 		if err != nil {
-			return fmt.Errorf("cannot reestablish credentials %s/%s/%s: %w", id.Type, id.Config, id.Role, err)
+			return fmt.Errorf("cannot reestablish credentials %s/%s/%s/%s: %w", id.Type, id.Config, id.Qualifier, id.Role, err)
 		}
 	}
 
@@ -473,7 +473,7 @@ func (p *vault) login(ctx context.Context) error {
 }
 
 func (p *vault) deliverCreds(ctx context.Context, id CredsID, reactivate func(ctx context.Context, creds *vaultCreds) error) error {
-	ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Role)
+	ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Qualifier+"/"+id.Role)
 
 	var creds *vaultCreds
 	var ok bool
@@ -585,7 +585,7 @@ func (p *vault) AcquireCreds(ctx context.Context, id CredsID, apply ApplyCredsFu
 		return err
 	}
 
-	ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Role)
+	ctx = log.WithValues(ctx, "creds", id.Type+"/"+id.Config+"/"+id.Qualifier+"/"+id.Role)
 
 	keys := p.secretKeys(id)
 	if len(keys) == 0 {
@@ -715,7 +715,7 @@ func (*vault) secretKeys(id CredsID) []string {
 		}
 	case "OpenStack":
 		return []string{
-			fmt.Sprintf("se-sci-%s-old/data/creds", id.Config),
+			fmt.Sprintf("se-sci-%s/data/application/%s", id.Config, id.Qualifier),
 		}
 	default:
 		return nil

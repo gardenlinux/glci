@@ -62,11 +62,9 @@ type openstackPublishingConfig struct {
 }
 
 type openstackPublishingConfigConfig struct {
-	Config   string   `mapstructure:"config"`
-	Endpoint string   `mapstructure:"endpoint"`
-	Domain   string   `mapstructure:"domain"`
-	Project  string   `mapstructure:"project"`
-	Regions  []string `mapstructure:"regions"`
+	Config  string   `mapstructure:"config"`
+	Domain  string   `mapstructure:"domain"`
+	Regions []string `mapstructure:"regions"`
 }
 
 type openstackVariant string
@@ -107,8 +105,9 @@ type openstackPublishedImage struct {
 }
 
 type openstackCredentials struct {
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
+	AuthURL                     string `mapstructure:"auth_url"`
+	ApplicationCredentialID     string `mapstructure:"application_credential_id"`
+	ApplicationCredentialSecret string `mapstructure:"application_credential_secret"`
 }
 
 type openstackEnvironment struct {
@@ -118,72 +117,58 @@ type openstackEnvironment struct {
 	imagesClient *gophercloud.ServiceClient
 }
 
-func (p *openstack) applyCredentials(ctx context.Context, config openstackPublishingConfigConfig, rawCreds map[string]any) error {
+func (p *openstack) applyCredentials(ctx context.Context, region string, rawCreds map[string]any) error {
 	var creds openstackCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
 		return err
 	}
 
-	initClients := concurrency.NewActivitySync(ctx)
-	for _, region := range config.Regions {
-		environment := p.environment(region)
-		environment.credentials.Store(&creds)
+	environment := p.environment(region)
+	environment.credentials.Store(&creds)
 
-		if environment.imagesClient != nil {
-			continue
+	if environment.imagesClient != nil {
+		return nil
+	}
+
+	var providerClient *gophercloud.ProviderClient
+	err = environment.retrier.Do(ctx, "authenticate", func(ctx context.Context) error {
+		var inErr error
+		providerClient, inErr = openstacksdk.AuthenticatedClient(ctx, gophercloud.AuthOptions{
+			IdentityEndpoint:            creds.AuthURL,
+			ApplicationCredentialID:     creds.ApplicationCredentialID,
+			ApplicationCredentialSecret: creds.ApplicationCredentialSecret,
+		})
+		return inErr
+	})
+	if err != nil {
+		return fmt.Errorf("cannot create provider client for region %s: %w", region, err)
+	}
+
+	providerClient.ReauthFunc = func(ctx context.Context) error {
+		currentCreds := environment.credentials.Load()
+		if currentCreds == nil {
+			return errors.New("credentials not set")
 		}
 
-		initClients.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
-			var providerClient *gophercloud.ProviderClient
-			inErr := environment.retrier.Do(ctx, "authenticate", func(ctx context.Context) error {
-				var inErr error
-				providerClient, inErr = openstacksdk.AuthenticatedClient(ctx, openstackAuthOptions(&creds, config, region))
-				return inErr
-			})
-			if inErr != nil {
-				return nil, fmt.Errorf("cannot create provider client for region %s: %w", region, inErr)
-			}
-
-			providerClient.ReauthFunc = func(ctx context.Context) error {
-				currentCreds := environment.credentials.Load()
-				if currentCreds == nil {
-					return errors.New("credentials not set")
-				}
-
-				return openstacksdk.Authenticate(ctx, providerClient, openstackAuthOptions(currentCreds, config, region))
-			}
-
-			var imagesClient *gophercloud.ServiceClient
-			imagesClient, inErr = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
-				Region: region,
-			})
-			if inErr != nil {
-				return nil, fmt.Errorf("cannot create images client for region %s: %w", region, inErr)
-			}
-
-			return func() error {
-				environment.imagesClient = imagesClient
-
-				return nil
-			}, nil
+		return openstacksdk.Authenticate(ctx, providerClient, gophercloud.AuthOptions{
+			IdentityEndpoint:            currentCreds.AuthURL,
+			ApplicationCredentialID:     currentCreds.ApplicationCredentialID,
+			ApplicationCredentialSecret: currentCreds.ApplicationCredentialSecret,
 		})
 	}
 
-	return initClients.Wait()
-}
-
-func openstackAuthOptions(creds *openstackCredentials, config openstackPublishingConfigConfig, region string) gophercloud.AuthOptions { // fixme what is this
-	return gophercloud.AuthOptions{
-		IdentityEndpoint: strings.Replace(config.Endpoint, "{region}", region, 1),
-		Username:         creds.Username,
-		Password:         creds.Password,
-		DomainName:       config.Domain,
-		Scope: &gophercloud.AuthScope{
-			ProjectName: config.Project,
-			DomainName:  config.Domain,
-		},
+	var imagesClient *gophercloud.ServiceClient
+	imagesClient, err = openstacksdk.NewImageV2(providerClient, gophercloud.EndpointOpts{
+		Region: region,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot create images client for region %s: %w", region, err)
 	}
+
+	environment.imagesClient = imagesClient
+
+	return nil
 }
 
 func (p *openstack) environment(region string) *openstackEnvironment {
@@ -611,14 +596,8 @@ func (p *openstack) Configure(rawCfg map[string]any) error {
 			return errors.New("invalid config")
 		case ok:
 			return fmt.Errorf("duplicate config %s", config.Config)
-		case config.Endpoint == "":
-			return fmt.Errorf("missing endpoint for config %s", config.Config)
-		case strings.Count(config.Endpoint, "{region}") != 1:
-			return fmt.Errorf("invalid endpoint for config %s", config.Config)
 		case config.Domain == "":
 			return fmt.Errorf("missing domain for config %s", config.Config)
-		case config.Project == "":
-			return fmt.Errorf("missing project for config %s", config.Config)
 		case len(config.Regions) == 0:
 			return fmt.Errorf("missing regions for config %s", config.Config)
 		}
@@ -668,29 +647,39 @@ func (*openstack) Configurables() []module.Configurable {
 }
 
 func (p *openstack) Start(ctx context.Context) error {
+	initClients := concurrency.NewActivity(ctx)
 	for _, config := range p.pubCfg.Configs {
-		err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type(),
-			Config: config.Config,
-			Role:   "target",
-		}, func(ctx context.Context, creds map[string]any) error {
-			return p.applyCredentials(ctx, config, creds)
-		})
-		if err != nil {
-			return fmt.Errorf("cannot acquire credentials for config %s: %w", config.Config, err)
+		for _, region := range config.Regions {
+			initClients.Go(func(ctx context.Context) error {
+				err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+					Type:      p.Type(),
+					Config:    config.Config,
+					Qualifier: region + "/" + config.Domain,
+					Role:      "target",
+				}, func(ctx context.Context, creds map[string]any) error {
+					return p.applyCredentials(ctx, region, creds)
+				})
+				if err != nil {
+					return fmt.Errorf("cannot acquire credentials for config %s region %s: %w", config.Config, region, err)
+				}
+
+				return nil
+			})
 		}
 	}
-
-	return nil
+	return initClients.Wait()
 }
 
 func (p *openstack) Stop(ctx context.Context) error {
 	for _, config := range p.pubCfg.Configs {
-		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
-			Type:   p.Type(),
-			Config: config.Config,
-			Role:   "target",
-		})
+		for _, region := range config.Regions {
+			p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
+				Type:      p.Type(),
+				Config:    config.Config,
+				Qualifier: region + "/" + config.Domain,
+				Role:      "target",
+			})
+		}
 	}
 
 	return nil
