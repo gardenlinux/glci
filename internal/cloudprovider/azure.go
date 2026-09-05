@@ -1416,8 +1416,8 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, imageDefinition 
 	log.Debug(ctx, "Listing image versions")
 	var page armcompute.GalleryImageVersionsClientListByGalleryImageResponse
 	err := p.environment(china).retrier.Do(ctx, "list gallery image versions", func(ctx context.Context) error {
-		pager := p.environment(china).galleryImageVersionsClient.NewListByGalleryImagePager(p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition,
-			nil)
+		pager := p.environment(china).galleryImageVersionsClient.NewListByGalleryImagePager(p.pubCfg.ResourceGroup, p.pubCfg.Gallery,
+			imageDefinition, nil)
 		var inErr error
 		page, inErr = pager.NextPage(ctx)
 		return inErr
@@ -1456,8 +1456,8 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, imageDefinition 
 	}
 
 	err = p.environment(china).retrier.Do(ctx, "await image definition deletion", func(ctx context.Context) error {
-		poller, inErr := p.environment(china).galleryImagesClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition,
-			&armcompute.GalleryImagesClientBeginDeleteOptions{
+		poller, inErr := p.environment(china).galleryImagesClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery,
+			imageDefinition, &armcompute.GalleryImagesClientBeginDeleteOptions{
 				ResumeToken: resumeToken,
 			})
 		if inErr != nil {
