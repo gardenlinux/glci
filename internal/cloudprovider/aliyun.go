@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,13 +14,14 @@ import (
 	"github.com/alibabacloud-go/tea/dara"
 	"github.com/alibabacloud-go/tea/tea"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
-	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
+	osscredentials "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/credentials"
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss/retry"
+	"github.com/aliyun/credentials-go/credentials"
+	"github.com/aliyun/credentials-go/credentials/providers"
 
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
@@ -37,13 +36,12 @@ func init() {
 
 	module.RegisterImpl(PublishingTargetCategory, "Aliyun", func(b *module.Base) PublishingTarget {
 		p := &aliyun{
-			base:       b,
-			ecsRetrier: guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}),
+			base: b,
 		}
-		p.ossRetrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.world.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
-
+		p.world.ecsRetrier = guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{})
 		return p
 	})
 }
@@ -61,18 +59,18 @@ type aliyun struct {
 	credsSource credsprovider.CredsSource
 	source      ArtifactSource
 
-	pubCfg     aliyunPublishingConfig
-	ossRetrier guard.Retrier
-	ecsRetrier guard.Retrier
+	pubCfg aliyunPublishingConfig
 
-	clientsMtx sync.RWMutex
-	clients    aliyunClients
-	clientsGen atomic.Uint64
+	world aliyunEnvironment
 }
 
-type aliyunClients struct {
-	oss *oss.Client
-	ecs map[string]*client.Client
+type aliyunEnvironment struct {
+	credentialsProvider aliyunCredentialsProvider
+	credsGen            atomic.Uint64
+	retrier             guard.Retrier
+	ecsRetrier          guard.Retrier
+	ossClient           *oss.Client
+	ecsClients          map[string]*client.Client
 }
 
 type aliyunPublishingConfig struct {
@@ -84,9 +82,9 @@ type aliyunPublishingConfig struct {
 }
 
 func (p *aliyun) isConfigured() bool {
-	clients := p.getClients()
+	environment := p.environment()
 
-	return clients.oss != nil && len(clients.ecs) > 0
+	return environment.ossClient != nil && len(environment.ecsClients) > 0
 }
 
 type aliyunOperationState struct {
@@ -112,37 +110,83 @@ type aliyunCredentials struct {
 	SecurityToken string `mapstructure:"security_token"`
 }
 
-func (p *aliyun) createClients(ctx context.Context, rawCreds map[string]any) error {
+type aliyunCredentialsProvider struct {
+	credentials atomic.Pointer[aliyunCredentials]
+}
+
+func (p *aliyunCredentialsProvider) GetCredentials(_ context.Context) (osscredentials.Credentials, error) {
+	creds := p.credentials.Load()
+	if creds == nil {
+		return osscredentials.Credentials{}, errors.New("credentials not set")
+	}
+
+	return osscredentials.Credentials{
+		AccessKeyID:     creds.AccessKey,
+		AccessKeySecret: creds.SecretKey,
+		SecurityToken:   creds.SecurityToken,
+	}, nil
+}
+
+type aliyunECSCredentialsProvider struct {
+	provider *aliyunCredentialsProvider
+}
+
+func (p aliyunECSCredentialsProvider) GetCredentials() (*providers.Credentials, error) {
+	creds, err := p.provider.GetCredentials(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	return &providers.Credentials{
+		AccessKeyId:     creds.AccessKeyID,
+		AccessKeySecret: creds.AccessKeySecret,
+		SecurityToken:   creds.SecurityToken,
+		ProviderName:    "GL",
+	}, nil
+}
+
+func (aliyunECSCredentialsProvider) GetProviderName() string {
+	return "GL"
+}
+
+func (p *aliyun) applyCredentials(ctx context.Context, rawCreds map[string]any) error {
 	var creds aliyunCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
 		return err
 	}
 
-	p.clientsMtx.Lock()
-	defer p.clientsMtx.Unlock()
+	environment := p.environment()
+	environment.credentialsProvider.credentials.Store(&creds)
+	environment.credsGen.Add(1)
 
-	p.clients.oss = oss.NewClient(oss.LoadDefaultConfig().WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey,
-		creds.SecretKey, creds.SecurityToken)).WithRegion(p.pubCfg.Region).WithConnectTimeout(guard.Timeout).
-		WithReadWriteTimeout(guard.Timeout).WithRetryer(retry.NewStandard(func(o *retry.RetryOptions) {
-		o.MaxAttempts = guard.Retries + 1
-		o.MaxBackoff = guard.RetryMaxDelay
-		o.BaseDelay = guard.RetryBaseDelay
-	})))
+	if environment.ossClient != nil && len(environment.ecsClients) > 0 {
+		return nil
+	}
+
+	ossClient := oss.NewClient(oss.LoadDefaultConfig().WithCredentialsProvider(&environment.credentialsProvider).
+		WithRegion(p.pubCfg.Region).WithConnectTimeout(guard.Timeout).WithReadWriteTimeout(guard.Timeout).
+		WithRetryer(retry.NewStandard(func(o *retry.RetryOptions) {
+			o.MaxAttempts = guard.Retries + 1
+			o.MaxBackoff = guard.RetryMaxDelay
+			o.BaseDelay = guard.RetryBaseDelay
+		})))
+
+	ecsCredential := credentials.FromCredentialsProvider("sts", aliyunECSCredentialsProvider{
+		provider: &environment.credentialsProvider,
+	})
 
 	var ecsClient *client.Client
 	ecsClient, err = client.NewClient(&utils.Config{
-		AccessKeyId:     &creds.AccessKey,
-		AccessKeySecret: &creds.SecretKey,
-		RegionId:        &p.pubCfg.Region,
-		SecurityToken:   &creds.SecurityToken,
+		RegionId:   &p.pubCfg.Region,
+		Credential: ecsCredential,
 	})
 	if err != nil {
 		return fmt.Errorf("cannot create ecs client: %w", err)
 	}
 
 	var regions []string
-	regions, err = p.listRegions(ctx, ecsClient)
+	regions, err = p.listRegions(ctx, guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}), ecsClient)
 	if err != nil {
 		return fmt.Errorf("cannot list regions: %w", err)
 	}
@@ -156,37 +200,32 @@ func (p *aliyun) createClients(ctx context.Context, rawCreds map[string]any) err
 		return fmt.Errorf("region %s is not available", p.pubCfg.Region)
 	}
 
-	if len(p.clients.ecs) > 0 {
-		expectedRegions := slices.Collect(maps.Keys(p.clients.ecs))
-		if !equalSets(regions, expectedRegions) {
-			return errorreport.MarkCritical(errors.New("available regions changed"))
-		}
-	}
-
-	p.clients.ecs = make(map[string]*client.Client, len(regions))
+	ecsClients := make(map[string]*client.Client, len(regions))
 	for _, region := range regions {
 		if region == p.pubCfg.Region {
-			p.clients.ecs[region] = ecsClient
+			ecsClients[region] = ecsClient
 			continue
 		}
 
-		p.clients.ecs[region], err = client.NewClient(&utils.Config{
+		ecsClients[region], err = client.NewClient(&utils.Config{
 			RegionId:   &region,
-			Credential: ecsClient.Credential,
+			Credential: ecsCredential,
 		})
 		if err != nil {
 			return fmt.Errorf("cannot create client for region %s: %w", region, err)
 		}
 	}
-	p.clientsGen.Add(1)
+
+	environment.ossClient = ossClient
+	environment.ecsClients = ecsClients
 
 	return nil
 }
 
-func (p *aliyun) listRegions(ctx context.Context, c *client.Client) ([]string, error) {
+func (*aliyun) listRegions(ctx context.Context, retrier guard.Retrier, c *client.Client) ([]string, error) {
 	log.Debug(ctx, "Listing available regions")
 	var r *client.DescribeRegionsResponse
-	err := p.ecsRetrier.Do(ctx, "describe regions", func(_ context.Context) error {
+	err := retrier.Do(ctx, "describe regions", func(_ context.Context) error {
 		var inErr error
 		r, inErr = c.DescribeRegionsWithOptions(&client.DescribeRegionsRequest{}, &dara.RuntimeOptions{
 			Autoretry:      new(false),
@@ -220,19 +259,8 @@ func (p *aliyun) listRegions(ctx context.Context, c *client.Client) ([]string, e
 	return regions, nil
 }
 
-func (p *aliyun) getClients() aliyunClients {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.clients
-}
-
-func (p *aliyun) ossClient() *oss.Client {
-	return p.getClients().oss
-}
-
-func (p *aliyun) ecsClient(region string) *client.Client {
-	return p.getClients().ecs[region]
+func (p *aliyun) environment() *aliyunEnvironment {
+	return &p.world
 }
 
 func (*aliyun) ImageSuffix() string {
@@ -301,7 +329,7 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot delete blob %s: %w", image, err))
 	}
 
-	ecsClients := p.getClients().ecs
+	ecsClients := p.environment().ecsClients
 	images := make(map[string]string, len(ecsClients))
 	publishImages := concurrency.NewActivitySync(ctx)
 	for toRegion := range ecsClients {
@@ -376,8 +404,8 @@ func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, ima
 	}()
 
 	log.Info(ctx, "Uploading blob")
-	err = p.ossRetrier.Do(ctx, "put object", func(ctx context.Context) error {
-		_, inErr := p.ossClient().PutObject(ctx, &oss.PutObjectRequest{
+	err = p.environment().retrier.Do(ctx, "put object", func(ctx context.Context) error {
+		_, inErr := p.environment().ossClient.PutObject(ctx, &oss.PutObjectRequest{
 			Bucket: &p.pubCfg.Bucket,
 			Key:    &ossKey,
 			Body:   obj,
@@ -406,9 +434,9 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 
 	log.Info(ctx, "Importing image")
 	var r *client.ImportImageResponse
-	err := p.ecsRetrier.Do(ctx, "import image", func(_ context.Context) error {
+	err := p.environment().ecsRetrier.Do(ctx, "import image", func(_ context.Context) error {
 		var inErr error
-		r, inErr = p.ecsClient(p.pubCfg.Region).ImportImageWithOptions(&client.ImportImageRequest{
+		r, inErr = p.environment().ecsClients[p.pubCfg.Region].ImportImageWithOptions(&client.ImportImageRequest{
 			DiskDeviceMapping: []*client.ImportImageRequestDiskDeviceMapping{
 				{
 					DiskImageSize: new(int32(20)),
@@ -459,8 +487,8 @@ func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
 	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "blob", blob)
 
 	log.Info(ctx, "Deleting blob")
-	err := p.ossRetrier.Do(ctx, "delete object", func(ctx context.Context) error {
-		_, inErr := p.ossClient().DeleteObject(ctx, &oss.DeleteObjectRequest{
+	err := p.environment().retrier.Do(ctx, "delete object", func(ctx context.Context) error {
+		_, inErr := p.environment().ossClient.DeleteObject(ctx, &oss.DeleteObjectRequest{
 			Bucket: &p.pubCfg.Bucket,
 			Key:    &blob,
 		})
@@ -480,9 +508,9 @@ func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
 func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion string) (string, error) {
 	log.Info(ctx, "Copying image")
 	var r *client.CopyImageResponse
-	err := p.ecsRetrier.Do(ctx, "copy image", func(_ context.Context) error {
+	err := p.environment().ecsRetrier.Do(ctx, "copy image", func(_ context.Context) error {
 		var inErr error
-		r, inErr = p.ecsClient(region).CopyImageWithOptions(&client.CopyImageRequest{
+		r, inErr = p.environment().ecsClients[region].CopyImageWithOptions(&client.CopyImageRequest{
 			DestinationImageName: &image,
 			DestinationRegionId:  &toRegion,
 			ImageId:              &imageID,
@@ -517,9 +545,9 @@ func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error
 	var status string
 	for status != "Available" {
 		var r *client.DescribeImagesResponse
-		err := p.ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
+		err := p.environment().ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
 			var inErr error
-			r, inErr = p.ecsClient(region).DescribeImagesWithOptions(&client.DescribeImagesRequest{
+			r, inErr = p.environment().ecsClients[region].DescribeImagesWithOptions(&client.DescribeImagesRequest{
 				ImageId:  &imageID,
 				RegionId: &region,
 			}, &dara.RuntimeOptions{
@@ -572,8 +600,8 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	} else {
 		log.Debug(ctx, "Removing share permission from image")
 	}
-	err := p.ecsRetrier.Do(ctx, "modify image share permission", func(_ context.Context) error {
-		_, inErr := p.ecsClient(region).ModifyImageSharePermissionWithOptions(&client.ModifyImageSharePermissionRequest{
+	err := p.environment().ecsRetrier.Do(ctx, "modify image share permission", func(_ context.Context) error {
+		_, inErr := p.environment().ecsClients[region].ModifyImageSharePermissionWithOptions(&client.ModifyImageSharePermissionRequest{
 			ImageId:  &imageID,
 			IsPublic: &public,
 			RegionId: &region,
@@ -647,9 +675,9 @@ func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, 
 func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region string, steamroll bool) error {
 	log.Debug(ctx, "Getting image status")
 	var r *client.DescribeImagesResponse
-	err := p.ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
+	err := p.environment().ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
 		var inErr error
-		r, inErr = p.ecsClient(region).DescribeImagesWithOptions(&client.DescribeImagesRequest{
+		r, inErr = p.environment().ecsClients[region].DescribeImagesWithOptions(&client.DescribeImagesRequest{
 			ImageId:  &imageID,
 			RegionId: &region,
 		}, &dara.RuntimeOptions{
@@ -703,8 +731,8 @@ func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region st
 
 func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool) error {
 	log.Info(ctx, "Deleting image")
-	err := p.ecsRetrier.Do(ctx, "delete image", func(_ context.Context) error {
-		_, inErr := p.ecsClient(region).DeleteImageWithOptions(&client.DeleteImageRequest{
+	err := p.environment().ecsRetrier.Do(ctx, "delete image", func(_ context.Context) error {
+		_, inErr := p.environment().ecsClients[region].DeleteImageWithOptions(&client.DeleteImageRequest{
 			ImageId:  &imageID,
 			RegionId: &region,
 		}, &dara.RuntimeOptions{
@@ -827,7 +855,7 @@ func (p *aliyun) Start(ctx context.Context) error {
 		Type:   p.Type(),
 		Config: p.pubCfg.Config,
 		Role:   "target",
-	}, p.createClients)
+	}, p.applyCredentials)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
 	}

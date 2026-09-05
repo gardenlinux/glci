@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/opencontainers/go-digest"
@@ -43,8 +42,8 @@ func init() {
 		p := &ociTarget{
 			base: b,
 		}
-		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.world.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
 
 		return p
@@ -54,8 +53,8 @@ func init() {
 		p := &ociOCMTarget{
 			base: b,
 		}
-		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.world.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
 
 		return p
@@ -76,15 +75,36 @@ type ociTarget struct {
 
 	pubCfg    ociPublishingConfig
 	credsType string
-	retrier   guard.Retrier
 
-	clientsMtx sync.RWMutex
-	clients    ociTargetClients
-	clientsGen atomic.Uint64
+	world ociEnvironment
 }
 
-type ociTargetClients struct {
-	repository *remote.Repository
+type ociEnvironment struct {
+	registryCredential ociRegistryCredential
+	credsGen           atomic.Uint64
+	retrier            guard.Retrier
+	repository         *remote.Repository
+}
+
+type ociRegistryCredential struct {
+	credentials atomic.Pointer[ociCredentials]
+	registry    string
+}
+
+func (c *ociRegistryCredential) credential(_ context.Context, hostport string) (auth.Credential, error) {
+	if hostport != c.registry {
+		return auth.EmptyCredential, nil
+	}
+
+	creds := c.credentials.Load()
+	if creds == nil {
+		return auth.EmptyCredential, errors.New("credentials not set")
+	}
+
+	return auth.Credential{
+		Username: creds.Username,
+		Password: creds.Password,
+	}, nil
 }
 
 type ociPublishingConfig struct {
@@ -95,7 +115,7 @@ type ociPublishingConfig struct {
 }
 
 func (p *ociTarget) isConfigured() bool {
-	return p.repository() != nil
+	return p.environment().repository != nil
 }
 
 type ociOperationState struct {
@@ -115,35 +135,33 @@ type ociIndividualOutput struct {
 	Architecture gardenlinux.Architecture
 }
 
-func (p *ociTarget) createClients(_ context.Context, rawCreds map[string]any) error {
+func (p *ociTarget) applyCredentials(_ context.Context, rawCreds map[string]any) error {
 	creds, err := parseOCICredentials(p.credsType, rawCreds)
 	if err != nil {
 		return err
 	}
 
-	p.clientsMtx.Lock()
-	defer p.clientsMtx.Unlock()
+	environment := p.environment()
+	environment.registryCredential.credentials.Store(&creds)
+	environment.credsGen.Add(1)
+
+	if environment.repository != nil {
+		return nil
+	}
 
 	var repository *remote.Repository
-	repository, err = newOCIRepository(p.pubCfg.Repository, creds)
+	repository, err = newOCIRepository(p.pubCfg.Repository, &environment.registryCredential)
 	if err != nil {
 		return err
 	}
-	p.clients.repository = repository
-	p.clientsGen.Add(1)
+
+	environment.repository = repository
 
 	return nil
 }
 
-func (p *ociTarget) getClients() ociTargetClients {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.clients
-}
-
-func (p *ociTarget) repository() *remote.Repository {
-	return p.getClients().repository
+func (p *ociTarget) environment() *ociEnvironment {
+	return &p.world
 }
 
 func (*ociTarget) ImageSuffix() string {
@@ -215,8 +233,8 @@ func (p *ociTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	}
 
 	log.Debug(ctx, "Copying artifact", "digest", descriptor.Digest)
-	err = p.retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
-		return oras.CopyGraph(ctx, store, p.repository(), descriptor, oras.DefaultCopyGraphOptions)
+	err = p.environment().retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
+		return oras.CopyGraph(ctx, store, p.environment().repository, descriptor, oras.DefaultCopyGraphOptions)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot copy OCI artifact: %w", err)
@@ -341,8 +359,8 @@ func (p *ociTarget) Fuse(ctx context.Context, flavorManifests []gardenlinux.Flav
 	ctx = resilience.BeginOperation(ctx, "fuse/"+flavorManifests[0].Manifest.Version, &ociOperationState{})
 
 	log.Info(ctx, "Fusing OCI artifacts", "digest", descriptor.Digest)
-	err = p.retrier.Do(ctx, "push reference", func(ctx context.Context) error {
-		return p.repository().PushReference(ctx, descriptor, bytes.NewReader(rawIndex), flavorManifests[0].Manifest.Version)
+	err = p.environment().retrier.Do(ctx, "push reference", func(ctx context.Context) error {
+		return p.environment().repository.PushReference(ctx, descriptor, bytes.NewReader(rawIndex), flavorManifests[0].Manifest.Version)
 	})
 	if err != nil {
 		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot push image index: %w", err))
@@ -384,9 +402,9 @@ func (p *ociTarget) Unfuse(ctx context.Context, flavorManifests []gardenlinux.Fl
 
 func (p *ociTarget) deleteTag(ctx context.Context, tag string, steamroll bool) error {
 	var descriptor specsv1.Descriptor
-	err := p.retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
+	err := p.environment().retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
 		var inErr error
-		descriptor, inErr = p.repository().Resolve(ctx, tag)
+		descriptor, inErr = p.environment().repository.Resolve(ctx, tag)
 		return inErr
 	})
 	if err != nil {
@@ -399,8 +417,8 @@ func (p *ociTarget) deleteTag(ctx context.Context, tag string, steamroll bool) e
 	}
 
 	log.Info(ctx, "Deleting image index", "digest", descriptor.Digest)
-	err = p.retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
-		return p.repository().Manifests().Delete(ctx, descriptor)
+	err = p.environment().retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
+		return p.environment().repository.Manifests().Delete(ctx, descriptor)
 	})
 	if err != nil {
 		if steamroll && errors.Is(err, errdef.ErrNotFound) {
@@ -499,7 +517,7 @@ func (p *ociTarget) Start(ctx context.Context) error {
 		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
 		Config: p.pubCfg.Config,
 		Role:   "target",
-	}, p.createClients)
+	}, p.applyCredentials)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
 	}
@@ -530,15 +548,8 @@ type ociOCMTarget struct {
 
 	ocmCfg    ociOCMConfig
 	credsType string
-	retrier   guard.Retrier
 
-	clientsMtx sync.RWMutex
-	clients    ociOCMTargetClients
-	clientsGen atomic.Uint64
-}
-
-type ociOCMTargetClients struct {
-	repository *remote.Repository
+	world ociEnvironment
 }
 
 type ociOCMConfig struct {
@@ -547,7 +558,7 @@ type ociOCMConfig struct {
 }
 
 func (p *ociOCMTarget) isConfigured() bool {
-	return p.repository() != nil
+	return p.environment().repository != nil
 }
 
 type ociCredentials struct {
@@ -595,11 +606,13 @@ func parseOCICredentials(credsType string, rawCreds map[string]any) (ociCredenti
 	return creds, nil
 }
 
-func newOCIRepository(repo string, creds ociCredentials) (*remote.Repository, error) {
+func newOCIRepository(repo string, registryCredential *ociRegistryCredential) (*remote.Repository, error) {
 	repository, err := remote.NewRepository(repo)
 	if err != nil {
 		return nil, fmt.Errorf("invalid OCI repository %s: %w", repo, err)
 	}
+
+	registryCredential.registry = repository.Reference.Registry
 
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -623,45 +636,39 @@ func newOCIRepository(repo string, creds ociCredentials) (*remote.Repository, er
 		Client: &http.Client{
 			Transport: transport,
 		},
-		Cache: auth.NewCache(),
-		Credential: auth.StaticCredential(repository.Reference.Registry, auth.Credential{
-			Username: creds.Username,
-			Password: creds.Password,
-		}),
+		Cache:      auth.NewCache(),
+		Credential: registryCredential.credential,
 	}
 
 	return repository, nil
 }
 
-func (p *ociOCMTarget) createClients(_ context.Context, rawCreds map[string]any) error {
+func (p *ociOCMTarget) applyCredentials(_ context.Context, rawCreds map[string]any) error {
 	creds, err := parseOCICredentials(p.credsType, rawCreds)
 	if err != nil {
 		return err
 	}
 
-	p.clientsMtx.Lock()
-	defer p.clientsMtx.Unlock()
+	environment := p.environment()
+	environment.registryCredential.credentials.Store(&creds)
+	environment.credsGen.Add(1)
+
+	if environment.repository != nil {
+		return nil
+	}
 
 	var repository *remote.Repository
-	repository, err = newOCIRepository(p.ocmCfg.Repository+repoSuffix, creds)
+	repository, err = newOCIRepository(p.ocmCfg.Repository+repoSuffix, &environment.registryCredential)
 	if err != nil {
 		return err
 	}
-	p.clients.repository = repository
-	p.clientsGen.Add(1)
+	environment.repository = repository
 
 	return nil
 }
 
-func (p *ociOCMTarget) getClients() ociOCMTargetClients {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.clients
-}
-
-func (p *ociOCMTarget) repository() *remote.Repository {
-	return p.getClients().repository
+func (p *ociOCMTarget) environment() *ociEnvironment {
+	return &p.world
 }
 
 func (*ociOCMTarget) OCMType() string {
@@ -779,8 +786,8 @@ func (p *ociOCMTarget) PublishComponentDescriptor(ctx context.Context, version s
 	}
 
 	log.Debug(ctx, "Copying artifact")
-	err = p.retrier.Do(ctx, "copy tag", func(ctx context.Context) error {
-		_, inErr := oras.Copy(ctx, store, version, p.repository(), version, oras.DefaultCopyOptions)
+	err = p.environment().retrier.Do(ctx, "copy tag", func(ctx context.Context) error {
+		_, inErr := oras.Copy(ctx, store, version, p.environment().repository, version, oras.DefaultCopyOptions)
 		return inErr
 	})
 	if err != nil {
@@ -832,7 +839,7 @@ func (p *ociOCMTarget) Start(ctx context.Context) error {
 		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
 		Config: p.ocmCfg.Config,
 		Role:   "oci",
-	}, p.createClients)
+	}, p.applyCredentials)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.ocmCfg.Config, err)
 	}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sync"
 	"sync/atomic"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -14,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/logging"
@@ -35,7 +33,7 @@ func init() {
 			base: b,
 		}
 		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGen.Load()
+			return p.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
 		return p
 	})
@@ -52,15 +50,11 @@ type aws struct {
 
 	stateCfg awsStateConfig
 	key      string
-	retrier  guard.Retrier
 
-	clientsMtx sync.RWMutex
-	clients    awsClients
-	clientsGen atomic.Uint64
-}
-
-type awsClients struct {
-	s3 *s3.Client
+	credentialsProvider awsCredentialsProvider
+	credsGen            atomic.Uint64
+	retrier             guard.Retrier
+	s3Client            *s3.Client
 }
 
 type awsStateConfig struct {
@@ -79,19 +73,40 @@ type awsCredentials struct {
 	SessionToken string `mapstructure:"session_token"`
 }
 
-func (p *aws) createClients(ctx context.Context, rawCreds map[string]any) error {
+type awsCredentialsProvider struct {
+	credentials atomic.Pointer[awsCredentials]
+}
+
+func (p *awsCredentialsProvider) Retrieve(_ context.Context) (awssdk.Credentials, error) {
+	creds := p.credentials.Load()
+	if creds == nil {
+		return awssdk.Credentials{}, errors.New("credentials not set")
+	}
+
+	return awssdk.Credentials{
+		AccessKeyID:     creds.AccessKey,
+		SecretAccessKey: creds.SecretKey,
+		SessionToken:    creds.SessionToken,
+		Source:          "GL",
+	}, nil
+}
+
+func (p *aws) applyCredentials(ctx context.Context, rawCreds map[string]any) error {
 	var creds awsCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
 		return err
 	}
 
-	p.clientsMtx.Lock()
-	defer p.clientsMtx.Unlock()
+	p.credentialsProvider.credentials.Store(&creds)
+	p.credsGen.Add(1)
+
+	if p.s3Client != nil {
+		return nil
+	}
 
 	var awsCfg awssdk.Config
 	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(p.stateCfg.Region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, creds.SessionToken)),
 		config.WithRetryer(func() awssdk.Retryer {
 			return retry.NewStandard(func(o *retry.StandardOptions) {
 				o.MaxAttempts = guard.Retries + 1
@@ -104,21 +119,13 @@ func (p *aws) createClients(ctx context.Context, rawCreds map[string]any) error 
 	if err != nil {
 		return fmt.Errorf("cannot load default config: %w", err)
 	}
-	p.clients.s3 = s3.NewFromConfig(awsCfg)
-	p.clientsGen.Add(1)
+	awsCfg.Credentials = &p.credentialsProvider
+
+	s3Client := s3.NewFromConfig(awsCfg)
+
+	p.s3Client = s3Client
 
 	return nil
-}
-
-func (p *aws) getClients() awsClients {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.clients
-}
-
-func (p *aws) s3Client() *s3.Client {
-	return p.getClients().s3
 }
 
 func (p *aws) SetID(id string) {
@@ -133,7 +140,7 @@ func (p *aws) Load() ([]byte, error) {
 	var r *s3.GetObjectOutput
 	err := p.retrier.Do(context.Background(), "get object", func(ctx context.Context) error {
 		var inErr error
-		r, inErr = p.s3Client().GetObject(ctx, &s3.GetObjectInput{
+		r, inErr = p.s3Client.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: &p.stateCfg.Bucket,
 			Key:    &p.key,
 		})
@@ -170,7 +177,7 @@ func (p *aws) Save(state []byte) error {
 	}
 
 	err := p.retrier.Do(context.Background(), "put object", func(ctx context.Context) error {
-		_, inErr := p.s3Client().PutObject(ctx, &s3.PutObjectInput{
+		_, inErr := p.s3Client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:          &p.stateCfg.Bucket,
 			Key:             &p.key,
 			Body:            bytes.NewReader(state),
@@ -192,7 +199,7 @@ func (p *aws) Clear() error {
 	}
 
 	err := p.retrier.Do(context.Background(), "delete object", func(ctx context.Context) error {
-		_, inErr := p.s3Client().DeleteObject(ctx, &s3.DeleteObjectInput{
+		_, inErr := p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: &p.stateCfg.Bucket,
 			Key:    &p.key,
 		})
@@ -237,7 +244,7 @@ func (p *aws) Start(ctx context.Context) error {
 		Type:   p.Type(),
 		Config: p.stateCfg.Config,
 		Role:   "state",
-	}, p.createClients)
+	}, p.applyCredentials)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials: %w", err)
 	}

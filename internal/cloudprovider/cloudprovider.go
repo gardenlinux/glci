@@ -460,22 +460,3 @@ func subset(original, subset []string) []string {
 	}
 	return res
 }
-
-func equalSets(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	present := make(map[string]struct{}, len(a))
-	for _, e := range a {
-		present[e] = struct{}{}
-	}
-	for _, e := range b {
-		_, ok := present[e]
-		if !ok {
-			return false
-		}
-	}
-
-	return true
-}
