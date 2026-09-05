@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -46,10 +45,9 @@ func init() {
 		p := &gcp{
 			base: b,
 		}
-		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.world.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
-
 		return p
 	})
 }
@@ -67,19 +65,19 @@ type gcp struct {
 	credsSource credsprovider.CredsSource
 	source      ArtifactSource
 
-	pubCfg  gcpPublishingConfig
-	retrier guard.Retrier
+	pubCfg gcpPublishingConfig
 
-	clientsMtx sync.RWMutex
-	clients    gcpClients
-	clientsGen atomic.Uint64
+	world gcpEnvironment
 }
 
-type gcpClients struct {
-	storage          *storage.Client
-	images           *compute.ImagesClient
-	globalOperations *compute.GlobalOperationsClient
-	accessID         string
+type gcpEnvironment struct {
+	tokenSource            gcpTokenSource
+	credsGen               atomic.Uint64
+	retrier                guard.Retrier
+	storageClient          *storage.Client
+	imagesClient           *compute.ImagesClient
+	globalOperationsClient *compute.GlobalOperationsClient
+	accessID               string
 }
 
 type gcpPublishingConfig struct {
@@ -90,9 +88,9 @@ type gcpPublishingConfig struct {
 }
 
 func (p *gcp) isConfigured() bool {
-	clients := p.getClients()
+	environment := p.environment()
 
-	return clients.storage != nil && clients.images != nil && clients.globalOperations != nil
+	return environment.storageClient != nil && environment.imagesClient != nil && environment.globalOperationsClient != nil
 }
 
 type gcpOperationState struct {
@@ -108,32 +106,36 @@ type gcpPublishingOutput struct {
 type gcpCredentials struct {
 	ServiceAccountEmail string `mapstructure:"service_account_email"`
 	Token               string `mapstructure:"token"`
-	Expiry              int64  `mapstructure:"expiry"`
 }
 
-func (p *gcp) createClients(ctx context.Context, rawCreds map[string]any) error {
+type gcpTokenSource struct {
+	credentials atomic.Pointer[gcpCredentials]
+}
+
+func (p *gcpTokenSource) Token() (*oauth2.Token, error) {
+	creds := p.credentials.Load()
+	if creds == nil {
+		return nil, errors.New("credentials not set")
+	}
+
+	return &oauth2.Token{
+		AccessToken: creds.Token,
+	}, nil
+}
+
+func (p *gcp) applyCredentials(ctx context.Context, rawCreds map[string]any) error {
 	var creds gcpCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
 		return err
 	}
 
-	p.clientsMtx.Lock()
-	defer p.clientsMtx.Unlock()
+	environment := p.environment()
+	environment.tokenSource.credentials.Store(&creds)
+	environment.credsGen.Add(1)
 
-	err = p.destroyClients(p.clients)
-	if err != nil {
-		return fmt.Errorf("cannot destroy existing clients: %w", err)
-	}
-
-	tokenSrc := oauth2.StaticTokenSource(&oauth2.Token{
-		AccessToken: creds.Token,
-		Expiry:      time.Unix(creds.Expiry, 0),
-	})
-
-	p.clients.storage, err = storage.NewClient(ctx, option.WithTokenSource(tokenSrc))
-	if err != nil {
-		return fmt.Errorf("cannot create storage client: %w", err)
+	if environment.storageClient != nil && environment.imagesClient != nil && environment.globalOperationsClient != nil {
+		return nil
 	}
 
 	t, ok := http.DefaultTransport.(*http.Transport)
@@ -144,49 +146,60 @@ func (p *gcp) createClients(ctx context.Context, rawCreds map[string]any) error 
 	t = t.Clone()
 	t.ResponseHeaderTimeout = guard.Timeout
 	var transport http.RoundTripper
-	transport, err = transporthttp.NewTransport(ctx, t, option.WithTokenSource(tokenSrc))
+	transport, err = transporthttp.NewTransport(ctx, t, option.WithTokenSource(&environment.tokenSource))
 	if err != nil {
-		return fmt.Errorf("cannot create compute transport: %w", err)
+		return fmt.Errorf("cannot create transport: %w", err)
 	}
 	c := &http.Client{
 		Transport: transport,
 	}
 
-	p.clients.images, err = compute.NewImagesRESTClient(ctx, option.WithHTTPClient(c))
+	var storageClient *storage.Client
+	var imagesClient *compute.ImagesClient
+	var globalOperationsClient *compute.GlobalOperationsClient
+	var success bool
+	defer func() {
+		if success {
+			return
+		}
+
+		if storageClient != nil {
+			_ = storageClient.Close()
+		}
+		if imagesClient != nil {
+			_ = imagesClient.Close()
+		}
+		if globalOperationsClient != nil {
+			_ = globalOperationsClient.Close()
+		}
+	}()
+
+	storageClient, err = storage.NewClient(ctx, option.WithHTTPClient(c))
+	if err != nil {
+		return fmt.Errorf("cannot create storage client: %w", err)
+	}
+
+	imagesClient, err = compute.NewImagesRESTClient(ctx, option.WithHTTPClient(c))
 	if err != nil {
 		return fmt.Errorf("cannot create images client: %w", err)
 	}
 
-	p.clients.globalOperations, err = compute.NewGlobalOperationsRESTClient(ctx, option.WithHTTPClient(c))
+	globalOperationsClient, err = compute.NewGlobalOperationsRESTClient(ctx, option.WithHTTPClient(c))
 	if err != nil {
 		return fmt.Errorf("cannot create global operations client: %w", err)
 	}
 
-	p.clients.accessID = creds.ServiceAccountEmail
-	p.clientsGen.Add(1)
+	environment.storageClient = storageClient
+	environment.imagesClient = imagesClient
+	environment.globalOperationsClient = globalOperationsClient
+	environment.accessID = creds.ServiceAccountEmail
 
+	success = true
 	return nil
 }
 
-func (p *gcp) getClients() gcpClients {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.clients
-}
-
-func (p *gcp) storageClient() (*storage.Client, string) {
-	clients := p.getClients()
-
-	return clients.storage, clients.accessID
-}
-
-func (p *gcp) imagesClient() *compute.ImagesClient {
-	return p.getClients().images
-}
-
-func (p *gcp) globalOperationsClient() *compute.GlobalOperationsClient {
-	return p.getClients().globalOperations
+func (p *gcp) environment() *gcpEnvironment {
+	return &p.world
 }
 
 func (*gcp) ImageSuffix() string {
@@ -366,10 +379,8 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 		_ = obj.Close()
 	}()
 
-	storageClient, accessID := p.storageClient()
-
 	log.Info(ctx, "Uploading blob")
-	bucket := storageClient.Bucket(p.pubCfg.Bucket)
+	bucket := p.environment().storageClient.Bucket(p.pubCfg.Bucket)
 	w := bucket.Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1), storage.WithBackoff(gax.Backoff{
 		Initial: guard.RetryBaseDelay,
 		Max:     guard.RetryMaxDelay,
@@ -398,7 +409,7 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 
 	var url string
 	url, err = bucket.SignedURL(blob, &storage.SignedURLOptions{
-		GoogleAccessID: accessID,
+		GoogleAccessID: p.environment().accessID,
 		Method:         "GET",
 		Expires:        time.Now().Add(time.Hour * 7),
 		Scheme:         storage.SigningSchemeV4,
@@ -452,9 +463,9 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 
 	log.Info(ctx, "Inserting image")
 	var op *compute.Operation
-	err := p.retrier.Do(ctx, "insert image", func(ctx context.Context) error {
+	err := p.environment().retrier.Do(ctx, "insert image", func(ctx context.Context) error {
 		var inErr error
-		op, inErr = p.imagesClient().Insert(ctx, &computepb.InsertImageRequest{
+		op, inErr = p.environment().imagesClient.Insert(ctx, &computepb.InsertImageRequest{
 			ImageResource: imageResource,
 			Project:       p.pubCfg.Project,
 		}, gax.WithRetry(func() gax.Retryer {
@@ -489,9 +500,8 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 
 func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error {
 	log.Info(ctx, "Deleting blob")
-	err := p.retrier.Do(ctx, "delete blob", func(ctx context.Context) error {
-		storageClient, _ := p.storageClient()
-		return storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1),
+	err := p.environment().retrier.Do(ctx, "delete blob", func(ctx context.Context) error {
+		return p.environment().storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1),
 			storage.WithBackoff(gax.Backoff{
 				Initial: guard.RetryBaseDelay,
 				Max:     guard.RetryMaxDelay,
@@ -515,8 +525,8 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 
 func (p *gcp) makePublic(ctx context.Context, image string) error {
 	log.Debug(ctx, "Setting IAM policy")
-	err := p.retrier.Do(ctx, "set IAM policy", func(ctx context.Context) error {
-		_, inErr := p.imagesClient().SetIamPolicy(ctx, &computepb.SetIamPolicyImageRequest{
+	err := p.environment().retrier.Do(ctx, "set IAM policy", func(ctx context.Context) error {
+		_, inErr := p.environment().imagesClient.SetIamPolicy(ctx, &computepb.SetIamPolicyImageRequest{
 			GlobalSetPolicyRequestResource: &computepb.GlobalSetPolicyRequest{
 				Policy: &computepb.Policy{
 					AuditConfigs: nil,
@@ -586,9 +596,9 @@ func (p *gcp) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, ste
 func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) error {
 	log.Info(ctx, "Deleting image")
 	var op *compute.Operation
-	err := p.retrier.Do(ctx, "delete image", func(ctx context.Context) error {
+	err := p.environment().retrier.Do(ctx, "delete image", func(ctx context.Context) error {
 		var inErr error
-		op, inErr = p.imagesClient().Delete(ctx, &computepb.DeleteImageRequest{
+		op, inErr = p.environment().imagesClient.Delete(ctx, &computepb.DeleteImageRequest{
 			Image:   image,
 			Project: p.pubCfg.Project,
 		}, gax.WithRetry(func() gax.Retryer {
@@ -624,9 +634,9 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 func (p *gcp) awaitOperation(ctx context.Context, operation, op string) error {
 	for {
 		var o *computepb.Operation
-		err := p.retrier.Do(ctx, operation, func(ctx context.Context) error {
+		err := p.environment().retrier.Do(ctx, operation, func(ctx context.Context) error {
 			var inErr error
-			o, inErr = p.globalOperationsClient().Get(ctx, &computepb.GetGlobalOperationRequest{
+			o, inErr = p.environment().globalOperationsClient.Get(ctx, &computepb.GetGlobalOperationRequest{
 				Operation: op,
 				Project:   p.pubCfg.Project,
 			})
@@ -742,7 +752,7 @@ func (p *gcp) Start(ctx context.Context) error {
 		Type:   p.Type(),
 		Config: p.pubCfg.Config,
 		Role:   "target",
-	}, p.createClients)
+	}, p.applyCredentials)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
 	}
@@ -759,26 +769,28 @@ func (p *gcp) Stop(ctx context.Context) error {
 		})
 	}
 
-	return p.destroyClients(p.getClients())
+	return p.destroyClients()
 }
 
-func (*gcp) destroyClients(clients gcpClients) error {
-	if clients.storage != nil {
-		err := clients.storage.Close()
+func (p *gcp) destroyClients() error {
+	environment := p.environment()
+
+	if environment.storageClient != nil {
+		err := environment.storageClient.Close()
 		if err != nil {
 			return fmt.Errorf("cannot close storage client: %w", err)
 		}
 	}
 
-	if clients.images != nil {
-		err := clients.images.Close()
+	if environment.imagesClient != nil {
+		err := environment.imagesClient.Close()
 		if err != nil {
 			return fmt.Errorf("cannot close images client: %w", err)
 		}
 	}
 
-	if clients.globalOperations != nil {
-		err := clients.globalOperations.Close()
+	if environment.globalOperationsClient != nil {
+		err := environment.globalOperationsClient.Close()
 		if err != nil {
 			return fmt.Errorf("cannot close global operations client: %w", err)
 		}

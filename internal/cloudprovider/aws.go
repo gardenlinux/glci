@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 	signer "github.com/aws/aws-sdk-go-v2/aws/signer/v4" // Package is named v4, and someone at Amazon needs to learn Go.
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -32,7 +30,6 @@ import (
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/env"
-	"github.com/gardenlinux/glci/internal/errorreport"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
@@ -50,9 +47,8 @@ func init() {
 			base: b,
 		}
 		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGen.Load()
+			return p.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
-
 		return p
 	})
 
@@ -60,11 +56,11 @@ func init() {
 		p := &awsTarget{
 			base: b,
 		}
-		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.world.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
-		p.retrierChina = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.clientsGenChina.Load()
+		p.china.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
+			return p.china.credsGen.Load()
 		}), guard.DelegatingTimeoutPolicy{})
 		return p
 	})
@@ -83,16 +79,12 @@ type awsSource struct {
 
 	credsSource credsprovider.CredsSource
 
-	srcCfg  awsSourceConfig
-	retrier guard.Retrier
+	srcCfg awsSourceConfig
 
-	clientsMtx sync.RWMutex
-	clients    awsSourceClients
-	clientsGen atomic.Uint64
-}
-
-type awsSourceClients struct {
-	s3 *s3.Client
+	credentialsProvider awsCredentialsProvider
+	credsGen            atomic.Uint64
+	retrier             guard.Retrier
+	s3Client            *s3.Client
 }
 
 type awsTarget struct {
@@ -104,23 +96,19 @@ type awsTarget struct {
 	source      ArtifactSource
 	sourceChina ArtifactSource
 
-	pubCfg       awsPublishingConfig
-	enableChina  bool
-	retrier      guard.Retrier
-	retrierChina guard.Retrier
+	pubCfg      awsPublishingConfig
+	enableChina bool
 
-	clientsMtx      sync.RWMutex
-	clients         awsTargetClients
-	clientsGen      atomic.Uint64
-	clientsGenChina atomic.Uint64
-	regions         []string
-	regionsChina    []string
+	world awsEnvironment
+	china awsEnvironment
 }
 
-type awsTargetClients struct {
-	ec2 *ec2.Client
-
-	ec2China *ec2.Client
+type awsEnvironment struct {
+	credentialsProvider awsCredentialsProvider
+	credsGen            atomic.Uint64
+	retrier             guard.Retrier
+	ec2Client           *ec2.Client
+	regions             []string
 }
 
 type awsSourceConfig struct {
@@ -148,7 +136,7 @@ type awsImageTags struct {
 }
 
 func (p *awsTarget) isConfigured() bool {
-	return p.ec2Client(false) != nil
+	return p.environment(false).ec2Client != nil
 }
 
 type awsOperationState struct {
@@ -176,19 +164,40 @@ type awsCredentials struct {
 	SessionToken string `mapstructure:"session_token"`
 }
 
-func (p *awsSource) createClients(ctx context.Context, rawCreds map[string]any) error {
+type awsCredentialsProvider struct {
+	credentials atomic.Pointer[awsCredentials]
+}
+
+func (p *awsCredentialsProvider) Retrieve(_ context.Context) (awssdk.Credentials, error) {
+	creds := p.credentials.Load()
+	if creds == nil {
+		return awssdk.Credentials{}, errors.New("credentials not set")
+	}
+
+	return awssdk.Credentials{
+		AccessKeyID:     creds.AccessKey,
+		SecretAccessKey: creds.SecretKey,
+		SessionToken:    creds.SessionToken,
+		Source:          "GL",
+	}, nil
+}
+
+func (p *awsSource) applyCredentials(ctx context.Context, rawCreds map[string]any) error {
 	var creds awsCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
 		return err
 	}
 
-	p.clientsMtx.Lock()
-	defer p.clientsMtx.Unlock()
+	p.credentialsProvider.credentials.Store(&creds)
+	p.credsGen.Add(1)
+
+	if p.s3Client != nil {
+		return nil
+	}
 
 	var awsCfg awssdk.Config
 	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(p.srcCfg.Region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, creds.SessionToken)),
 		config.WithRetryer(func() awssdk.Retryer {
 			return retry.NewStandard(func(o *retry.StandardOptions) {
 				o.MaxAttempts = guard.Retries + 1
@@ -201,30 +210,38 @@ func (p *awsSource) createClients(ctx context.Context, rawCreds map[string]any) 
 	if err != nil {
 		return fmt.Errorf("cannot load default config: %w", err)
 	}
-	p.clients.s3 = s3.NewFromConfig(awsCfg)
-	p.clientsGen.Add(1)
+	awsCfg.Credentials = &p.credentialsProvider
+
+	s3Client := s3.NewFromConfig(awsCfg)
+
+	p.s3Client = s3Client
 
 	return nil
 }
 
-func (p *awsTarget) createClients(ctx context.Context, rawCreds map[string]any, china bool) error {
+func (p *awsTarget) applyCredentials(ctx context.Context, rawCreds map[string]any, china bool) error {
 	var creds awsCredentials
 	err := parseCredentials(rawCreds, &creds)
 	if err != nil {
 		return err
 	}
 
-	p.clientsMtx.Lock()
-	defer p.clientsMtx.Unlock()
-
+	environment := p.environment(china)
 	region := p.pubCfg.Region
+	configuredRegions := p.pubCfg.Regions
 	if china {
 		region = p.pubCfg.RegionChina
+		configuredRegions = p.pubCfg.RegionsChina
+	}
+	environment.credentialsProvider.credentials.Store(&creds)
+	environment.credsGen.Add(1)
+
+	if environment.ec2Client != nil {
+		return nil
 	}
 
 	var awsCfg awssdk.Config
 	awsCfg, err = config.LoadDefaultConfig(ctx, config.WithLogger(logging.Nop{}), config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, creds.SessionToken)),
 		config.WithRetryer(func() awssdk.Retryer {
 			return retry.NewStandard(func(o *retry.StandardOptions) {
 				o.MaxAttempts = guard.Retries + 1
@@ -237,59 +254,35 @@ func (p *awsTarget) createClients(ctx context.Context, rawCreds map[string]any, 
 	if err != nil {
 		return fmt.Errorf("cannot load default AWS config: %w", err)
 	}
+	awsCfg.Credentials = &environment.credentialsProvider
+
 	ec2Client := ec2.NewFromConfig(awsCfg)
 
 	var regions []string
-	regions, err = p.listRegions(ctx, ec2Client)
+	regions, err = p.listRegions(ctx, guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}), ec2Client)
 	if err != nil {
 		return fmt.Errorf("cannot list regions: %w", err)
 	}
-
-	if china {
-		if len(p.pubCfg.RegionsChina) > 0 {
-			regions = subset(regions, p.pubCfg.RegionsChina)
-		}
-		if len(regions) == 0 {
-			return errors.New("no available regions")
-		}
-		if !slices.Contains(regions, region) {
-			return fmt.Errorf("region %s is not available", region)
-		}
-
-		if len(p.regionsChina) > 0 && !equalSets(regions, p.regionsChina) {
-			return errorreport.MarkCritical(errors.New("available regions changed"))
-		}
-
-		p.clients.ec2China = ec2Client
-		p.regionsChina = regions
-		p.clientsGenChina.Add(1)
-	} else {
-		if len(p.pubCfg.Regions) > 0 {
-			regions = subset(regions, p.pubCfg.Regions)
-		}
-		if len(regions) == 0 {
-			return errors.New("no available regions")
-		}
-		if !slices.Contains(regions, region) {
-			return fmt.Errorf("region %s is not available", region)
-		}
-
-		if len(p.regions) > 0 && !equalSets(regions, p.regions) {
-			return errorreport.MarkCritical(errors.New("available regions changed"))
-		}
-
-		p.clients.ec2 = ec2Client
-		p.regions = regions
-		p.clientsGen.Add(1)
+	if len(configuredRegions) > 0 {
+		regions = subset(regions, configuredRegions)
 	}
+	if len(regions) == 0 {
+		return errors.New("no available regions")
+	}
+	if !slices.Contains(regions, region) {
+		return fmt.Errorf("region %s is not available", region)
+	}
+
+	environment.ec2Client = ec2Client
+	environment.regions = regions
 
 	return nil
 }
 
-func (p *awsTarget) listRegions(ctx context.Context, ec2Client *ec2.Client) ([]string, error) {
+func (*awsTarget) listRegions(ctx context.Context, retrier guard.Retrier, ec2Client *ec2.Client) ([]string, error) {
 	log.Debug(ctx, "Listing available regions")
 	var r *ec2.DescribeRegionsOutput
-	err := p.retrier.Do(ctx, "describe regions", func(ctx context.Context) error {
+	err := retrier.Do(ctx, "describe regions", func(ctx context.Context) error {
 		var inErr error
 		r, inErr = ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
 		return inErr
@@ -315,49 +308,12 @@ func overrideRegion(region string) func(o *ec2.Options) {
 	}
 }
 
-func (p *awsSource) getClients() awsSourceClients {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.clients
-}
-
-func (p *awsSource) s3Client() *s3.Client {
-	return p.getClients().s3
-}
-
-func (p *awsTarget) getClients() awsTargetClients {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	return p.clients
-}
-
-func (p *awsTarget) ec2Client(china bool) *ec2.Client {
+func (p *awsTarget) environment(china bool) *awsEnvironment {
 	if china {
-		return p.getClients().ec2China
+		return &p.china
 	}
 
-	return p.getClients().ec2
-}
-
-func (p *awsTarget) getRegions(china bool) []string {
-	p.clientsMtx.RLock()
-	defer p.clientsMtx.RUnlock()
-
-	if china {
-		return p.regionsChina
-	}
-
-	return p.regions
-}
-
-func (p *awsTarget) getRetrier(china bool) guard.Retrier {
-	if china {
-		return p.retrierChina
-	}
-
-	return p.retrier
+	return &p.world
 }
 
 func (*awsTarget) ImageSuffix() string {
@@ -408,13 +364,13 @@ func (p *awsSource) Repository() string {
 }
 
 func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error) {
-	if p.s3Client() == nil {
+	if p.s3Client == nil {
 		return "", errors.New("config not set")
 	}
 	log.Debug(ctx, "Getting presigned URL", "bucket", p.srcCfg.Bucket, "key", key)
 	var presigned *signer.PresignedHTTPRequest
 	err := p.retrier.Do(ctx, "presign get object", func(ctx context.Context) error {
-		presignClient := s3.NewPresignClient(p.s3Client(), func(o *s3.PresignOptions) {
+		presignClient := s3.NewPresignClient(p.s3Client, func(o *s3.PresignOptions) {
 			o.Expires = time.Hour * 7
 		})
 		var inErr error
@@ -432,14 +388,14 @@ func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error
 }
 
 func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error) {
-	if p.s3Client() == nil {
+	if p.s3Client == nil {
 		return ObjectProperties{}, errors.New("config not set")
 	}
 	log.Debug(ctx, "Heading object", "bucket", p.srcCfg.Bucket, "key", key)
 	var r *s3.HeadObjectOutput
 	err := p.retrier.Do(ctx, "head object", func(ctx context.Context) error {
 		var inErr error
-		r, inErr = p.s3Client().HeadObject(ctx, &s3.HeadObjectInput{
+		r, inErr = p.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket:       &p.srcCfg.Bucket,
 			Key:          &key,
 			ChecksumMode: s3types.ChecksumModeEnabled,
@@ -479,24 +435,24 @@ func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (Object
 }
 
 func (p *awsSource) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
-	if p.s3Client() == nil {
+	if p.s3Client == nil {
 		return nil, errors.New("config not set")
 	}
 	log.Debug(ctx, "Getting object", "bucket", p.srcCfg.Bucket, "key", key)
 
 	return guard.NewRetryingReader(ctx, guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}), awsContentSource{
-		retrier: p.retrier,
-		client:  p.s3Client,
-		bucket:  p.srcCfg.Bucket,
-		key:     key,
+		retrier:  p.retrier,
+		s3Client: p.s3Client,
+		bucket:   p.srcCfg.Bucket,
+		key:      key,
 	})
 }
 
 type awsContentSource struct {
-	retrier guard.Retrier
-	client  func() *s3.Client
-	bucket  string
-	key     string
+	retrier  guard.Retrier
+	s3Client *s3.Client
+	bucket   string
+	key      string
 }
 
 func (s awsContentSource) Open(ctx context.Context, offset int64, identity string) (guard.Content, error) {
@@ -513,7 +469,7 @@ func (s awsContentSource) Open(ctx context.Context, offset int64, identity strin
 	var output *s3.GetObjectOutput
 	err := s.retrier.Do(ctx, "get object", func(ctx context.Context) error {
 		var inErr error
-		output, inErr = s.client().GetObject(ctx, input)
+		output, inErr = s.s3Client.GetObject(ctx, input)
 		return inErr
 	})
 	if err != nil {
@@ -546,7 +502,7 @@ func (s awsContentSource) Open(ctx context.Context, offset int64, identity strin
 }
 
 func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader, contentType string) error {
-	if p.s3Client() == nil {
+	if p.s3Client == nil {
 		return errors.New("config not set")
 	}
 	obj, ok := object.(io.ReadSeeker)
@@ -575,7 +531,7 @@ func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader,
 			input.ContentType = &contentType
 		}
 
-		uploader := transfermanager.New(p.s3Client())
+		uploader := transfermanager.New(p.s3Client)
 		_, inErr = uploader.UploadObject(ctx, input)
 		return inErr
 	})
@@ -696,7 +652,7 @@ func (p *awsTarget) publish(ctx context.Context, source ArtifactSource, key, ima
 ) ([]awsPublishedImage, error) {
 	cld := "public"
 	region := p.pubCfg.Region
-	regions := p.getRegions(china)
+	regions := p.environment(china).regions
 	taskImage := image
 	if china {
 		cld = "china"
@@ -849,9 +805,9 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 
 	log.Info(ctx, "Importing snapshot")
 	var r *ec2.ImportSnapshotOutput
-	err := p.getRetrier(china).Do(ctx, "import snapshot", func(ctx context.Context) error {
+	err := p.environment(china).retrier.Do(ctx, "import snapshot", func(ctx context.Context) error {
 		var inErr error
-		r, inErr = p.ec2Client(china).ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
+		r, inErr = p.environment(china).ec2Client.ImportSnapshot(ctx, &ec2.ImportSnapshotInput{
 			DiskContainer: &ec2types.SnapshotDiskContainer{
 				Description: &image,
 				Format:      new("raw"),
@@ -881,9 +837,9 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 	status := "active"
 	for status == "active" {
 		var s *ec2.DescribeImportSnapshotTasksOutput
-		err = p.getRetrier(china).Do(ctx, "describe import snapshot tasks", func(ctx context.Context) error {
+		err = p.environment(china).retrier.Do(ctx, "describe import snapshot tasks", func(ctx context.Context) error {
 			var inErr error
-			s, inErr = p.ec2Client(china).DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
+			s, inErr = p.environment(china).ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 				ImportTaskIds: []string{*r.ImportTaskId},
 			})
 			return inErr
@@ -930,8 +886,8 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 
 func (p *awsTarget) attachTags(ctx context.Context, obj string, tags []ec2types.Tag, china bool) error {
 	log.Debug(ctx, "Attaching tags", "object", obj)
-	err := p.getRetrier(china).Do(ctx, "create tags", func(ctx context.Context) error {
-		_, inErr := p.ec2Client(china).CreateTags(ctx, &ec2.CreateTagsInput{
+	err := p.environment(china).retrier.Do(ctx, "create tags", func(ctx context.Context) error {
+		_, inErr := p.environment(china).ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{obj},
 			Tags:      tags,
 		})
@@ -975,9 +931,9 @@ func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, a
 
 	log.Info(ctx, "Registering image")
 	var r *ec2.RegisterImageOutput
-	err := p.getRetrier(china).Do(ctx, "register image", func(ctx context.Context) error {
+	err := p.environment(china).retrier.Do(ctx, "register image", func(ctx context.Context) error {
 		var inErr error
-		r, inErr = p.ec2Client(china).RegisterImage(ctx, &params)
+		r, inErr = p.environment(china).ec2Client.RegisterImage(ctx, &params)
 		return inErr
 	})
 	if err != nil {
@@ -999,9 +955,9 @@ func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, a
 func (p *awsTarget) copyImage(ctx context.Context, image, imageID, region, toRegion string, china bool) (string, error) {
 	log.Info(ctx, "Copying image")
 	var r *ec2.CopyImageOutput
-	err := p.getRetrier(china).Do(ctx, "copy image", func(ctx context.Context) error {
+	err := p.environment(china).retrier.Do(ctx, "copy image", func(ctx context.Context) error {
 		var inErr error
-		r, inErr = p.ec2Client(china).CopyImage(ctx, &ec2.CopyImageInput{
+		r, inErr = p.environment(china).ec2Client.CopyImage(ctx, &ec2.CopyImageInput{
 			Name:          &image,
 			SourceImageId: &imageID,
 			SourceRegion:  &region,
@@ -1028,9 +984,9 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 	var state ec2types.ImageState
 	for state != ec2types.ImageStateAvailable {
 		var r *ec2.DescribeImagesOutput
-		err := p.getRetrier(china).Do(ctx, "describe images", func(ctx context.Context) error {
+		err := p.environment(china).retrier.Do(ctx, "describe images", func(ctx context.Context) error {
 			var inErr error
-			r, inErr = p.ec2Client(china).DescribeImages(ctx, &ec2.DescribeImagesInput{
+			r, inErr = p.environment(china).ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 				ImageIds: []string{imageID},
 			}, overrideRegion(region))
 			return inErr
@@ -1062,8 +1018,8 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 
 func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, china bool) error {
 	log.Debug(ctx, "Adding launch permission to image")
-	err := p.getRetrier(china).Do(ctx, "modify image attribute", func(ctx context.Context) error {
-		_, inErr := p.ec2Client(china).ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
+	err := p.environment(china).retrier.Do(ctx, "modify image attribute", func(ctx context.Context) error {
+		_, inErr := p.environment(china).ec2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
 			ImageId:   &imageID,
 			Attribute: new("launchPermission"),
 			LaunchPermission: &ec2types.LaunchPermissionModifications{
@@ -1125,9 +1081,9 @@ func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 func (p *awsTarget) deregisterImage(ctx context.Context, imageID, region string, steamroll, china bool) error {
 	log.Info(ctx, "Deregistering image")
 	var r *ec2.DeregisterImageOutput
-	err := p.getRetrier(china).Do(ctx, "deregister image", func(ctx context.Context) error {
+	err := p.environment(china).retrier.Do(ctx, "deregister image", func(ctx context.Context) error {
 		var inErr error
-		r, inErr = p.ec2Client(china).DeregisterImage(ctx, &ec2.DeregisterImageInput{
+		r, inErr = p.environment(china).ec2Client.DeregisterImage(ctx, &ec2.DeregisterImageInput{
 			ImageId:                   &imageID,
 			DeleteAssociatedSnapshots: new(true),
 		}, overrideRegion(region))
@@ -1230,9 +1186,9 @@ func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTask
 	status := "active"
 	for status == "active" {
 		var s *ec2.DescribeImportSnapshotTasksOutput
-		err := p.getRetrier(china).Do(ctx, "describe import snapshot tasks", func(ctx context.Context) error {
+		err := p.environment(china).retrier.Do(ctx, "describe import snapshot tasks", func(ctx context.Context) error {
 			var inErr error
-			s, inErr = p.ec2Client(china).DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
+			s, inErr = p.environment(china).ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 				ImportTaskIds: []string{importTaskID},
 			}, overrideRegion(region))
 			return inErr
@@ -1282,8 +1238,8 @@ func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTask
 
 func (p *awsTarget) deleteSnapshot(ctx context.Context, snapshot, region string, steamroll, china bool) error {
 	log.Info(ctx, "Deleting snapshot")
-	err := p.getRetrier(china).Do(ctx, "delete snapshot", func(ctx context.Context) error {
-		_, inErr := p.ec2Client(china).DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
+	err := p.environment(china).retrier.Do(ctx, "delete snapshot", func(ctx context.Context) error {
+		_, inErr := p.environment(china).ec2Client.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
 			SnapshotId: &snapshot,
 		}, overrideRegion(region))
 		return inErr
@@ -1332,7 +1288,7 @@ func (p *awsSource) Start(ctx context.Context) error {
 		Type:   p.Type(),
 		Config: p.srcCfg.Config,
 		Role:   "source",
-	}, p.createClients)
+	}, p.applyCredentials)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.srcCfg.Config, err)
 	}
@@ -1417,7 +1373,7 @@ func (p *awsTarget) Start(ctx context.Context) error {
 		Config: p.pubCfg.Config,
 		Role:   "target",
 	}, func(ctx context.Context, creds map[string]any) error {
-		return p.createClients(ctx, creds, false)
+		return p.applyCredentials(ctx, creds, false)
 	})
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
@@ -1429,7 +1385,7 @@ func (p *awsTarget) Start(ctx context.Context) error {
 			Config: p.pubCfg.ConfigChina,
 			Role:   "target",
 		}, func(ctx context.Context, creds map[string]any) error {
-			return p.createClients(ctx, creds, true)
+			return p.applyCredentials(ctx, creds, true)
 		})
 		if err != nil {
 			return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.ConfigChina, err)

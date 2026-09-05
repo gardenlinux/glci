@@ -42,7 +42,7 @@ func (p *Publisher) Replicate(ctx context.Context, version, commit string) error
 	}
 	err := gatherReplications.Wait()
 	if err != nil {
-		return fmt.Errorf("cannot gather replications: %w", err)
+		return err
 	}
 
 	var replications []cloudprovider.Replication
