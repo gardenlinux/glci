@@ -400,7 +400,6 @@ func (p *azure) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replicat
 		Destination:   p.sourceChina,
 		DestinationID: p.pubCfg.SourceChina,
 		Key:           imagePath.S3Key,
-		SHA256:        imagePath.SHA256Sum,
 	}}, nil
 }
 
