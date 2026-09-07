@@ -22,6 +22,8 @@ func publishCmd() *cobra.Command {
 
 	c.Flags().StringP("version", "v", "", "release version")
 	c.Flags().StringP("commit", "c", "", "release commit(ish)")
+	c.Flags().Bool("replicate", false, "replicate artifacts between artifact sources before publishing")
+	c.Flags().Bool("unreplicate", false, "unreplicate artifacts from artifact sources after publishing")
 	c.Flags().Bool("omit-irreversible", false, "omit publishing anything that cannot be unpublished (implies --omit-component-descriptor)")
 	c.Flags().Bool("omit-component-descriptor", false, "omit publishing a component descriptor")
 
@@ -45,10 +47,24 @@ func publish(ctx context.Context, cfg *viper.Viper, _ []string) error {
 		_ = stop()
 	}()
 
+	if cfg.GetBool("replicate") {
+		err = g.Publisher.Replicate(ctx, cfg.GetString("version"), cfg.GetString("commit"))
+		if err != nil {
+			return err
+		}
+	}
+
 	err = g.Publisher.Publish(ctx, cfg.GetString("version"), cfg.GetString("commit"), cfg.GetBool("omit-irreversible"),
 		cfg.GetBool("omit-component-descriptor"))
 	if err != nil {
 		return err
+	}
+
+	if cfg.GetBool("unreplicate") {
+		err = g.Publisher.Unreplicate(ctx, cfg.GetString("version"), cfg.GetString("commit"), false)
+		if err != nil {
+			return err
+		}
 	}
 
 	return stop()

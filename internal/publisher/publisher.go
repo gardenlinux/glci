@@ -383,6 +383,56 @@ func (*Publisher) countFlavors(tasks []publishingTask) int {
 	return count
 }
 
+func (p *Publisher) gatherReplications(ctx context.Context, version, commit string) ([]cloudprovider.Replication, error) {
+	requiredReplications := make([][]cloudprovider.Replication, len(p.flavors))
+	gatherReplications := concurrency.NewActivity(ctx)
+	for i, flavorConfig := range p.flavors {
+		gatherReplications.Go(func(ctx context.Context) error {
+			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
+
+			manifest, inErr := p.fetchManifest(ctx, flavorConfig.Flavor, version, commit)
+			if inErr != nil {
+				return inErr
+			}
+
+			var target cloudprovider.PublishingTarget
+			target, inErr = p.selectTarget(manifest, flavorConfig.Flavor)
+			if inErr != nil {
+				return inErr
+			}
+
+			var replications []cloudprovider.Replication
+			replications, inErr = target.RequiredReplications(manifest)
+			if inErr != nil {
+				return fmt.Errorf("cannot determine replications for %s: %w", flavorConfig.Flavor, inErr)
+			}
+			requiredReplications[i] = replications
+
+			return nil
+		})
+	}
+	err := gatherReplications.Wait()
+	if err != nil {
+		return nil, err
+	}
+
+	var replications []cloudprovider.Replication
+	seen := make(map[cloudprovider.Replication]struct{})
+	for _, flavorReplications := range requiredReplications {
+		for _, replication := range flavorReplications {
+			_, ok := seen[replication]
+			if ok {
+				continue
+			}
+			seen[replication] = struct{}{}
+
+			replications = append(replications, replication)
+		}
+	}
+
+	return replications, nil
+}
+
 type groupPublication struct {
 	Group         string
 	GroupManifest *gardenlinux.GroupManifest

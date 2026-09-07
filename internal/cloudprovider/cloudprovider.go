@@ -41,7 +41,7 @@ var OCMTargetCategory = module.NewCategory[OCMTarget]("target")
 type ObjectProperties struct {
 	Size        int64
 	ContentType string
-	SHA256      string
+	Hash        string
 }
 
 // ArtifactSource is a source of artifacts which can retrieve arbitrary objects as well as retrieve and publish manifests.
@@ -53,6 +53,7 @@ type ArtifactSource interface {
 	GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, object io.Reader, contentType string) error
+	DeleteObject(ctx context.Context, key string, steamroll bool) error
 }
 
 // ReplicateArtifact copies an artifact object under key from one artifact source to another.
@@ -229,15 +230,10 @@ type Replication struct {
 	Destination   ArtifactSource
 	DestinationID string
 	Key           string
-	SHA256        string
 }
 
-// IsReplicated reports whether the destination already holds the artifact with the expected content digest and type.
+// IsReplicated reports whether the destination already holds the artifact with the same hash, size and content type as the origin.
 func (r Replication) IsReplicated(ctx context.Context) (bool, error) {
-	if r.SHA256 == "" {
-		return false, nil
-	}
-
 	destination, err := r.Destination.GetObjectProperties(ctx, r.Key)
 	if err != nil {
 		_, ok := errors.AsType[*KeyNotFoundError](err)
@@ -247,9 +243,6 @@ func (r Replication) IsReplicated(ctx context.Context) (bool, error) {
 
 		return false, fmt.Errorf("cannot get destination object properties: %w", err)
 	}
-	if destination.SHA256 == "" || destination.SHA256 != r.SHA256 {
-		return false, nil
-	}
 
 	var origin ObjectProperties
 	origin, err = r.Origin.GetObjectProperties(ctx, r.Key)
@@ -257,7 +250,11 @@ func (r Replication) IsReplicated(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("cannot get origin object properties: %w", err)
 	}
 
-	return destination.ContentType == origin.ContentType, nil
+	if origin.Hash == "" || destination.Hash == "" {
+		return false, nil
+	}
+
+	return origin.Hash == destination.Hash && origin.Size == destination.Size && origin.ContentType == destination.ContentType, nil
 }
 
 // PublishingOutput is an opaque representation of the result of a publishing operation.

@@ -3,8 +3,6 @@ package cloudprovider
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -340,7 +338,6 @@ func (p *awsTarget) RequiredReplications(manifest *gardenlinux.Manifest) ([]Repl
 		Destination:   p.sourceChina,
 		DestinationID: p.pubCfg.SourceChina,
 		Key:           imagePath.S3Key,
-		SHA256:        imagePath.SHA256Sum,
 	}}, nil
 }
 
@@ -396,9 +393,8 @@ func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (Object
 	err := p.retrier.Do(ctx, "head object", func(ctx context.Context) error {
 		var inErr error
 		r, inErr = p.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket:       &p.srcCfg.Bucket,
-			Key:          &key,
-			ChecksumMode: s3types.ChecksumModeEnabled,
+			Bucket: &p.srcCfg.Bucket,
+			Key:    &key,
 		})
 		return inErr
 	})
@@ -422,13 +418,8 @@ func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (Object
 	if r.ContentType != nil {
 		properties.ContentType = *r.ContentType
 	}
-	if r.ChecksumType == s3types.ChecksumTypeFullObject && r.ChecksumSHA256 != nil {
-		var sum []byte
-		sum, err = base64.StdEncoding.DecodeString(*r.ChecksumSHA256)
-		if err != nil {
-			return ObjectProperties{}, fmt.Errorf("cannot decode object checksum: %w", err)
-		}
-		properties.SHA256 = hex.EncodeToString(sum)
+	if r.ETag != nil {
+		properties.Hash = *r.ETag
 	}
 
 	return properties, nil
@@ -537,6 +528,44 @@ func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader,
 	})
 	if err != nil {
 		return fmt.Errorf("cannot put object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
+	}
+
+	return nil
+}
+
+func (p *awsSource) DeleteObject(ctx context.Context, key string, steamroll bool) error {
+	if p.s3Client == nil {
+		return errors.New("config not set")
+	}
+
+	log.Debug(ctx, "Heading object", "bucket", p.srcCfg.Bucket, "key", key)
+	err := p.retrier.Do(ctx, "head object", func(ctx context.Context) error {
+		_, inErr := p.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: &p.srcCfg.Bucket,
+			Key:    &key,
+		})
+		return inErr
+	})
+	if err != nil {
+		_, ok := errors.AsType[*s3types.NotFound](err)
+		if steamroll && ok {
+			log.Debug(ctx, "Object not found but the steamroller keeps going")
+			return nil
+		}
+
+		return fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
+	}
+
+	log.Debug(ctx, "Deleting object", "bucket", p.srcCfg.Bucket, "key", key)
+	err = p.retrier.Do(ctx, "delete object", func(ctx context.Context) error {
+		_, inErr := p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: &p.srcCfg.Bucket,
+			Key:    &key,
+		})
+		return inErr
+	})
+	if err != nil {
+		return fmt.Errorf("cannot delete object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
 	}
 
 	return nil
