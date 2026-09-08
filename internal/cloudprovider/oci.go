@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 
 	"github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/specs-go"
 	specsv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
 	orasfile "oras.land/oras-go/v2/content/file"
@@ -338,11 +337,9 @@ func (p *ociTarget) Fuse(ctx context.Context, flavorManifests []gardenlinux.Flav
 	ctx = log.WithValues(ctx, "repository", p.pubCfg.Repository, "tag", flavorManifests[0].Manifest.Version)
 
 	index := specsv1.Index{
-		Versioned: specs.Versioned{
-			SchemaVersion: 2,
-		},
-		MediaType: specsv1.MediaTypeImageIndex,
-		Manifests: descriptors,
+		SchemaVersion: 2,
+		MediaType:     specsv1.MediaTypeImageIndex,
+		Manifests:     descriptors,
 	}
 
 	rawIndex, err := json.Marshal(index)

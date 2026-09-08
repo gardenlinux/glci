@@ -275,14 +275,14 @@ func (c *keyCollector) fieldEntries(configType any) []fieldEntry {
 		}
 		switch {
 		case f.Type.Implements(anySlotType):
-			slot, ok = reflect.New(f.Type).Elem().Interface().(anySlot)
+			slot, ok = reflect.TypeAssert[anySlot](reflect.New(f.Type).Elem())
 			if !ok {
 				continue
 			}
 			entry.slotType = slot.slotType()
 
 		case f.Type.Implements(anySliceSlotType):
-			sliceSlot, ok = reflect.New(f.Type).Elem().Interface().(anySliceSlot)
+			sliceSlot, ok = reflect.TypeAssert[anySliceSlot](reflect.New(f.Type).Elem())
 			if !ok {
 				continue
 			}
