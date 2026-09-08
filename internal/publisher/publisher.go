@@ -177,11 +177,9 @@ func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit strin
 			}
 
 			publications[i] = publication{
-				FlavorManifest: gardenlinux.FlavorManifest{
-					Flavor:      flavorConfig.Flavor,
-					Manifest:    manifest,
-					ImageSuffix: target.ImageSuffix(),
-				},
+				Flavor:                flavorConfig.Flavor,
+				Manifest:              manifest,
+				ImageSuffix:           target.ImageSuffix(),
 				Target:                target,
 				PublishingGroup:       publishingGroup,
 				CloudProfile:          flavorConfig.CloudProfile,

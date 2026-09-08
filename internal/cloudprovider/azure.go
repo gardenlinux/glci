@@ -197,13 +197,11 @@ func (p *azure) applyStorageCredentials(_ context.Context, rawCreds map[string]a
 
 	apiEndpoint := "core.windows.net"
 	copts := &azblob.ClientOptions{
-		ClientOptions: azcore.ClientOptions{
-			Retry: policy.RetryOptions{
-				MaxRetries:    guard.Retries,
-				TryTimeout:    guard.Timeout,
-				RetryDelay:    guard.RetryBaseDelay,
-				MaxRetryDelay: guard.RetryMaxDelay,
-			},
+		Retry: policy.RetryOptions{
+			MaxRetries:    guard.Retries,
+			TryTimeout:    guard.Timeout,
+			RetryDelay:    guard.RetryBaseDelay,
+			MaxRetryDelay: guard.RetryMaxDelay,
 		},
 	}
 	if china {
@@ -239,9 +237,7 @@ func (p *azure) applyCredentials(ctx context.Context, rawCreds map[string]any, c
 	var cscopts *azidentity.ClientSecretCredentialOptions
 	if china {
 		cscopts = &azidentity.ClientSecretCredentialOptions{
-			ClientOptions: azcore.ClientOptions{
-				Cloud: cloud.AzureChina,
-			},
+			Cloud: cloud.AzureChina,
 		}
 	}
 	var csc *azidentity.ClientSecretCredential
@@ -259,13 +255,11 @@ func (p *azure) applyCredentials(ctx context.Context, rawCreds map[string]any, c
 	}
 
 	copts := &arm.ClientOptions{
-		ClientOptions: policy.ClientOptions{
-			Retry: policy.RetryOptions{
-				MaxRetries:    guard.Retries,
-				TryTimeout:    guard.Timeout,
-				RetryDelay:    guard.RetryBaseDelay,
-				MaxRetryDelay: guard.RetryMaxDelay,
-			},
+		Retry: policy.RetryOptions{
+			MaxRetries:    guard.Retries,
+			TryTimeout:    guard.Timeout,
+			RetryDelay:    guard.RetryBaseDelay,
+			MaxRetryDelay: guard.RetryMaxDelay,
 		},
 	}
 	if china {
