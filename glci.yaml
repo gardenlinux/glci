@@ -13,9 +13,17 @@ flavors:
   in_component_descriptor: true
 - flavor: azure-gardener_prod-arm64
   in_component_descriptor: true
+- flavor: azure-gardener_fips_prod-amd64
+  in_component_descriptor: true
+- flavor: azure-gardener_fips_prod-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod-amd64
   in_component_descriptor: true
 - flavor: gcp-gardener_prod-arm64
+  in_component_descriptor: true
+- flavor: gcp-gardener_fips_prod-amd64
+  in_component_descriptor: true
+- flavor: gcp-gardener_fips_prod-arm64
   in_component_descriptor: true
 - flavor: openstack-gardener_prod-amd64
   in_component_descriptor: true
@@ -33,9 +41,17 @@ flavors:
   in_component_descriptor: true
 - flavor: azure-gardener_prod_usi-arm64
   in_component_descriptor: true
+- flavor: azure-gardener_fips_prod_usi-amd64
+  in_component_descriptor: true
+- flavor: azure-gardener_fips_prod_usi-arm64
+  in_component_descriptor: true
 - flavor: gcp-gardener_prod_usi-amd64
   in_component_descriptor: true
 - flavor: gcp-gardener_prod_usi-arm64
+  in_component_descriptor: true
+- flavor: gcp-gardener_fips_prod_usi-amd64
+  in_component_descriptor: true
+- flavor: gcp-gardener_fips_prod_usi-arm64
   in_component_descriptor: true
 - flavor: openstack-gardener_prod_usi-amd64
   in_component_descriptor: true
