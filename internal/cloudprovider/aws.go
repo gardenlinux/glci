@@ -1,13 +1,15 @@
 package cloudprovider
 
 import (
-	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +37,13 @@ import (
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
+const (
+	multipartThreshold   int64 = 1024 * 1024 * 16
+	multipartPartSize    int64 = 1024 * 1024 * 8
+	multipartMaxParts          = 10000
+	multipartConcurrency       = 5
+)
+
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	env.Clean("AWS_")
@@ -44,8 +53,8 @@ func init() {
 		p := &awsSource{
 			base: b,
 		}
-		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.credsGen.Load()
+		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 		return p
 	})
@@ -54,11 +63,11 @@ func init() {
 		p := &awsTarget{
 			base: b,
 		}
-		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.world.credsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
-		p.china.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.china.credsGen.Load()
+		p.china.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.china.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 		return p
 	})
@@ -80,7 +89,7 @@ type awsSource struct {
 	srcCfg awsSourceConfig
 
 	credentialsProvider awsCredentialsProvider
-	credsGen            atomic.Uint64
+	credsGen            atomic.Int64
 	retrier             guard.Retrier
 	s3Client            *s3.Client
 }
@@ -103,7 +112,7 @@ type awsTarget struct {
 
 type awsEnvironment struct {
 	credentialsProvider awsCredentialsProvider
-	credsGen            atomic.Uint64
+	credsGen            atomic.Int64
 	retrier             guard.Retrier
 	ec2Client           *ec2.Client
 	regions             []string
@@ -419,7 +428,9 @@ func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (Object
 		properties.ContentType = *r.ContentType
 	}
 	if r.ETag != nil {
-		properties.Hash = *r.ETag
+		properties.Hash = ObjectHash{
+			ETag: strings.Trim(*r.ETag, "\""),
+		}
 	}
 
 	return properties, nil
@@ -492,23 +503,69 @@ func (s awsContentSource) Open(ctx context.Context, offset int64, identity strin
 	return content, nil
 }
 
-func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader, contentType string) error {
+func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader, contentType string, hash ObjectHash) (ObjectHash, error) {
 	if p.s3Client == nil {
-		return errors.New("config not set")
+		return ObjectHash{}, errors.New("config not set")
 	}
-	obj, ok := object.(io.ReadSeeker)
-	if !ok {
-		data, err := io.ReadAll(object)
-		if err != nil {
-			return fmt.Errorf("cannot read object: %w", err)
+
+	obj, err := guard.NewRangeSource(object)
+	if err != nil {
+		_, ok := errors.AsType[*guard.NotRangeableError](err)
+		if !ok {
+			return ObjectHash{}, fmt.Errorf("cannot open object: %w", err)
 		}
 
-		obj = bytes.NewReader(data)
+		var data []byte
+		data, err = io.ReadAll(object)
+		if err != nil {
+			return ObjectHash{}, fmt.Errorf("cannot read object: %w", err)
+		}
+
+		obj = guard.NewBufferRangeSource(data)
+	}
+	defer func() {
+		_ = obj.Close()
+	}()
+
+	size := obj.Size()
+	ctx = log.WithValues(ctx, "bucket", p.srcCfg.Bucket, "key", key, "size", size)
+
+	log.Debug(ctx, "Putting object")
+	var eTag string
+	if size <= multipartThreshold {
+		eTag, err = p.putObjectSinglepart(ctx, key, obj, size, contentType, hash.ETag)
+	} else {
+		eTag, err = p.putObjectMultipart(ctx, key, obj, size, contentType, hash.ETag)
+	}
+	if err != nil {
+		return ObjectHash{}, fmt.Errorf("cannot put object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
 	}
 
-	log.Debug(ctx, "Putting object", "bucket", p.srcCfg.Bucket, "key", key)
-	err := p.retrier.Do(ctx, "put object", func(ctx context.Context) error {
-		_, inErr := obj.Seek(0, io.SeekStart)
+	err = obj.Close()
+	if err != nil {
+		return ObjectHash{}, fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return ObjectHash{
+		SHA256: hash.SHA256,
+		ETag:   eTag,
+	}, nil
+}
+
+func (p *awsSource) putObjectSinglepart(ctx context.Context, key string, object guard.RangeSource, size int64, contentType,
+	expectedETag string,
+) (string, error) {
+	reader, err := object.OpenRange(ctx, 0, size)
+	if err != nil {
+		return "", fmt.Errorf("cannot open object: %w", err)
+	}
+	defer func() {
+		_ = reader.Close()
+	}()
+
+	var eTag string
+	err = p.retrier.Do(ctx, "put object", func(ctx context.Context) error {
+		_, inErr := reader.Seek(0, io.SeekStart)
 		if inErr != nil {
 			return fmt.Errorf("cannot rewind object: %w", inErr)
 		}
@@ -516,21 +573,443 @@ func (p *awsSource) PutObject(ctx context.Context, key string, object io.Reader,
 		input := &transfermanager.UploadObjectInput{
 			Bucket: &p.srcCfg.Bucket,
 			Key:    &key,
-			Body:   obj,
+			Body:   reader,
 		}
 		if contentType != "" {
 			input.ContentType = &contentType
 		}
 
-		uploader := transfermanager.New(p.s3Client)
-		_, inErr = uploader.UploadObject(ctx, input)
+		var r *transfermanager.UploadObjectOutput
+		r, inErr = transfermanager.New(p.s3Client).UploadObject(ctx, input)
+		if inErr != nil {
+			return fmt.Errorf("cannot upload object: %w", inErr)
+		}
+		if r.ETag == nil {
+			return errors.New("cannot upload object: missing ETag")
+		}
+		eTag = strings.Trim(*r.ETag, "\"")
+
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	if expectedETag != "" && expectedETag != eTag {
+		return "", fmt.Errorf("uploaded object has wrong ETag, expected %q, got %q", expectedETag, eTag)
+	}
+
+	err = reader.Close()
+	if err != nil {
+		return "", fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return eTag, nil
+}
+
+type invalidUploadError struct{}
+
+func (*invalidUploadError) Error() string {
+	return "multipart upload contains invalid parts"
+}
+
+type invalidUploadAwarePolicy struct {
+	policy guard.RetryPolicy
+}
+
+func (p invalidUploadAwarePolicy) Begin() guard.RetryDecider {
+	return &invalidUploadAwareDecider{
+		decider: p.policy.Begin(),
+	}
+}
+
+type invalidUploadAwareDecider struct {
+	decider guard.RetryDecider
+}
+
+func (d *invalidUploadAwareDecider) NextRetry(err error) (time.Duration, bool) {
+	_, ok := errors.AsType[*invalidUploadError](err)
+	if ok {
+		return guard.RetryBaseDelay, true
+	}
+
+	return d.decider.NextRetry(err)
+}
+
+func (p *awsSource) putObjectMultipart(ctx context.Context, key string, object guard.RangeSource, size int64, contentType,
+	expectedETag string,
+) (string, error) {
+	if size > multipartMaxParts*multipartPartSize {
+		return "", fmt.Errorf("object of size %d bytes requires too many parts", size)
+	}
+
+	numParts := int((size + multipartPartSize - 1) / multipartPartSize)
+	ctx = log.WithValues(ctx, "totalParts", numParts)
+
+	var eTag string
+	err := guard.NewRetrier(invalidUploadAwarePolicy{
+		policy: guard.DelegatingRetryPolicy{},
+	}, guard.DelegatingTimeoutPolicy{}).Do(ctx, "put object", func(ctx context.Context) error {
+		var uploadID string
+		var parts []s3types.CompletedPart
+		var resumable bool
+		var inErr error
+
+		if expectedETag != "" {
+			var numCompletedParts int
+			uploadID, parts, numCompletedParts, inErr = p.findResumableUpload(ctx, key, numParts, size)
+			if inErr != nil {
+				return fmt.Errorf("cannot find resumable upload: %w", inErr)
+			}
+			resumable = uploadID != ""
+			if resumable {
+				ctx = log.WithValues(ctx, "uploadId", uploadID)
+				log.Debug(ctx, "Resuming multipart upload", "completedParts", numCompletedParts)
+			}
+		}
+
+		if !resumable {
+			uploadID, inErr = p.createMultipartUpload(ctx, key, contentType)
+			if inErr != nil {
+				return inErr
+			}
+			ctx = log.WithValues(ctx, "uploadId", uploadID)
+
+			parts = make([]s3types.CompletedPart, numParts)
+		}
+
+		if parts[0].PartNumber != nil {
+			inErr = object.DiscardStart()
+			if inErr != nil {
+				return fmt.Errorf("cannot close part 0: %w", inErr)
+			}
+		}
+
+		inErr = p.uploadParts(ctx, key, uploadID, object, parts, size)
+		if inErr != nil {
+			return inErr
+		}
+
+		if expectedETag != "" {
+			var assembledETag string
+			assembledETag, inErr = p.assembleETag(parts)
+			if inErr != nil {
+				return fmt.Errorf("cannot assemble uploaded object ETag: %w", inErr)
+			}
+
+			if assembledETag != expectedETag {
+				if !resumable {
+					return fmt.Errorf("uploaded object has wrong ETag, expected %q, got %q", expectedETag, assembledETag)
+				}
+
+				inErr = p.abortUpload(ctx, key, uploadID)
+				if inErr != nil {
+					return inErr
+				}
+
+				return &invalidUploadError{}
+			}
+		}
+
+		eTag, inErr = p.completeUpload(ctx, key, uploadID, parts, size)
+		if inErr != nil {
+			return inErr
+		}
+		eTag = strings.Trim(eTag, "\"")
+
 		return inErr
 	})
 	if err != nil {
-		return fmt.Errorf("cannot put object %s to bucket %s: %w", key, p.srcCfg.Bucket, err)
+		return "", err
+	}
+
+	return eTag, nil
+}
+
+func (p *awsSource) findResumableUpload(ctx context.Context, key string, numParts int, size int64) (string, []s3types.CompletedPart, int,
+	error,
+) {
+	uploadIDs, err := p.listMultipartUploads(ctx, key)
+	if err != nil {
+		return "", nil, 0, err
+	}
+
+	var bestID string
+	var bestParts []s3types.CompletedPart
+	bestNumCompletedParts := -1
+	for _, uploadID := range uploadIDs {
+		var parts []s3types.CompletedPart
+		var numCompletedParts int
+		parts, numCompletedParts, err = p.listCompletedParts(ctx, key, uploadID, numParts, size)
+		if err != nil {
+			return "", nil, 0, fmt.Errorf("cannot list completed parts for upload %s: %w", uploadID, err)
+		}
+		if parts == nil {
+			continue
+		}
+
+		if numCompletedParts > bestNumCompletedParts {
+			bestID = uploadID
+			bestParts = parts
+			bestNumCompletedParts = numCompletedParts
+		}
+	}
+	if bestNumCompletedParts == -1 {
+		bestNumCompletedParts = 0
+	}
+
+	return bestID, bestParts, bestNumCompletedParts, nil
+}
+
+func (p *awsSource) listMultipartUploads(ctx context.Context, key string) ([]string, error) {
+	log.Debug(ctx, "Listing multipart uploads")
+	input := &s3.ListMultipartUploadsInput{
+		Bucket: &p.srcCfg.Bucket,
+		Prefix: &key,
+	}
+	var uploadIDs []string
+	for {
+		var r *s3.ListMultipartUploadsOutput
+		err := p.retrier.Do(ctx, "list multipart uploads", func(ctx context.Context) error {
+			var inErr error
+			r, inErr = p.s3Client.ListMultipartUploads(ctx, input)
+			return inErr
+		})
+		if err != nil {
+			return nil, fmt.Errorf("cannot list multipart uploads: %w", err)
+		}
+
+		for _, upload := range r.Uploads {
+			if upload.Key != nil && *upload.Key == key && upload.UploadId != nil {
+				uploadIDs = append(uploadIDs, *upload.UploadId)
+			}
+		}
+		if r.IsTruncated == nil || !*r.IsTruncated {
+			break
+		}
+		input.KeyMarker = r.NextKeyMarker
+		input.UploadIdMarker = r.NextUploadIdMarker
+	}
+
+	return uploadIDs, nil
+}
+
+func (p *awsSource) listCompletedParts(ctx context.Context, key, uploadID string, numParts int, size int64) ([]s3types.CompletedPart, int,
+	error,
+) {
+	input := &s3.ListPartsInput{
+		Bucket:   &p.srcCfg.Bucket,
+		Key:      &key,
+		UploadId: &uploadID,
+	}
+	parts := make([]s3types.CompletedPart, numParts)
+	numCompletedParts := 0
+	for {
+		var r *s3.ListPartsOutput
+		err := p.retrier.Do(ctx, "list parts", func(ctx context.Context) error {
+			var inErr error
+			r, inErr = p.s3Client.ListParts(ctx, input)
+			return inErr
+		})
+		if err != nil {
+			_, ok := errors.AsType[*s3types.NoSuchUpload](err)
+			if ok {
+				return nil, 0, nil
+			}
+
+			return nil, 0, fmt.Errorf("cannot list parts: %w", err)
+		}
+
+		for _, part := range r.Parts {
+			if part.PartNumber == nil || part.Size == nil {
+				return nil, 0, errors.New("cannot list parts: missing part number or size")
+			}
+
+			partNumber := int(*part.PartNumber)
+			if partNumber < 1 {
+				return nil, 0, fmt.Errorf("cannot list parts: invalid part number %d", partNumber)
+			}
+			if partNumber > numParts {
+				return nil, 0, nil
+			}
+
+			expectedPartSize := multipartPartSize
+			if partNumber == numParts {
+				expectedPartSize = size - int64(partNumber-1)*multipartPartSize
+			}
+			if *part.Size != expectedPartSize {
+				return nil, 0, nil
+			}
+
+			parts[partNumber-1] = s3types.CompletedPart{
+				ChecksumCRC32: part.ChecksumCRC32,
+				ETag:          part.ETag,
+				PartNumber:    part.PartNumber,
+			}
+			numCompletedParts++
+		}
+		if r.IsTruncated == nil || !*r.IsTruncated {
+			break
+		}
+		input.PartNumberMarker = r.NextPartNumberMarker
+	}
+
+	return parts, numCompletedParts, nil
+}
+
+func (p *awsSource) createMultipartUpload(ctx context.Context, key, contentType string) (string, error) {
+	log.Debug(ctx, "Creating multipart upload")
+	input := &s3.CreateMultipartUploadInput{
+		Bucket:            &p.srcCfg.Bucket,
+		Key:               &key,
+		ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
+	}
+	if contentType != "" {
+		input.ContentType = &contentType
+	}
+	var r *s3.CreateMultipartUploadOutput
+	err := p.retrier.Do(ctx, "create multipart upload", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.s3Client.CreateMultipartUpload(ctx, input)
+		return inErr
+	})
+	if err != nil {
+		return "", fmt.Errorf("cannot create multipart upload: %w", err)
+	}
+	if r.UploadId == nil {
+		return "", errors.New("cannot create multipart upload: missing upload ID")
+	}
+
+	return *r.UploadId, nil
+}
+
+func (p *awsSource) uploadParts(ctx context.Context, key, uploadID string, object guard.RangeSource, parts []s3types.CompletedPart,
+	size int64,
+) error {
+	uploadParts := concurrency.NewLimitedActivity(ctx, multipartConcurrency)
+	for partNumber := 1; partNumber <= len(parts); partNumber++ {
+		if parts[partNumber-1].PartNumber != nil {
+			continue
+		}
+
+		offset := int64(partNumber-1) * multipartPartSize
+		length := multipartPartSize
+		if offset+length > size {
+			length = size - offset
+		}
+
+		uploadParts.Go(func(ctx context.Context) error {
+			var r *s3.UploadPartOutput
+			inErr := p.retrier.Do(ctx, "upload part", func(ctx context.Context) error {
+				obj, inInErr := object.OpenRange(ctx, offset, length)
+				if inInErr != nil {
+					return fmt.Errorf("cannot open part %d: %w", partNumber, inInErr)
+				}
+				defer func() {
+					_ = obj.Close()
+				}()
+
+				r, inInErr = p.s3Client.UploadPart(ctx, &s3.UploadPartInput{
+					Bucket:            &p.srcCfg.Bucket,
+					Key:               &key,
+					PartNumber:        new(int32(partNumber)), //nolint:gosec // partNumber fits in int32, bounded by multipartMaxParts.
+					UploadId:          &uploadID,
+					Body:              obj,
+					ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
+					ContentLength:     &length,
+				})
+				if inInErr != nil {
+					return fmt.Errorf("cannot upload part %d: %w", partNumber, inInErr)
+				}
+
+				inInErr = obj.Close()
+				if inInErr != nil {
+					return fmt.Errorf("cannot close part %d: %w", partNumber, inInErr)
+				}
+
+				return nil
+			})
+			if inErr != nil {
+				return inErr
+			}
+
+			parts[partNumber-1] = s3types.CompletedPart{
+				ChecksumCRC32: r.ChecksumCRC32,
+				ETag:          r.ETag,
+				PartNumber:    new(int32(partNumber)), //nolint:gosec // partNumber fits in int32, bounded by multipartMaxParts.
+			}
+
+			return nil
+		})
+	}
+	return uploadParts.Wait()
+}
+
+func (*awsSource) assembleETag(parts []s3types.CompletedPart) (string, error) {
+	digest := make([]byte, 0, len(parts)*md5.Size)
+	for _, part := range parts {
+		if part.ETag == nil {
+			return "", errors.New("missing part ETag")
+		}
+
+		etag := strings.Trim(*part.ETag, "\"")
+		if len(etag) != md5.Size*2 {
+			return "", fmt.Errorf("invalid part ETag %q", etag)
+		}
+
+		raw, err := hex.DecodeString(etag)
+		if err != nil {
+			return "", fmt.Errorf("invalid part ETag %q: %w", etag, err)
+		}
+
+		digest = append(digest, raw...)
+	}
+	sum := md5.Sum(digest) //nolint:gosec // S3 multipart ETag is an MD5-based checksum, not a security primitive.
+
+	return fmt.Sprintf("%s-%d", hex.EncodeToString(sum[:]), len(parts)), nil
+}
+
+func (p *awsSource) abortUpload(ctx context.Context, key, uploadID string) error {
+	log.Debug(ctx, "Aborting multipart upload")
+	err := p.retrier.Do(ctx, "abort multipart upload", func(ctx context.Context) error {
+		_, inErr := p.s3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket:   &p.srcCfg.Bucket,
+			Key:      &key,
+			UploadId: &uploadID,
+		})
+		return inErr
+	})
+	if err != nil {
+		return fmt.Errorf("cannot abort multipart upload: %w", err)
 	}
 
 	return nil
+}
+
+func (p *awsSource) completeUpload(ctx context.Context, key, uploadID string, parts []s3types.CompletedPart, size int64) (string, error) {
+	log.Debug(ctx, "Completing multipart upload")
+	var r *s3.CompleteMultipartUploadOutput
+	err := p.retrier.Do(ctx, "complete multipart upload", func(ctx context.Context) error {
+		var inErr error
+		r, inErr = p.s3Client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket:        &p.srcCfg.Bucket,
+			Key:           &key,
+			UploadId:      &uploadID,
+			MpuObjectSize: &size,
+			MultipartUpload: &s3types.CompletedMultipartUpload{
+				Parts: parts,
+			},
+		})
+		return inErr
+	})
+	if err != nil {
+		return "", fmt.Errorf("cannot complete multipart upload: %w", err)
+	}
+	if r.ETag == nil {
+		return "", errors.New("cannot complete multipart upload: missing ETag")
+	}
+
+	return *r.ETag, nil
 }
 
 func (p *awsSource) DeleteObject(ctx context.Context, key string, steamroll bool) error {
@@ -1300,7 +1779,7 @@ func (p *awsSource) Configure(rawCfg map[string]any) error {
 		return errors.New("missing bucket")
 	}
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}
@@ -1372,18 +1851,18 @@ func (p *awsTarget) Configure(rawCfg map[string]any) error {
 		p.enableChina = true
 	}
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}
 
-	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	err = p.base.RegisterRef[ArtifactSource](p, &p.source, p.pubCfg.Source)
 	if err != nil {
 		return fmt.Errorf("cannot register source: %w", err)
 	}
 
 	if p.pubCfg.SourceChina != "" {
-		err = module.RegisterRef[ArtifactSource](p.base, p, &p.sourceChina, p.pubCfg.SourceChina)
+		err = p.base.RegisterRef[ArtifactSource](p, &p.sourceChina, p.pubCfg.SourceChina)
 		if err != nil {
 			return fmt.Errorf("cannot register source: %w", err)
 		}

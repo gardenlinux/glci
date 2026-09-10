@@ -44,16 +44,16 @@ func RegisterImpl[T Module](cat *Category[T], typ string, ctor func(*Base) T) {
 }
 
 // ConfigureModule decodes, instantiates, registers, and configures a module.
-func ConfigureModule[T Module](b *Base, cat *Category[T], rawCfg map[string]any) (T, error) {
-	return configureModule(b, cat, rawCfg)
+func (b *Base) ConfigureModule[T Module](cat *Category[T], rawCfg map[string]any) (T, error) {
+	return b.configureModule(cat, rawCfg)
 }
 
 // ConfigureModules decodes, instantiates, registers, and configures every member of a SliceSlot.
-func ConfigureModules[T Module](b *Base, cat *Category[T], slot SliceSlot[T]) ([]T, error) {
+func (b *Base) ConfigureModules[T Module](cat *Category[T], slot SliceSlot[T]) ([]T, error) {
 	mods := make([]T, 0, len(slot.Items))
 	slice := make([]Module, 0, len(slot.Items))
 	for _, rawCfg := range slot.Items {
-		mod, err := configureModule(b, cat, rawCfg)
+		mod, err := b.configureModule(cat, rawCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -72,7 +72,7 @@ func ConfigureModules[T Module](b *Base, cat *Category[T], slot SliceSlot[T]) ([
 	return mods, nil
 }
 
-func configureModule[T Module](b *Base, cat *Category[T], rawCfg map[string]any) (T, error) {
+func (b *Base) configureModule[T Module](cat *Category[T], rawCfg map[string]any) (T, error) {
 	var zero T
 
 	typ, _ := rawCfg[cat.selectorKey].(string)

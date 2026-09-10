@@ -41,8 +41,8 @@ func init() {
 		p := &ociTarget{
 			base: b,
 		}
-		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.world.credsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 
 		return p
@@ -52,8 +52,8 @@ func init() {
 		p := &ociOCMTarget{
 			base: b,
 		}
-		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.world.credsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 
 		return p
@@ -80,7 +80,7 @@ type ociTarget struct {
 
 type ociEnvironment struct {
 	registryCredential ociRegistryCredential
-	credsGen           atomic.Uint64
+	credsGen           atomic.Int64
 	retrier            guard.Retrier
 	repository         *remote.Repository
 }
@@ -492,12 +492,12 @@ func (p *ociTarget) Configure(rawCfg map[string]any) error {
 
 	p.credsType = ociCredsType(p.pubCfg.Repository)
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}
 
-	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	err = p.base.RegisterRef[ArtifactSource](p, &p.source, p.pubCfg.Source)
 	if err != nil {
 		return fmt.Errorf("cannot register source: %w", err)
 	}
@@ -819,7 +819,7 @@ func (p *ociOCMTarget) Configure(rawCfg map[string]any) error {
 
 	p.credsType = ociCredsType(p.ocmCfg.Repository)
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}

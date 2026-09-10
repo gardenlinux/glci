@@ -45,8 +45,8 @@ func init() {
 		p := &gcp{
 			base: b,
 		}
-		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.world.credsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 		return p
 	})
@@ -72,7 +72,7 @@ type gcp struct {
 
 type gcpEnvironment struct {
 	tokenSource            gcpTokenSource
-	credsGen               atomic.Uint64
+	credsGen               atomic.Int64
 	retrier                guard.Retrier
 	storageClient          *storage.Client
 	imagesClient           *compute.ImagesClient
@@ -730,12 +730,12 @@ func (p *gcp) Configure(rawCfg map[string]any) error {
 		return errors.New("missing bucket")
 	}
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}
 
-	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	err = p.base.RegisterRef[ArtifactSource](p, &p.source, p.pubCfg.Source)
 	if err != nil {
 		return fmt.Errorf("cannot register source: %w", err)
 	}

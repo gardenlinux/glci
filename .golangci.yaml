@@ -44,6 +44,7 @@ linters:
       excludes:
       - G204
       - G304
+      - G501
     govet:
       enable-all: true
       disable:

@@ -38,8 +38,8 @@ func init() {
 		p := &aliyun{
 			base: b,
 		}
-		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.world.credsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 		p.world.ecsRetrier = guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{})
 		return p
@@ -66,7 +66,7 @@ type aliyun struct {
 
 type aliyunEnvironment struct {
 	credentialsProvider aliyunCredentialsProvider
-	credsGen            atomic.Uint64
+	credsGen            atomic.Int64
 	retrier             guard.Retrier
 	ecsRetrier          guard.Retrier
 	ossClient           *oss.Client
@@ -833,12 +833,12 @@ func (p *aliyun) Configure(rawCfg map[string]any) error {
 		}
 	}
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}
 
-	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	err = p.base.RegisterRef[ArtifactSource](p, &p.source, p.pubCfg.Source)
 	if err != nil {
 		return fmt.Errorf("cannot register source: %w", err)
 	}
