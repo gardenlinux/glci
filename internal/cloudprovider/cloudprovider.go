@@ -41,7 +41,33 @@ var OCMTargetCategory = module.NewCategory[OCMTarget]("target")
 type ObjectProperties struct {
 	Size        int64
 	ContentType string
-	Hash        string
+	Hash        ObjectHash
+}
+
+// ObjectHash holds the opaque content identities of an artifact object, each field populated only when known.
+type ObjectHash struct {
+	SHA256 string
+	ETag   string
+}
+
+func (h ObjectHash) equal(hash ObjectHash) bool {
+	var numEqualFields int
+
+	if h.SHA256 != "" && hash.SHA256 != "" {
+		if h.SHA256 != hash.SHA256 {
+			return false
+		}
+		numEqualFields++
+	}
+
+	if h.ETag != "" && hash.ETag != "" {
+		if h.ETag != hash.ETag {
+			return false
+		}
+		numEqualFields++
+	}
+
+	return numEqualFields > 0
 }
 
 // ArtifactSource is a source of artifacts which can retrieve arbitrary objects as well as retrieve and publish manifests.
@@ -52,7 +78,7 @@ type ArtifactSource interface {
 	GetObjectURL(ctx context.Context, key string) (string, error)
 	GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
-	PutObject(ctx context.Context, key string, object io.Reader, contentType string) error
+	PutObject(ctx context.Context, key string, object io.Reader, contentType string, hash ObjectHash) (ObjectHash, error)
 	DeleteObject(ctx context.Context, key string, steamroll bool) error
 }
 
@@ -72,7 +98,7 @@ func ReplicateArtifact(ctx context.Context, origin, destination ArtifactSource, 
 		_ = object.Close()
 	}()
 
-	err = destination.PutObject(ctx, key, object, properties.ContentType)
+	_, err = destination.PutObject(ctx, key, object, properties.ContentType, properties.Hash)
 	if err != nil {
 		return fmt.Errorf("cannot put object %s: %w", key, err)
 	}
@@ -142,7 +168,9 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 		return fmt.Errorf("cannot encode manifest: %w", err)
 	}
 
-	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()), "text/yaml")
+	_, err = source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()), "text/yaml", ObjectHash{})
+
+	return err
 }
 
 // GetGroupManifest retrieves a group manifest from an artifact source.
@@ -202,7 +230,9 @@ func PutGroupManifest(ctx context.Context, source ArtifactSource, key string, gr
 		return fmt.Errorf("cannot encode group manifest: %w", err)
 	}
 
-	return source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()), "text/yaml")
+	_, err = source.PutObject(ctx, key, bytes.NewReader(buf.Bytes()), "text/yaml", ObjectHash{})
+
+	return err
 }
 
 // PublishingTarget is a target onto which GLCI can publish Garden Linux images.
@@ -250,11 +280,7 @@ func (r Replication) IsReplicated(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("cannot get origin object properties: %w", err)
 	}
 
-	if origin.Hash == "" || destination.Hash == "" {
-		return false, nil
-	}
-
-	return origin.Hash == destination.Hash && origin.Size == destination.Size && origin.ContentType == destination.ContentType, nil
+	return origin.ContentType == destination.ContentType && origin.Size == destination.Size && origin.Hash.equal(destination.Hash), nil
 }
 
 // PublishingOutput is an opaque representation of the result of a publishing operation.

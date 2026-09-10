@@ -200,7 +200,7 @@ func (r *Root) registerModuleSliceID(id string, s []Module) error {
 }
 
 // RegisterRef registers a reference to a single module identified by id.
-func RegisterRef[T Module](b *Base, owner Configurable, ptr *T, id string) error {
+func (b *Base) RegisterRef[T Module](owner Configurable, ptr *T, id string) error {
 	if b.root.configured {
 		return errors.New("cannot register reference: base already configured")
 	}
@@ -230,7 +230,7 @@ func RegisterRef[T Module](b *Base, owner Configurable, ptr *T, id string) error
 }
 
 // RegisterSliceRef registers a reference to a named slice of modules identified by id.
-func RegisterSliceRef[T Module](b *Base, owner Configurable, ptr *[]T, id string) error {
+func (b *Base) RegisterSliceRef[T Module](owner Configurable, ptr *[]T, id string) error {
 	if b.root.configured {
 		return errors.New("cannot register reference: base already configured")
 	}
@@ -265,7 +265,7 @@ func RegisterSliceRef[T Module](b *Base, owner Configurable, ptr *[]T, id string
 }
 
 // RegisterTypeRef registers a reference to the unique module satisfying T.
-func RegisterTypeRef[T Module](b *Base, owner Configurable, ptr *T) error {
+func (b *Base) RegisterTypeRef[T Module](owner Configurable, ptr *T) error {
 	if b.root.configured {
 		return errors.New("cannot register reference: base already configured")
 	}
@@ -292,7 +292,7 @@ func RegisterTypeRef[T Module](b *Base, owner Configurable, ptr *T) error {
 }
 
 // RegisterSliceTypeRef registers a reference to every module satisfying T, in YAML appearance order.
-func RegisterSliceTypeRef[T Module](b *Base, owner Configurable, ptr *[]T) error {
+func (b *Base) RegisterSliceTypeRef[T Module](owner Configurable, ptr *[]T) error {
 	if b.root.configured {
 		return errors.New("cannot register reference: base already configured")
 	}

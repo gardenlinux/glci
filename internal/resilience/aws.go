@@ -32,8 +32,8 @@ func init() {
 		p := &aws{
 			base: b,
 		}
-		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.credsGen.Load()
+		p.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 		return p
 	})
@@ -52,7 +52,7 @@ type aws struct {
 	key      string
 
 	credentialsProvider awsCredentialsProvider
-	credsGen            atomic.Uint64
+	credsGen            atomic.Int64
 	retrier             guard.Retrier
 	s3Client            *s3.Client
 }
@@ -227,7 +227,7 @@ func (p *aws) Configure(rawCfg map[string]any) error {
 		return errors.New("missing bucket")
 	}
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}

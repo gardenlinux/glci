@@ -621,18 +621,18 @@ func (p *openstack) Configure(rawCfg map[string]any) error {
 		}
 	}
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}
 
-	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	err = p.base.RegisterRef[ArtifactSource](p, &p.source, p.pubCfg.Source)
 	if err != nil {
 		return fmt.Errorf("cannot register source: %w", err)
 	}
 
 	if p.pubCfg.SourceChina != "" {
-		err = module.RegisterRef[ArtifactSource](p.base, p, &p.sourceChina, p.pubCfg.SourceChina)
+		err = p.base.RegisterRef[ArtifactSource](p, &p.sourceChina, p.pubCfg.SourceChina)
 		if err != nil {
 			return fmt.Errorf("cannot register source: %w", err)
 		}

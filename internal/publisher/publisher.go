@@ -76,7 +76,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if p.cfg.Credentials == nil {
 		return errors.New("missing credentials")
 	}
-	p.creds, err = module.ConfigureModule(p.base, credsprovider.Category, p.cfg.Credentials)
+	p.creds, err = p.base.ConfigureModule(credsprovider.Category, p.cfg.Credentials)
 	if err != nil {
 		return fmt.Errorf("cannot configure credentials: %w", err)
 	}
@@ -84,7 +84,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if len(p.cfg.Sources.Items) == 0 {
 		return errors.New("missing sources")
 	}
-	p.sources, err = module.ConfigureModules(p.base, cloudprovider.ArtifactSourceCategory, p.cfg.Sources)
+	p.sources, err = p.base.ConfigureModules(cloudprovider.ArtifactSourceCategory, p.cfg.Sources)
 	if err != nil {
 		return fmt.Errorf("cannot configure sources: %w", err)
 	}
@@ -92,7 +92,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if len(p.cfg.Targets.Items) == 0 {
 		return errors.New("missing targets")
 	}
-	p.targets, err = module.ConfigureModules(p.base, cloudprovider.PublishingTargetCategory, p.cfg.Targets)
+	p.targets, err = p.base.ConfigureModules(cloudprovider.PublishingTargetCategory, p.cfg.Targets)
 	if err != nil {
 		return fmt.Errorf("cannot configure targets: %w", err)
 	}
@@ -100,7 +100,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if p.cfg.OCM == nil {
 		return errors.New("missing OCM")
 	}
-	p.ocmTarget, err = module.ConfigureModule(p.base, cloudprovider.OCMTargetCategory, p.cfg.OCM)
+	p.ocmTarget, err = p.base.ConfigureModule(cloudprovider.OCMTargetCategory, p.cfg.OCM)
 	if err != nil {
 		return fmt.Errorf("cannot configure OCM: %w", err)
 	}
@@ -108,7 +108,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if p.cfg.State == nil {
 		return errors.New("missing state")
 	}
-	p.state, err = module.ConfigureModule(p.base, resilience.Category, p.cfg.State)
+	p.state, err = p.base.ConfigureModule(resilience.Category, p.cfg.State)
 	if err != nil {
 		return fmt.Errorf("cannot configure state: %w", err)
 	}
@@ -116,7 +116,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if p.cfg.ManifestSource == "" {
 		return errors.New("missing manifest source")
 	}
-	err = module.RegisterRef[cloudprovider.ArtifactSource](p.base, p, &p.manifestSource, p.cfg.ManifestSource)
+	err = p.base.RegisterRef[cloudprovider.ArtifactSource](p, &p.manifestSource, p.cfg.ManifestSource)
 	if err != nil {
 		return fmt.Errorf("cannot register manifest source: %w", err)
 	}
@@ -125,7 +125,7 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 	if manifestTargetID == "" {
 		manifestTargetID = p.cfg.ManifestSource
 	}
-	err = module.RegisterRef[cloudprovider.ArtifactSource](p.base, p, &p.manifestTarget, manifestTargetID)
+	err = p.base.RegisterRef[cloudprovider.ArtifactSource](p, &p.manifestTarget, manifestTargetID)
 	if err != nil {
 		return fmt.Errorf("cannot register manifest target: %w", err)
 	}

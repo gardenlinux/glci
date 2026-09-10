@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"hash/crc32"
 	"io"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/gardenlinux/glci/internal/log"
@@ -168,11 +170,11 @@ func (DelegatingRetryPolicy) NextRetry(_ error) (time.Duration, bool) {
 
 // GenerationalRetryPolicy retries a failed operation once per generation advance.
 type GenerationalRetryPolicy struct {
-	generation func() uint64
+	generation func() int
 }
 
 // NewGenerationalRetryPolicy creates a GenerationalRetryPolicy that observes generation through the given accessor.
-func NewGenerationalRetryPolicy(generation func() uint64) GenerationalRetryPolicy {
+func NewGenerationalRetryPolicy(generation func() int) GenerationalRetryPolicy {
 	return GenerationalRetryPolicy{
 		generation: generation,
 	}
@@ -187,8 +189,8 @@ func (p GenerationalRetryPolicy) Begin() RetryDecider {
 }
 
 type generationalRetryDecider struct {
-	generation func() uint64
-	currentGen uint64
+	generation func() int
+	currentGen int
 	retry      int
 }
 
@@ -294,6 +296,21 @@ type Content struct {
 	Identity  string
 	Size      int64
 	CanResume bool
+}
+
+// NotRangeableError is returned by NewRangeSource when the content cannot be read in independent ranges.
+type NotRangeableError struct{}
+
+func (*NotRangeableError) Error() string {
+	return "ranged reads not supported"
+}
+
+// RangeSource hands out independent seekable readers over arbitrary ranges of a fixed-size content.
+type RangeSource interface {
+	OpenRange(ctx context.Context, offset, length int64) (io.ReadSeekCloser, error)
+	Size() int64
+	DiscardStart() error
+	Close() error
 }
 
 // NewRetryingReader opens Content from a source and returns a self-healing seekable reader over it.
@@ -506,8 +523,197 @@ func (r *retryingReader) Close() error {
 	err := r.content.Close()
 	r.content.ReadCloser = nil
 	if err != nil {
-		return fmt.Errorf("cannot close content: %w", err)
+		return err
 	}
 
+	return nil
+}
+
+// NewRangeSource converts a reader into a RangeSource if it supports independent ranged reads, taking ownership of it.
+func NewRangeSource(r io.Reader) (RangeSource, error) {
+	reader, ok := r.(*retryingReader)
+	if !ok || !reader.content.CanResume || reader.content.Identity == "" {
+		return nil, &NotRangeableError{}
+	}
+
+	startReader := reader.content.ReadCloser
+	reader.content.ReadCloser = nil
+
+	return &rangeSource{
+		retrier:     reader.retrier,
+		source:      reader.source,
+		identity:    reader.content.Identity,
+		size:        reader.content.Size,
+		startReader: startReader,
+	}, nil
+}
+
+type rangeSource struct {
+	retrier  Retrier
+	source   ContentSource
+	identity string
+	size     int64
+
+	startReaderMtx sync.Mutex
+	startReader    io.ReadCloser
+}
+
+func (s *rangeSource) OpenRange(ctx context.Context, offset, length int64) (io.ReadSeekCloser, error) {
+	var startReader io.ReadCloser
+	if offset == 0 {
+		func() {
+			s.startReaderMtx.Lock()
+			defer s.startReaderMtx.Unlock()
+
+			startReader = s.startReader
+			s.startReader = nil
+		}()
+	}
+
+	reader := &retryingReader{
+		retrier: s.retrier,
+		source:  s.source,
+		ctx:     ctx,
+		content: Content{
+			Identity:  s.identity,
+			Size:      s.size,
+			CanResume: true,
+		},
+		opened: true,
+	}
+	if startReader != nil {
+		reader.content.ReadCloser = startReader
+	} else {
+		err := reader.open(offset)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &boundedReader{
+		reader: reader,
+		base:   offset,
+		length: length,
+	}, nil
+}
+
+func (s *rangeSource) Size() int64 {
+	return s.size
+}
+
+func (s *rangeSource) DiscardStart() error {
+	return s.closeStartReader()
+}
+
+func (s *rangeSource) Close() error {
+	return s.closeStartReader()
+}
+
+func (s *rangeSource) closeStartReader() error {
+	s.startReaderMtx.Lock()
+	defer s.startReaderMtx.Unlock()
+
+	if s.startReader == nil {
+		return nil
+	}
+
+	err := s.startReader.Close()
+	s.startReader = nil
+	return err
+}
+
+type boundedReader struct {
+	reader io.ReadSeekCloser
+	base   int64
+	length int64
+	offset int64
+}
+
+func (r *boundedReader) Read(p []byte) (int, error) {
+	if r.offset >= r.length {
+		return 0, io.EOF
+	}
+
+	numUnreadBytes := r.length - r.offset
+	if int64(len(p)) > numUnreadBytes {
+		p = p[:numUnreadBytes]
+	}
+
+	n, err := r.reader.Read(p)
+	r.offset += int64(n)
+
+	return n, err
+}
+
+func (r *boundedReader) Seek(offset int64, whence int) (int64, error) {
+	var target int64
+	switch whence {
+	case io.SeekStart:
+		target = offset
+
+	case io.SeekCurrent:
+		target = r.offset + offset
+
+	case io.SeekEnd:
+		target = r.length + offset
+
+	default:
+		return 0, errors.New("invalid whence")
+	}
+	if target < 0 {
+		return 0, fmt.Errorf("cannot seek to negative position %d", target)
+	}
+	if target > r.length {
+		return 0, fmt.Errorf("cannot seek past length %d", r.length)
+	}
+
+	_, err := r.reader.Seek(r.base+target, io.SeekStart)
+	if err != nil {
+		return 0, err
+	}
+
+	r.offset = target
+
+	return target, nil
+}
+
+func (r *boundedReader) Close() error {
+	return r.reader.Close()
+}
+
+// NewBufferRangeSource returns a RangeSource that serves ranges from an in-memory buffer.
+func NewBufferRangeSource(data []byte) RangeSource {
+	return &bufferRangeSource{
+		data: data,
+	}
+}
+
+type bufferRangeSource struct {
+	data []byte
+}
+
+func (s *bufferRangeSource) OpenRange(_ context.Context, offset, length int64) (io.ReadSeekCloser, error) {
+	return nopReadSeekCloser{
+		ReadSeeker: io.NewSectionReader(bytes.NewReader(s.data), offset, length),
+	}, nil
+}
+
+func (s *bufferRangeSource) Size() int64 {
+	return int64(len(s.data))
+}
+
+func (*bufferRangeSource) DiscardStart() error {
+	return nil
+}
+
+func (*bufferRangeSource) Close() error {
+	return nil
+}
+
+type nopReadSeekCloser struct {
+	io.ReadSeeker
+}
+
+func (nopReadSeekCloser) Close() error {
 	return nil
 }

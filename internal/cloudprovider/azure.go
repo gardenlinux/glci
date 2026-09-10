@@ -40,17 +40,17 @@ func init() {
 		p := &azure{
 			base: b,
 		}
-		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.world.credsGen.Load()
+		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
-		p.world.storageRetrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.world.storageCredsGen.Load()
+		p.world.storageRetrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.world.storageCredsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
-		p.china.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.china.credsGen.Load()
+		p.china.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.china.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
-		p.china.storageRetrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() uint64 {
-			return p.china.storageCredsGen.Load()
+		p.china.storageRetrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(p.china.storageCredsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 
 		return p
@@ -79,10 +79,10 @@ type azure struct {
 
 type azureEnvironment struct {
 	tokenCredential                     azureTokenCredential
-	credsGen                            atomic.Uint64
+	credsGen                            atomic.Int64
 	retrier                             guard.Retrier
 	storageCreds                        *azblob.SharedKeyCredential
-	storageCredsGen                     atomic.Uint64
+	storageCredsGen                     atomic.Int64
 	storageRetrier                      guard.Retrier
 	storageClient                       *azblob.Client
 	subscriptionsClient                 *armsubscriptions.Client
@@ -1587,18 +1587,18 @@ func (p *azure) Configure(rawCfg map[string]any) error {
 		p.enableChina = true
 	}
 
-	err = module.RegisterTypeRef[credsprovider.CredsSource](p.base, p, &p.credsSource)
+	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
 		return fmt.Errorf("cannot register credentials: %w", err)
 	}
 
-	err = module.RegisterRef[ArtifactSource](p.base, p, &p.source, p.pubCfg.Source)
+	err = p.base.RegisterRef[ArtifactSource](p, &p.source, p.pubCfg.Source)
 	if err != nil {
 		return fmt.Errorf("cannot register source: %w", err)
 	}
 
 	if p.pubCfg.SourceChina != "" {
-		err = module.RegisterRef[ArtifactSource](p.base, p, &p.sourceChina, p.pubCfg.SourceChina)
+		err = p.base.RegisterRef[ArtifactSource](p, &p.sourceChina, p.pubCfg.SourceChina)
 		if err != nil {
 			return fmt.Errorf("cannot register source: %w", err)
 		}

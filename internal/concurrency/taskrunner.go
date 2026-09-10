@@ -95,11 +95,11 @@ func runTasks[T comparable](ctx context.Context, tasks []T, dependencies func(T)
 
 	activity := NewActivity(ctx)
 	completions := make(chan completion[T], len(tasks))
-	runningTasks := 0
+	numRunningTasks := 0
 
 	for _, t := range tasks {
 		if pendingDeps[t] == 0 {
-			runningTasks++
+			numRunningTasks++
 			dispatchTask(ctx, activity, completions, run, t)
 		}
 	}
@@ -109,9 +109,9 @@ func runTasks[T comparable](ctx context.Context, tasks []T, dependencies func(T)
 	var stopping bool
 	var panicked bool
 	var panicVal any
-	for runningTasks > 0 {
+	for numRunningTasks > 0 {
 		c := <-completions
-		runningTasks--
+		numRunningTasks--
 
 		if stopping {
 			continue
@@ -162,7 +162,7 @@ func runTasks[T comparable](ctx context.Context, tasks []T, dependencies func(T)
 			pendingDeps[d]--
 			_, ok := skipped[d]
 			if !ok && pendingDeps[d] == 0 {
-				runningTasks++
+				numRunningTasks++
 				dispatchTask(ctx, activity, completions, run, d)
 			}
 		}
