@@ -95,7 +95,7 @@ publishing:
         test-type: gardener-integration
   - target: Azure
     source: S3
-    config: gardenlinux-integration-test-backup/data
+    config: gardenlinux-integration-test
     storage_container: gardenlinux
     resource_group: test-community-gallery
     gallery: community_gallery
