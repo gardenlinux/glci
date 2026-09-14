@@ -693,8 +693,8 @@ func (*vault) secretKeys(id CredsID) []string {
 		}
 	case "Azure":
 		return []string{
-			fmt.Sprintf("se-azure-%s/config", id.Config),
-			fmt.Sprintf("se-azure-%s/creds/glci", id.Config),
+			fmt.Sprintf("se-azure-%s-backup/data/config", id.Config),
+			fmt.Sprintf("se-azure-%s-backup/data/creds/glci", id.Config),
 		}
 	case "Azure_storage":
 		return []string{
