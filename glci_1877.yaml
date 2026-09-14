@@ -114,8 +114,8 @@ publishing:
   - target: Azure
     source: S3
     source_china: S3-China
-    config: gardenlinux
-    config_china: gardenlinux-cn
+    config: gardenlinux-backup/data
+    config_china: gardenlinux-cn-backup/data
     storage_container: gardenlinux
     resource_group: community-gallery
     gallery: gardenlinux_community_gallery
