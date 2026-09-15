@@ -616,7 +616,7 @@ func (p *openstack) Configure(rawCfg map[string]any) error {
 		for _, region := range config.Regions {
 			p.environments[region] = &openstackEnvironment{
 				retrier:      guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
-				imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(time.Minute*7)),
+				imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(statusPollTimeout)),
 			}
 		}
 	}
