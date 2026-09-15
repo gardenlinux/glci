@@ -42,6 +42,7 @@ func init() {
 			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 		p.world.ecsRetrier = guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{})
+		p.world.imageRetrier = guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(statusPollTimeout))
 		return p
 	})
 }
@@ -69,6 +70,7 @@ type aliyunEnvironment struct {
 	credsGen            atomic.Int64
 	retrier             guard.Retrier
 	ecsRetrier          guard.Retrier
+	imageRetrier        guard.Retrier
 	ossClient           *oss.Client
 	ecsClients          map[string]*client.Client
 }
@@ -228,8 +230,6 @@ func (*aliyun) listRegions(ctx context.Context, retrier guard.Retrier, c *client
 	err := retrier.Do(ctx, "describe regions", func(_ context.Context) error {
 		var inErr error
 		r, inErr = c.DescribeRegionsWithOptions(&client.DescribeRegionsRequest{}, &dara.RuntimeOptions{
-			Autoretry:      new(false),
-			MaxAttempts:    new(1),
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
@@ -451,8 +451,6 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 			ImageName: &image,
 			RegionId:  &p.pubCfg.Region,
 		}, &dara.RuntimeOptions{
-			Autoretry:      new(false),
-			MaxAttempts:    new(1),
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
@@ -516,8 +514,6 @@ func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion
 			ImageId:              &imageID,
 			RegionId:             &region,
 		}, &dara.RuntimeOptions{
-			Autoretry:      new(false),
-			MaxAttempts:    new(1),
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
@@ -542,56 +538,57 @@ func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion
 }
 
 func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error {
-	var status string
-	for status != "Available" {
-		var r *client.DescribeImagesResponse
-		err := p.environment().ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
-			var inErr error
-			r, inErr = p.environment().ecsClients[region].DescribeImagesWithOptions(&client.DescribeImagesRequest{
-				ImageId:  &imageID,
-				RegionId: &region,
-			}, &dara.RuntimeOptions{
-				Autoretry:      new(false),
-				MaxAttempts:    new(1),
-				ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
-				ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+	return p.environment().imageRetrier.Do(ctx, "wait for image", func(ctx context.Context) error {
+		var status string
+		for status != "Available" {
+			var r *client.DescribeImagesResponse
+			err := p.environment().ecsRetrier.Do(ctx, "describe images", func(_ context.Context) error {
+				var inErr error
+				r, inErr = p.environment().ecsClients[region].DescribeImagesWithOptions(&client.DescribeImagesRequest{
+					ImageId:  &imageID,
+					RegionId: &region,
+					Status:   new("Creating,Waiting,Available,UnAvailable,CreateFailed,Deprecated"),
+				}, &dara.RuntimeOptions{
+					ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+					ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+				})
+				return inErr
 			})
-			return inErr
-		})
-		if err != nil {
-			return fmt.Errorf("cannot describe image: %w", err)
-		}
-		if r.Body == nil {
-			return errors.New("cannot describe image: missing body")
-		}
-		if r.Body.Images == nil || len(r.Body.Images.Image) > 1 {
-			return errors.New("cannot describe image: missing images")
-		}
-		if len(r.Body.Images.Image) == 1 {
-			if r.Body.Images.Image[0] == nil {
-				return errors.New("cannot describe image: missing image")
+			if err != nil {
+				return fmt.Errorf("cannot describe image: %w", err)
 			}
-			if r.Body.Images.Image[0].Status == nil {
-				return errors.New("cannot describe image: missing status")
+			if r.Body == nil {
+				return errors.New("cannot describe image: missing body")
 			}
-			status = *r.Body.Images.Image[0].Status
-		}
-
-		if status != "Available" {
-			if status != "" {
-				return fmt.Errorf("image has status %s", status)
+			if r.Body.Images == nil || len(r.Body.Images.Image) > 1 {
+				return errors.New("cannot describe image: missing images")
+			}
+			if len(r.Body.Images.Image) == 1 {
+				if r.Body.Images.Image[0] == nil {
+					return errors.New("cannot describe image: missing image")
+				}
+				if r.Body.Images.Image[0].Status == nil {
+					return errors.New("cannot describe image: missing status")
+				}
+				status = *r.Body.Images.Image[0].Status
 			}
 
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			if status != "Available" {
+				if status != "" && status != "Creating" && status != "Waiting" {
+					return fmt.Errorf("image has status %s", status)
+				}
 
-			case <-time.After(statusPollInterval):
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+
+				case <-time.After(statusPollInterval):
+				}
 			}
 		}
-	}
 
-	return nil
+		return nil
+	})
 }
 
 func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public, steamroll bool) error {
@@ -606,8 +603,6 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 			IsPublic: &public,
 			RegionId: &region,
 		}, &dara.RuntimeOptions{
-			Autoretry:      new(false),
-			MaxAttempts:    new(1),
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
@@ -681,8 +676,6 @@ func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region st
 			ImageId:  &imageID,
 			RegionId: &region,
 		}, &dara.RuntimeOptions{
-			Autoretry:      new(false),
-			MaxAttempts:    new(1),
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
@@ -736,15 +729,41 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool
 			ImageId:  &imageID,
 			RegionId: &region,
 		}, &dara.RuntimeOptions{
-			Autoretry:      new(false),
-			MaxAttempts:    new(1),
+			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
+			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
+		})
+		if inErr != nil {
+			terr, ok := errors.AsType[*tea.SDKError](inErr)
+			if ok && terr.Code != nil && *terr.Code == "OperationDenied.ImageCopying" {
+				cancelErr := p.cancelCopyImage(ctx, imageID, region)
+				if cancelErr != nil {
+					return errors.Join(inErr, cancelErr)
+				}
+			}
+		}
+		return inErr
+	})
+	if err != nil {
+		return fmt.Errorf("cannot delete image: %w", err)
+	}
+
+	return nil
+}
+
+func (p *aliyun) cancelCopyImage(ctx context.Context, imageID, region string) error {
+	log.Debug(ctx, "Cancelling image copy")
+	err := p.environment().ecsRetrier.Do(ctx, "cancel copy image", func(_ context.Context) error {
+		_, inErr := p.environment().ecsClients[region].CancelCopyImageWithOptions(&client.CancelCopyImageRequest{
+			ImageId:  &imageID,
+			RegionId: &region,
+		}, &dara.RuntimeOptions{
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
 		return inErr
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
+		return fmt.Errorf("cannot cancel copy: %w", err)
 	}
 
 	return nil

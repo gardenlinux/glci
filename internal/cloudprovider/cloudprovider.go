@@ -20,7 +20,10 @@ import (
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
-const statusPollInterval = time.Second * 3
+const (
+	statusPollInterval = time.Second * 3
+	statusPollTimeout  = time.Minute * 7
+)
 
 // ArtifactSourceCategory is the module framework registry for ArtifactSource implementations.
 //
