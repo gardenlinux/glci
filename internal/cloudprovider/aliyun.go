@@ -225,6 +225,11 @@ func (p *aliyun) applyCredentials(ctx context.Context, rawCreds map[string]any) 
 }
 
 func (*aliyun) listRegions(ctx context.Context, retrier guard.Retrier, c *client.Client) ([]string, error) {
+	unusableRegions := []string{
+		"cn-fuzhou",
+		"cn-nanjing",
+	}
+
 	log.Debug(ctx, "Listing available regions")
 	var r *client.DescribeRegionsResponse
 	err := retrier.Do(ctx, "describe regions", func(_ context.Context) error {
@@ -253,6 +258,10 @@ func (*aliyun) listRegions(ctx context.Context, retrier guard.Retrier, c *client
 		if region.RegionId == nil {
 			return nil, errors.New("cannot describe regions: missing region ID")
 		}
+		if slices.Contains(unusableRegions, *region.RegionId) {
+			continue
+		}
+
 		regions = append(regions, *region.RegionId)
 	}
 
