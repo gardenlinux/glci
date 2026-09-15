@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	aliyunImageWaitTimeout = time.Minute * 14
+	aliyunImageWaitTimeout = time.Minute * 21
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
