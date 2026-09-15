@@ -25,6 +25,10 @@ import (
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
+const (
+	openstackImageWaitTimeout = time.Minute * 7
+)
+
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	env.Clean("OS_")
@@ -616,7 +620,7 @@ func (p *openstack) Configure(rawCfg map[string]any) error {
 		for _, region := range config.Regions {
 			p.environments[region] = &openstackEnvironment{
 				retrier:      guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
-				imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(statusPollTimeout)),
+				imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(openstackImageWaitTimeout)),
 			}
 		}
 	}
