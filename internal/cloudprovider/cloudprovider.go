@@ -22,7 +22,6 @@ import (
 
 const (
 	statusPollInterval = time.Second * 3
-	statusPollTimeout  = time.Minute * 7
 )
 
 // ArtifactSourceCategory is the module framework registry for ArtifactSource implementations.

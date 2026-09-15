@@ -29,6 +29,10 @@ import (
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
+const (
+	aliyunImageWaitTimeout = time.Minute * 14
+)
+
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	env.Clean("OSS_")
@@ -42,7 +46,7 @@ func init() {
 			return int(p.world.credsGen.Load())
 		}), guard.DelegatingTimeoutPolicy{})
 		p.world.ecsRetrier = guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{})
-		p.world.imageRetrier = guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(statusPollTimeout))
+		p.world.imageRetrier = guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(aliyunImageWaitTimeout))
 		return p
 	})
 }
