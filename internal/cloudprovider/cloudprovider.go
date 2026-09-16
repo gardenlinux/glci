@@ -245,9 +245,10 @@ type PublishingTarget interface {
 	ImageSuffix() string
 	RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error)
 	CanPublish(manifest *gardenlinux.Manifest) bool
+	ValidateFlavors(flavors []string) error
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
 	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
-	CanUnpublish() bool
+	CanReverse(flavor string) bool
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	CanFuse() bool
 	Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error)
@@ -343,29 +344,6 @@ func (e *KeyNotFoundError) Error() string {
 	return e.err.Error()
 }
 
-//nolint:unused // Canonical base for targets that cannot be unpublished.
-type notUnpublishableTarget struct{}
-
-//nolint:unused // Canonical base for targets that cannot be unpublished.
-func (notUnpublishableTarget) CanUnpublish() bool {
-	return false
-}
-
-//nolint:unused // Canonical base for targets that cannot be unpublished.
-func (notUnpublishableTarget) Unpublish(_ context.Context, _ *gardenlinux.Manifest, _ bool) error {
-	return errors.New("target cannot unpublish")
-}
-
-//nolint:unused // Canonical base for targets that cannot be unpublished.
-func (notUnpublishableTarget) RollbackDomain() string {
-	return ""
-}
-
-//nolint:unused // Canonical base for targets that cannot be unpublished.
-func (notUnpublishableTarget) Rollback(_ context.Context, _ map[string]resilience.Operation) error {
-	return errors.New("target cannot rollback")
-}
-
 type nonFusableTarget struct{}
 
 func (nonFusableTarget) CanFuse() bool {
@@ -389,6 +367,15 @@ func (noReplicationsTarget) RequiredReplications(_ *gardenlinux.Manifest) ([]Rep
 func platform(flavor string) string {
 	p, _, _ := strings.Cut(flavor, "-")
 	return p
+}
+
+func cname(flavor string) string {
+	c, _, ok := strings.CutLast(flavor, "-")
+	if !ok {
+		return ""
+	}
+
+	return c
 }
 
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {

@@ -181,6 +181,7 @@ func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit strin
 				Manifest:              manifest,
 				ImageSuffix:           target.ImageSuffix(),
 				Target:                target,
+				Reversible:            target.CanReverse(flavorConfig.Flavor),
 				PublishingGroup:       publishingGroup,
 				CloudProfile:          flavorConfig.CloudProfile,
 				InComponentDescriptor: flavorConfig.InComponentDescriptor,
@@ -345,6 +346,22 @@ func (p *Publisher) selectTarget(manifest *gardenlinux.Manifest, flavor string) 
 	return target, nil
 }
 
+func (*Publisher) validateFlavors(publications []publication) error {
+	targetFlavors := make(map[cloudprovider.PublishingTarget][]string)
+	for i := range publications {
+		targetFlavors[publications[i].Target] = append(targetFlavors[publications[i].Target], publications[i].Flavor)
+	}
+
+	for target, flavors := range targetFlavors {
+		err := target.ValidateFlavors(flavors)
+		if err != nil {
+			return fmt.Errorf("cannot validate flavors for target %s: %w", target.Type(), err)
+		}
+	}
+
+	return nil
+}
+
 func equalSets(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -453,6 +470,7 @@ type publication struct {
 	gardenlinux.FlavorManifest
 
 	Target                cloudprovider.PublishingTarget
+	Reversible            bool
 	PublishingGroup       string
 	CloudProfile          bool
 	InComponentDescriptor bool

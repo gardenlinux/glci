@@ -288,6 +288,10 @@ func (*aliyun) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "ali"
 }
 
+func (*aliyun) ValidateFlavors(_ []string) error {
+	return nil
+}
+
 func (p *aliyun) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -643,7 +647,7 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	return nil
 }
 
-func (*aliyun) CanUnpublish() bool {
+func (*aliyun) CanReverse(_ string) bool {
 	return true
 }
 

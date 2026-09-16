@@ -227,6 +227,10 @@ func (*gcp) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "gcp"
 }
 
+func (*gcp) ValidateFlavors(_ []string) error {
+	return nil
+}
+
 func (p *gcp) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -563,7 +567,7 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	return nil
 }
 
-func (*gcp) CanUnpublish() bool {
+func (*gcp) CanReverse(_ string) bool {
 	return true
 }
 

@@ -1054,6 +1054,10 @@ func (*awsTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "aws"
 }
 
+func (*awsTarget) ValidateFlavors(_ []string) error {
+	return nil
+}
+
 func (p *awsTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -1547,7 +1551,7 @@ func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, chin
 	return nil
 }
 
-func (*awsTarget) CanUnpublish() bool {
+func (*awsTarget) CanReverse(_ string) bool {
 	return true
 }
 
