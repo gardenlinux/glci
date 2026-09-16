@@ -432,6 +432,10 @@ func (*azure) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "azure"
 }
 
+func (*azure) ValidateFlavors(_ []string) error {
+	return nil
+}
+
 func (p *azure) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -1192,7 +1196,7 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 	return nil
 }
 
-func (*azure) CanUnpublish() bool {
+func (*azure) CanReverse(_ string) bool {
 	return true
 }
 

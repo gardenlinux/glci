@@ -71,6 +71,10 @@ flavors:
   publishing_group: container
 - flavor: container-arm64
   publishing_group: container
+- flavor: container-sslfips-amd64
+  publishing_group: container-sslfips
+- flavor: container-sslfips-arm64
+  publishing_group: container-sslfips
 publishing:
   credentials:
     source: Vault
@@ -135,9 +139,15 @@ publishing:
     bucket: gardenlinux-images
   - target: OCI
     source: S3
-    config: gardenlinux-hccs
-    repository: gardenlinux.common.repositories.cloud.sap/gardenlinux
-    allows_delete: false
+    repositories:
+      container:
+        repository: gardenlinux.common.repositories.cloud.sap/gardenlinux
+        config: gardenlinux-hccs
+        allows_delete: false
+      container-sslfips:
+        repository: gardenlinux.common.repositories.cloud.sap/gardenlinux-fips
+        config: gardenlinux-hccs
+        allows_delete: false
   - target: OpenStack
     source: S3
     source_china: S3-China

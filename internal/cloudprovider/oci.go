@@ -23,6 +23,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 
+	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/guard"
@@ -38,14 +39,9 @@ const (
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
 	module.RegisterImpl(PublishingTargetCategory, "OCI", func(b *module.Base) PublishingTarget {
-		p := &ociTarget{
+		return &ociTarget{
 			base: b,
 		}
-		p.world.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
-			return int(p.world.credsGen.Load())
-		}), guard.DelegatingTimeoutPolicy{})
-
-		return p
 	})
 
 	module.RegisterImpl(OCMTargetCategory, "OCI", func(b *module.Base) OCMTarget {
@@ -72,10 +68,9 @@ type ociTarget struct {
 	credsSource credsprovider.CredsSource
 	source      ArtifactSource
 
-	pubCfg    ociPublishingConfig
-	credsType string
+	pubCfg ociPublishingConfig
 
-	world ociEnvironment
+	environments map[string]*ociEnvironment
 }
 
 type ociEnvironment struct {
@@ -107,18 +102,33 @@ func (c *ociRegistryCredential) credential(_ context.Context, hostport string) (
 }
 
 type ociPublishingConfig struct {
-	Source       string `mapstructure:"source"`
-	Config       string `mapstructure:"config"`
+	Source       string                         `mapstructure:"source"`
+	Repositories map[string]ociRepositoryConfig `mapstructure:"repositories"`
+}
+
+type ociRepositoryConfig struct {
 	Repository   string `mapstructure:"repository"`
+	Config       string `mapstructure:"config"`
 	AllowsDelete bool   `mapstructure:"allows_delete,omitzero"`
 }
 
 func (p *ociTarget) isConfigured() bool {
-	return p.environment().repository != nil
+	if len(p.environments) == 0 {
+		return false
+	}
+
+	for _, environment := range p.environments {
+		if environment.repository == nil {
+			return false
+		}
+	}
+
+	return true
 }
 
 type ociOperationState struct {
-	Tag string `json:"tag,omitzero"`
+	Repository string `json:"repository,omitzero"`
+	Tag        string `json:"tag,omitzero"`
 }
 
 type ociPublishingOutput struct {
@@ -134,13 +144,13 @@ type ociIndividualOutput struct {
 	Architecture gardenlinux.Architecture
 }
 
-func (p *ociTarget) applyCredentials(_ context.Context, rawCreds map[string]any) error {
-	creds, err := parseOCICredentials(p.credsType, rawCreds)
+func (p *ociTarget) applyCredentials(_ context.Context, repo string, rawCreds map[string]any) error {
+	creds, err := parseOCICredentials(ociCredsType(repo), rawCreds)
 	if err != nil {
 		return err
 	}
 
-	environment := p.environment()
+	environment := p.environment(repo)
 	environment.registryCredential.credentials.Store(&creds)
 	environment.credsGen.Add(1)
 
@@ -149,7 +159,7 @@ func (p *ociTarget) applyCredentials(_ context.Context, rawCreds map[string]any)
 	}
 
 	var repository *remote.Repository
-	repository, err = newOCIRepository(p.pubCfg.Repository, &environment.registryCredential)
+	repository, err = newOCIRepository(repo, &environment.registryCredential)
 	if err != nil {
 		return err
 	}
@@ -159,8 +169,17 @@ func (p *ociTarget) applyCredentials(_ context.Context, rawCreds map[string]any)
 	return nil
 }
 
-func (p *ociTarget) environment() *ociEnvironment {
-	return &p.world
+func (p *ociTarget) environment(repo string) *ociEnvironment {
+	return p.environments[repo]
+}
+
+func (p *ociTarget) repository(flavor string) (string, error) {
+	repoCfg, ok := p.pubCfg.Repositories[cname(flavor)]
+	if !ok {
+		return "", fmt.Errorf("missing repository for flavor %s", flavor)
+	}
+
+	return repoCfg.Repository, nil
 }
 
 func (*ociTarget) ImageSuffix() string {
@@ -169,6 +188,17 @@ func (*ociTarget) ImageSuffix() string {
 
 func (*ociTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "container"
+}
+
+func (p *ociTarget) ValidateFlavors(flavors []string) error {
+	for _, flavor := range flavors {
+		_, err := p.repository(flavor)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (p *ociTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
@@ -197,11 +227,18 @@ func (p *ociTarget) Publish(ctx context.Context, flavor string, manifest *garden
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	repo, err := p.repository(flavor)
+	if err != nil {
+		return nil, err
+	}
+	environment := p.environment(repo)
+
+	var imagePath gardenlinux.S3ReleaseFile
+	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
-	ctx = log.WithValues(ctx, "key", imagePath.S3Key, "repository", p.pubCfg.Repository, "source", p.pubCfg.Source)
+	ctx = log.WithValues(ctx, "key", imagePath.S3Key, "repository", repo, "source", p.pubCfg.Source)
 
 	log.Info(ctx, "Publishing OCI artifact")
 	var archive string
@@ -232,8 +269,8 @@ func (p *ociTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	}
 
 	log.Debug(ctx, "Copying artifact", "digest", descriptor.Digest)
-	err = p.environment().retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
-		return oras.CopyGraph(ctx, store, p.environment().repository, descriptor, oras.DefaultCopyGraphOptions)
+	err = environment.retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
+		return oras.CopyGraph(ctx, store, environment.repository, descriptor, oras.DefaultCopyGraphOptions)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot copy OCI artifact: %w", err)
@@ -245,7 +282,7 @@ func (p *ociTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	}
 
 	return ociIndividualOutput{
-		Repository:   p.pubCfg.Repository,
+		Repository:   repo,
 		Digest:       descriptor.Digest.String(),
 		Size:         descriptor.Size,
 		Architecture: manifest.Architecture,
@@ -290,8 +327,13 @@ func (*ociTarget) findArtifactRootDescriptor(archive string) (specsv1.Descriptor
 	return specsv1.Descriptor{}, errors.New("OCI archive missing index.json")
 }
 
-func (p *ociTarget) CanUnpublish() bool {
-	return p.pubCfg.AllowsDelete
+func (p *ociTarget) CanReverse(flavor string) bool {
+	repoCfg, ok := p.pubCfg.Repositories[cname(flavor)]
+	if !ok {
+		return false
+	}
+
+	return repoCfg.AllowsDelete
 }
 
 func (*ociTarget) Unpublish(context.Context, *gardenlinux.Manifest, bool) error {
@@ -307,15 +349,22 @@ func (p *ociTarget) Fuse(ctx context.Context, flavorManifests []gardenlinux.Flav
 		return nil, errors.New("config not set")
 	}
 
+	repo, err := p.repository(flavorManifests[0].Flavor)
+	if err != nil {
+		return nil, err
+	}
+	environment := p.environment(repo)
+
 	descriptors := make([]specsv1.Descriptor, 0, len(flavorManifests))
 	for _, flavorManifest := range flavorManifests {
-		output, err := individualPublishingOutputFromManifest[ociIndividualOutput](flavorManifest.Manifest)
+		var output ociIndividualOutput
+		output, err = individualPublishingOutputFromManifest[ociIndividualOutput](flavorManifest.Manifest)
 		if err != nil {
 			return nil, fmt.Errorf("invalid manifest %s: %w", flavorManifest.Flavor, err)
 		}
 
-		if output.Repository != p.pubCfg.Repository {
-			return nil, fmt.Errorf("artifact repository %s does not match target repository %s", output.Repository, p.pubCfg.Repository)
+		if output.Repository != repo {
+			return nil, fmt.Errorf("artifact repository %s does not match target repository %s", output.Repository, repo)
 		}
 
 		var arch string
@@ -334,7 +383,7 @@ func (p *ociTarget) Fuse(ctx context.Context, flavorManifests []gardenlinux.Flav
 			},
 		})
 	}
-	ctx = log.WithValues(ctx, "repository", p.pubCfg.Repository, "tag", flavorManifests[0].Manifest.Version)
+	ctx = log.WithValues(ctx, "repository", repo, "tag", flavorManifests[0].Manifest.Version)
 
 	index := specsv1.Index{
 		SchemaVersion: 2,
@@ -342,7 +391,8 @@ func (p *ociTarget) Fuse(ctx context.Context, flavorManifests []gardenlinux.Flav
 		Manifests:     descriptors,
 	}
 
-	rawIndex, err := json.Marshal(index)
+	var rawIndex []byte
+	rawIndex, err = json.Marshal(index)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode image index: %w", err)
 	}
@@ -353,23 +403,24 @@ func (p *ociTarget) Fuse(ctx context.Context, flavorManifests []gardenlinux.Flav
 		Size:      int64(len(rawIndex)),
 	}
 
-	ctx = resilience.BeginOperation(ctx, "fuse/"+flavorManifests[0].Manifest.Version, &ociOperationState{})
+	ctx = resilience.BeginOperation(ctx, "fuse/"+repo+"/"+flavorManifests[0].Manifest.Version, &ociOperationState{})
 
 	log.Info(ctx, "Fusing OCI artifacts", "digest", descriptor.Digest)
-	err = p.environment().retrier.Do(ctx, "push reference", func(ctx context.Context) error {
-		return p.environment().repository.PushReference(ctx, descriptor, bytes.NewReader(rawIndex), flavorManifests[0].Manifest.Version)
+	err = environment.retrier.Do(ctx, "push reference", func(ctx context.Context) error {
+		return environment.repository.PushReference(ctx, descriptor, bytes.NewReader(rawIndex), flavorManifests[0].Manifest.Version)
 	})
 	if err != nil {
 		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot push image index: %w", err))
 	}
 	resilience.UpdateOperation(ctx, func(s *ociOperationState) *ociOperationState {
+		s.Repository = repo
 		s.Tag = flavorManifests[0].Manifest.Version
 		return s
 	})
 	resilience.CompleteOperation(ctx)
 
 	return ociPublishingOutput{
-		Repository: p.pubCfg.Repository,
+		Repository: repo,
 		Tag:        flavorManifests[0].Manifest.Version,
 		Digest:     descriptor.Digest.String(),
 	}, nil
@@ -387,9 +438,14 @@ func (p *ociTarget) Unfuse(ctx context.Context, flavorManifests []gardenlinux.Fl
 	if output.Tag == "" {
 		return errors.New("missing tag")
 	}
-	ctx = log.WithValues(ctx, "repository", p.pubCfg.Repository, "tag", output.Tag)
 
-	err = p.deleteTag(ctx, output.Tag, steamroll)
+	environment := p.environment(output.Repository)
+	if environment == nil {
+		return fmt.Errorf("repository %s not configured", output.Repository)
+	}
+	ctx = log.WithValues(ctx, "repository", output.Repository, "tag", output.Tag)
+
+	err = p.deleteTag(ctx, environment, output.Tag, steamroll)
 	if err != nil {
 		return fmt.Errorf("cannot delete tag %s: %w", output.Tag, err)
 	}
@@ -397,11 +453,11 @@ func (p *ociTarget) Unfuse(ctx context.Context, flavorManifests []gardenlinux.Fl
 	return nil
 }
 
-func (p *ociTarget) deleteTag(ctx context.Context, tag string, steamroll bool) error {
+func (*ociTarget) deleteTag(ctx context.Context, environment *ociEnvironment, tag string, steamroll bool) error {
 	var descriptor specsv1.Descriptor
-	err := p.environment().retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
+	err := environment.retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
 		var inErr error
-		descriptor, inErr = p.environment().repository.Resolve(ctx, tag)
+		descriptor, inErr = environment.repository.Resolve(ctx, tag)
 		return inErr
 	})
 	if err != nil {
@@ -414,8 +470,8 @@ func (p *ociTarget) deleteTag(ctx context.Context, tag string, steamroll bool) e
 	}
 
 	log.Info(ctx, "Deleting image index", "digest", descriptor.Digest)
-	err = p.environment().retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
-		return p.environment().repository.Manifests().Delete(ctx, descriptor)
+	err = environment.retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
+		return environment.repository.Manifests().Delete(ctx, descriptor)
 	})
 	if err != nil {
 		if steamroll && errors.Is(err, errdef.ErrNotFound) {
@@ -465,8 +521,13 @@ func (p *ociTarget) Rollback(ctx context.Context, operations map[string]resilien
 			continue
 		}
 
-		lctx := log.WithValues(ctx, "repository", p.pubCfg.Repository, "tag", state.Tag)
-		err = p.deleteTag(lctx, state.Tag, true)
+		environment := p.environment(state.Repository)
+		if environment == nil {
+			return fmt.Errorf("repository %s not configured", state.Repository)
+		}
+
+		lctx := log.WithValues(ctx, "repository", state.Repository, "tag", state.Tag)
+		err = p.deleteTag(lctx, environment, state.Tag, true)
 		if err != nil {
 			return fmt.Errorf("cannot delete tag %s: %w", state.Tag, err)
 		}
@@ -484,13 +545,31 @@ func (p *ociTarget) Configure(rawCfg map[string]any) error {
 	switch {
 	case p.pubCfg.Source == "":
 		return errors.New("missing source")
-	case p.pubCfg.Config == "":
-		return errors.New("missing config")
-	case p.pubCfg.Repository == "":
-		return errors.New("missing repository")
+	case len(p.pubCfg.Repositories) == 0:
+		return errors.New("missing repositories")
 	}
 
-	p.credsType = ociCredsType(p.pubCfg.Repository)
+	p.environments = make(map[string]*ociEnvironment, len(p.pubCfg.Repositories))
+	for flavor, repoCfg := range p.pubCfg.Repositories {
+		switch {
+		case repoCfg.Repository == "":
+			return fmt.Errorf("missing repository for %s", flavor)
+		case repoCfg.Config == "":
+			return fmt.Errorf("missing config for %s", flavor)
+		}
+
+		_, ok := p.environments[repoCfg.Repository]
+		if ok {
+			return fmt.Errorf("repository %s configured for multiple flavors", repoCfg.Repository)
+		}
+
+		environment := &ociEnvironment{}
+		environment.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+			return int(environment.credsGen.Load())
+		}), guard.DelegatingTimeoutPolicy{})
+
+		p.environments[repoCfg.Repository] = environment
+	}
 
 	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
@@ -510,24 +589,34 @@ func (*ociTarget) Configurables() []module.Configurable {
 }
 
 func (p *ociTarget) Start(ctx context.Context) error {
-	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
-		Config: p.pubCfg.Config,
-		Role:   "target",
-	}, p.applyCredentials)
-	if err != nil {
-		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.pubCfg.Config, err)
-	}
+	acquireCreds := concurrency.NewActivity(ctx)
+	for _, repoCfg := range p.pubCfg.Repositories {
+		acquireCreds.Go(func(ctx context.Context) error {
+			err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
+				Type:      fmt.Sprintf("%s_%s", p.Type(), ociCredsType(repoCfg.Repository)),
+				Config:    repoCfg.Config,
+				Qualifier: repoCfg.Repository,
+				Role:      "target",
+			}, func(ctx context.Context, creds map[string]any) error {
+				return p.applyCredentials(ctx, repoCfg.Repository, creds)
+			})
+			if err != nil {
+				return fmt.Errorf("cannot acquire credentials for config %s: %w", repoCfg.Config, err)
+			}
 
-	return nil
+			return nil
+		})
+	}
+	return acquireCreds.Wait()
 }
 
 func (p *ociTarget) Stop(ctx context.Context) error {
-	if p.pubCfg.Config != "" {
+	for _, repoCfg := range p.pubCfg.Repositories {
 		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
-			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
-			Config: p.pubCfg.Config,
-			Role:   "target",
+			Type:      fmt.Sprintf("%s_%s", p.Type(), ociCredsType(repoCfg.Repository)),
+			Config:    repoCfg.Config,
+			Qualifier: repoCfg.Repository,
+			Role:      "target",
 		})
 	}
 

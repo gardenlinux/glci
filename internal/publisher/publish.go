@@ -36,7 +36,7 @@ func (p *Publisher) Publish(ctx context.Context, version, commit string, omitIrr
 func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrreversible, omitComponentDescriptor bool) error {
 	rollbackHandlers := make([]resilience.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
-		if !target.CanUnpublish() {
+		if target.RollbackDomain() == "" {
 			continue
 		}
 
@@ -52,6 +52,11 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	publications, groupPublications, commit, err = p.fetchAllManifests(ctx, version, commit, false)
 	if err != nil {
 		return fmt.Errorf("cannot fetch manifests: %w", err)
+	}
+
+	err = p.validateFlavors(publications)
+	if err != nil {
+		return fmt.Errorf("cannot validate flavors: %w", err)
 	}
 
 	manifestsInDescriptor := make([]gardenlinux.FlavorManifest, 0, len(publications))
@@ -180,7 +185,7 @@ func (*Publisher) classifyPublishTasks(publications []publication, groupPublicat
 		}
 
 		tasks := &reversibleTasks
-		if !publications[i].Target.CanUnpublish() {
+		if !publications[i].Reversible {
 			tasks = &irreversibleTasks
 		}
 		*tasks = append(*tasks, &publications[i])
@@ -192,7 +197,7 @@ func (*Publisher) classifyPublishTasks(publications []publication, groupPublicat
 		}
 
 		tasks := &reversibleTasks
-		if !groupPublications[i].Target.CanUnpublish() {
+		if !groupPublications[i].publications[0].Reversible {
 			tasks = &irreversibleTasks
 		}
 		for j := range groupPublications[i].publications {

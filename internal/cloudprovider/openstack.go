@@ -258,6 +258,10 @@ func (p *openstack) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return err == nil
 }
 
+func (*openstack) ValidateFlavors(_ []string) error {
+	return nil
+}
+
 func (p *openstack) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
@@ -470,7 +474,7 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	})
 }
 
-func (*openstack) CanUnpublish() bool {
+func (*openstack) CanReverse(_ string) bool {
 	return true
 }
 

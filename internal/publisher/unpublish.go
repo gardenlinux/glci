@@ -34,7 +34,7 @@ func (p *Publisher) Unpublish(ctx context.Context, version, commit string, steam
 func (p *Publisher) unpublish(ctx context.Context, version, commit string, steamroll bool) error {
 	rollbackHandlers := make([]resilience.RollbackHandler, 0, len(p.targets))
 	for _, target := range p.targets {
-		if !target.CanUnpublish() {
+		if target.RollbackDomain() == "" {
 			continue
 		}
 
@@ -56,6 +56,11 @@ func (p *Publisher) unpublish(ctx context.Context, version, commit string, steam
 	publications, groupPublications, _, err = p.fetchAllManifests(ctx, version, commit, steamroll)
 	if err != nil {
 		return fmt.Errorf("cannot fetch manifests: %w", err)
+	}
+
+	err = p.validateFlavors(publications)
+	if err != nil {
+		return fmt.Errorf("cannot validate flavors: %w", err)
 	}
 
 	var tasks []publishingTask
@@ -155,7 +160,7 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 			continue
 		}
 
-		if !publications[i].Target.CanUnpublish() {
+		if !publications[i].Reversible {
 			log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", publications[i].Flavor)
 			continue
 		}
@@ -168,7 +173,7 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 			continue
 		}
 
-		if !groupPublications[i].Target.CanUnpublish() {
+		if !groupPublications[i].publications[0].Reversible {
 			for j := range groupPublications[i].publications {
 				log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", groupPublications[i].publications[j].Flavor)
 			}
