@@ -463,6 +463,44 @@ func getObjectFile(ctx context.Context, source ArtifactSource, key string) (stri
 	return f.Name(), nil
 }
 
+type readSeekNopCloser struct {
+	io.ReadSeeker
+}
+
+func (readSeekNopCloser) Close() error {
+	return nil
+}
+
+func getSeekableObject(ctx context.Context, source ArtifactSource, key string) (io.ReadSeekCloser, error) {
+	object, err := source.GetObject(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+
+	obj, ok := object.(io.ReadSeekCloser)
+	if ok {
+		return obj, nil
+	}
+	defer func() {
+		_ = object.Close()
+	}()
+
+	var data []byte
+	data, err = io.ReadAll(object)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read object: %w", err)
+	}
+
+	err = object.Close()
+	if err != nil {
+		return nil, fmt.Errorf("cannot close object: %w", err)
+	}
+
+	return readSeekNopCloser{
+		ReadSeeker: bytes.NewReader(data),
+	}, nil
+}
+
 func subset(original, subset []string) []string {
 	res := make([]string, 0, min(len(original), len(subset)))
 	for _, e := range original {

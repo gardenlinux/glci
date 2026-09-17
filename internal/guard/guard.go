@@ -529,6 +529,10 @@ func (r *retryingReader) Close() error {
 	return nil
 }
 
+func (r *retryingReader) Size() int64 {
+	return r.content.Size
+}
+
 // NewRangeSource converts a reader into a RangeSource if it supports independent ranged reads, taking ownership of it.
 func NewRangeSource(r io.Reader) (RangeSource, error) {
 	reader, ok := r.(*retryingReader)

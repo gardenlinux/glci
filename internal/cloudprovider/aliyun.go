@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"sync/atomic"
@@ -412,7 +413,7 @@ func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, ima
 	ossKey := image + p.ImageSuffix()
 	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "ossKey", ossKey)
 
-	obj, err := source.GetObject(ctx, key)
+	obj, err := getSeekableObject(ctx, source, key)
 	if err != nil {
 		return "", fmt.Errorf("cannot get blob: %w", err)
 	}
@@ -420,12 +421,31 @@ func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, ima
 		_ = obj.Close()
 	}()
 
+	type sizer interface {
+		Size() int64
+	}
+
+	var contentLength *int64
+	s, ok := obj.(sizer)
+	if ok {
+		size := s.Size()
+		if size >= 0 {
+			contentLength = &size
+		}
+	}
+
 	log.Info(ctx, "Uploading blob")
 	err = p.environment().retrier.Do(ctx, "put object", func(ctx context.Context) error {
-		_, inErr := p.environment().ossClient.PutObject(ctx, &oss.PutObjectRequest{
-			Bucket: &p.pubCfg.Bucket,
-			Key:    &ossKey,
-			Body:   obj,
+		_, inErr := obj.Seek(0, io.SeekStart)
+		if inErr != nil {
+			return fmt.Errorf("cannot rewind object: %w", inErr)
+		}
+
+		_, inErr = p.environment().ossClient.PutObject(ctx, &oss.PutObjectRequest{
+			Bucket:        &p.pubCfg.Bucket,
+			Key:           &ossKey,
+			Body:          obj,
+			ContentLength: contentLength,
 		})
 		return inErr
 	})

@@ -375,7 +375,7 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	blob := image + ".tar.gz"
 	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "blob", blob)
 
-	obj, err := source.GetObject(ctx, key)
+	obj, err := getSeekableObject(ctx, source, key)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot get blob: %w", err)
 	}
@@ -385,20 +385,35 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 
 	log.Info(ctx, "Uploading blob")
 	bucket := p.environment().storageClient.Bucket(p.pubCfg.Bucket)
-	w := bucket.Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1), storage.WithBackoff(gax.Backoff{
-		Initial: guard.RetryBaseDelay,
-		Max:     guard.RetryMaxDelay,
-	})).NewWriter(ctx)
-	w.ChunkRetryDeadline = guard.Timeout
+	err = p.environment().retrier.Do(ctx, "put object", func(ctx context.Context) error {
+		_, inErr := obj.Seek(0, io.SeekStart)
+		if inErr != nil {
+			return fmt.Errorf("cannot rewind object: %w", inErr)
+		}
 
-	_, err = io.Copy(w, obj)
-	if err != nil {
-		return "", "", fmt.Errorf("cannot copy blob: %w", err)
-	}
+		writeCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
 
-	err = w.Close()
+		w := bucket.Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1), storage.WithBackoff(gax.Backoff{
+			Initial: guard.RetryBaseDelay,
+			Max:     guard.RetryMaxDelay,
+		})).NewWriter(writeCtx)
+		w.ChunkRetryDeadline = guard.Timeout
+
+		_, inErr = io.Copy(w, obj)
+		if inErr != nil {
+			return fmt.Errorf("cannot copy object: %w", inErr)
+		}
+
+		inErr = w.Close()
+		if inErr != nil {
+			return fmt.Errorf("cannot close object writer: %w", inErr)
+		}
+
+		return nil
+	})
 	if err != nil {
-		return "", "", fmt.Errorf("cannot close object writer: %w", err)
+		return "", "", fmt.Errorf("cannot put object %s in bucket %s: %w", blob, p.pubCfg.Bucket, err)
 	}
 	resilience.UpdateOperation(ctx, func(s *gcpOperationState) *gcpOperationState {
 		s.Blob = blob
@@ -412,11 +427,15 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	}
 
 	var url string
-	url, err = bucket.SignedURL(blob, &storage.SignedURLOptions{
-		GoogleAccessID: p.environment().accessID,
-		Method:         "GET",
-		Expires:        time.Now().Add(time.Hour * 7),
-		Scheme:         storage.SigningSchemeV4,
+	err = p.environment().retrier.Do(ctx, "sign url", func(_ context.Context) error {
+		var inErr error
+		url, inErr = bucket.SignedURL(blob, &storage.SignedURLOptions{
+			GoogleAccessID: p.environment().accessID,
+			Method:         "GET",
+			Expires:        time.Now().Add(time.Hour * 7),
+			Scheme:         storage.SigningSchemeV4,
+		})
+		return inErr
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("cannot generate signed URL for blob %s: %w", blob, err)
