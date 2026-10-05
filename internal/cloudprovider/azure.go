@@ -290,7 +290,7 @@ func (p *azure) applyCredentials(ctx context.Context, rawCreds map[string]any, c
 	// Azure SDK issue 27470 workaround (temporary). Remove this block, and every block bracketed by this note, once
 	// locations/communityGalleries serves the SDK native API version — getPublicID hard-fails then to flag that this is due for removal.
 	overrideCopts := *copts
-	overrideCopts.APIVersion = "2026-04-01"
+	overrideCopts.APIVersion = "2026-03-01"
 	var cfOverride *armcompute.ClientFactory
 	cfOverride, err = armcompute.NewClientFactory(creds.SubscriptionID, &environment.tokenCredential, &overrideCopts)
 	if err != nil {
