@@ -531,8 +531,8 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 			})).Delete(ctx)
 	})
 	if err != nil {
-		terr, ok := errors.AsType[*googleapi.Error](err)
-		if steamroll && ok && terr.Code == http.StatusNotFound {
+		apiErr, ok := errors.AsType[*googleapi.Error](err)
+		if steamroll && ok && apiErr.Code == http.StatusNotFound {
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}
@@ -638,8 +638,8 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 		return inErr
 	})
 	if err != nil {
-		terr, ok := errors.AsType[*googleapi.Error](err)
-		if steamroll && ok && terr.Code == http.StatusNotFound {
+		apiErr, ok := errors.AsType[*googleapi.Error](err)
+		if steamroll && ok && apiErr.Code == http.StatusNotFound {
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}
