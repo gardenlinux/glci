@@ -646,13 +646,13 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 		return inErr
 	})
 	if err != nil {
-		terr, ok := errors.AsType[*tea.SDKError](err)
+		sdkErr, ok := errors.AsType[*tea.SDKError](err)
 		if steamroll && ok {
-			if terr.StatusCode != nil && *terr.StatusCode == http.StatusNotFound {
+			if sdkErr.StatusCode != nil && *sdkErr.StatusCode == http.StatusNotFound {
 				log.Debug(ctx, "Image not found but the steamroller keeps going")
 				return nil
 			}
-			if terr.Code != nil && *terr.Code == "Image.NotPublic" {
+			if sdkErr.Code != nil && *sdkErr.Code == "Image.NotPublic" {
 				log.Debug(ctx, "Image not public but the steamroller keeps going")
 				return nil
 			}
@@ -770,8 +770,8 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
 		if inErr != nil {
-			terr, ok := errors.AsType[*tea.SDKError](inErr)
-			if ok && terr.Code != nil && *terr.Code == "OperationDenied.ImageCopying" {
+			sdkErr, ok := errors.AsType[*tea.SDKError](inErr)
+			if ok && sdkErr.Code != nil && *sdkErr.Code == "OperationDenied.ImageCopying" {
 				cancelErr := p.cancelCopyImage(ctx, imageID, region)
 				if cancelErr != nil {
 					return errors.Join(inErr, cancelErr)

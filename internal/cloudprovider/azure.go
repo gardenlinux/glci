@@ -91,7 +91,11 @@ type azureEnvironment struct {
 	galleryImageVersionsClient          *armcompute.GalleryImageVersionsClient
 	galleriesClient                     *armcompute.GalleriesClient
 	communityGalleryImageVersionsClient *armcompute.CommunityGalleryImageVersionsClient
-	regions                             []string
+	// Azure SDK issue 27470 workaround (temporary). Remove this block, and every block bracketed by this note, once
+	// locations/communityGalleries serves the SDK native API version — getPublicID hard-fails then to flag that this is due for removal.
+	communityGalleryImageVersionsClientOverride *armcompute.CommunityGalleryImageVersionsClient
+	// End Azure SDK issue 27470 workaround.
+	regions []string
 }
 
 type azurePublishingConfig struct {
@@ -283,6 +287,18 @@ func (p *azure) applyCredentials(ctx context.Context, rawCreds map[string]any, c
 	galleriesClient := cf.NewGalleriesClient()
 	communityGalleryImageVersionsClient := cf.NewCommunityGalleryImageVersionsClient()
 
+	// Azure SDK issue 27470 workaround (temporary). Remove this block, and every block bracketed by this note, once
+	// locations/communityGalleries serves the SDK native API version — getPublicID hard-fails then to flag that this is due for removal.
+	overrideCopts := *copts
+	overrideCopts.APIVersion = "2026-04-01"
+	var cfOverride *armcompute.ClientFactory
+	cfOverride, err = armcompute.NewClientFactory(creds.SubscriptionID, &environment.tokenCredential, &overrideCopts)
+	if err != nil {
+		return fmt.Errorf("cannot create compute client: %w", err)
+	}
+	communityGalleryImageVersionsClientOverride := cfOverride.NewCommunityGalleryImageVersionsClient()
+	// End Azure SDK issue 27470 workaround.
+
 	var regions []string
 	regions, err = p.listRegions(ctx, guard.NewRetrier(guard.CountingRetryPolicy{}, guard.DelegatingTimeoutPolicy{}), subscriptionsClient,
 		creds.SubscriptionID)
@@ -305,6 +321,10 @@ func (p *azure) applyCredentials(ctx context.Context, rawCreds map[string]any, c
 	environment.galleryImageVersionsClient = galleryImageVersionsClient
 	environment.galleriesClient = galleriesClient
 	environment.communityGalleryImageVersionsClient = communityGalleryImageVersionsClient
+	// Azure SDK issue 27470 workaround (temporary). Remove this block, and every block bracketed by this note, once
+	// locations/communityGalleries serves the SDK native API version — getPublicID hard-fails then to flag that this is due for removal.
+	environment.communityGalleryImageVersionsClientOverride = communityGalleryImageVersionsClientOverride
+	// End Azure SDK issue 27470 workaround.
 	environment.regions = regions
 
 	return nil
@@ -805,8 +825,8 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, flav
 		return inErr
 	})
 	if err != nil {
-		terr, ok := errors.AsType[*azcore.ResponseError](err)
-		if !ok || terr.StatusCode != http.StatusNotFound {
+		respErr, ok := errors.AsType[*azcore.ResponseError](err)
+		if !ok || respErr.StatusCode != http.StatusNotFound {
 			return fmt.Errorf("cannot get image definition %s: %w", imageDefinition, err)
 		}
 
@@ -1075,6 +1095,9 @@ func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVe
 						StorageAccountType: new(armcompute.StorageAccountTypeStandardLRS),
 						TargetRegions:      targetRegions,
 					},
+					SafetyProfile: &armcompute.GalleryImageVersionSafetyProfile{
+						BlockDeletionBeforeEndOfLife: new(false),
+					},
 					SecurityProfile: security,
 				},
 				Tags: map[string]*string{
@@ -1159,6 +1182,22 @@ func (p *azure) getPublicID(ctx context.Context, imageDefinition, imageVersion s
 			nil)
 		return inErr
 	})
+	// Azure SDK issue 27470 workaround (temporary). Remove this block, and every block bracketed by this note, once
+	// locations/communityGalleries serves the SDK native API version — getPublicID hard-fails then to flag that this is due for removal.
+	if err == nil {
+		return "", errors.New("community gallery API version workaround for Azure SDK issue 27470 is obsolete and must be removed")
+	}
+	respErr, ok := errors.AsType[*azcore.ResponseError](err)
+	if ok && respErr.StatusCode == http.StatusBadRequest && respErr.ErrorCode == "NoRegisteredProviderFound" {
+		err = p.environment(china).retrier.Do(ctx, "get community gallery image version with API version override",
+			func(ctx context.Context) error {
+				var inErr error
+				givr, inErr = p.environment(china).communityGalleryImageVersionsClientOverride.Get(ctx, region, publicName,
+					imageDefinition, imageVersion, nil)
+				return inErr
+			})
+	}
+	// End Azure SDK issue 27470 workaround.
 	if err != nil {
 		return "", fmt.Errorf("cannot get community gallery image version: %w", err)
 	}
@@ -1181,8 +1220,8 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 		return inErr
 	})
 	if err != nil {
-		terr, ok := errors.AsType[*azcore.ResponseError](err)
-		if steamroll && ok && terr.StatusCode == http.StatusNotFound {
+		respErr, ok := errors.AsType[*azcore.ResponseError](err)
+		if steamroll && ok && respErr.StatusCode == http.StatusNotFound {
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}
@@ -1226,8 +1265,8 @@ func (p *azure) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, s
 
 			imageDefinition, image, imageVersion, inErr := p.getMetadata(ctx, img.ID, china)
 			if inErr != nil {
-				ter, ok := errors.AsType[*azcore.ResponseError](inErr)
-				if steamroll && ok && ter.StatusCode == http.StatusNotFound {
+				respErr, ok := errors.AsType[*azcore.ResponseError](inErr)
+				if steamroll && ok && respErr.StatusCode == http.StatusNotFound {
 					log.Debug(ctx, "Image not found but the steamroller keeps going")
 					return nil
 				}

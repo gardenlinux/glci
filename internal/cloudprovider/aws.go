@@ -1602,8 +1602,8 @@ func (p *awsTarget) deregisterImage(ctx context.Context, imageID, region string,
 		return inErr
 	})
 	if err != nil {
-		terr, ok := errors.AsType[*smithy.GenericAPIError](err)
-		if steamroll && ok && terr.Code == "InvalidAMIID.Unavailable" {
+		apiErr, ok := errors.AsType[*smithy.GenericAPIError](err)
+		if steamroll && ok && apiErr.Code == "InvalidAMIID.Unavailable" {
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}
@@ -1757,8 +1757,8 @@ func (p *awsTarget) deleteSnapshot(ctx context.Context, snapshot, region string,
 		return inErr
 	})
 	if err != nil {
-		terr, ok := errors.AsType[*smithy.GenericAPIError](err)
-		if steamroll && ok && terr.Code == "InvalidSnapshot.NotFound" {
+		apiErr, ok := errors.AsType[*smithy.GenericAPIError](err)
+		if steamroll && ok && apiErr.Code == "InvalidSnapshot.NotFound" {
 			log.Debug(ctx, "Snapshot not found but the steamroller keeps going")
 			return nil
 		}
