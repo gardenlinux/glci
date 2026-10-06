@@ -251,6 +251,7 @@ type PublishingTarget interface {
 	CanReverse(flavor string) bool
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	CanFuse() bool
+	FlavorsDestination(flavorManifests []gardenlinux.FlavorManifest) (string, error)
 	Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error)
 	Unfuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest, steamroll bool) error
 	resilience.RollbackHandler
@@ -348,6 +349,10 @@ type nonFusableTarget struct{}
 
 func (nonFusableTarget) CanFuse() bool {
 	return false
+}
+
+func (nonFusableTarget) FlavorsDestination(_ []gardenlinux.FlavorManifest) (string, error) {
+	return "", errors.New("target has no shared destination")
 }
 
 func (nonFusableTarget) Fuse(_ context.Context, _ []gardenlinux.FlavorManifest) (PublishingOutput, error) {

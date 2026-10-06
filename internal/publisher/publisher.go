@@ -362,6 +362,31 @@ func (*Publisher) validateFlavors(publications []publication) error {
 	return nil
 }
 
+func (*Publisher) validateGroupDestinations(groupPublications []groupPublication) error {
+	targetDestinationOwners := make(map[cloudprovider.PublishingTarget]map[string]string)
+	for _, groupPub := range groupPublications {
+		destination, err := groupPub.Target.FlavorsDestination(groupPub.flavorManifests())
+		if err != nil {
+			return fmt.Errorf("cannot determine destination for group %s: %w", groupPub.Group, err)
+		}
+
+		destinationOwners, ok := targetDestinationOwners[groupPub.Target]
+		if !ok {
+			destinationOwners = make(map[string]string)
+			targetDestinationOwners[groupPub.Target] = destinationOwners
+		}
+
+		var owner string
+		owner, ok = destinationOwners[destination]
+		if ok {
+			return fmt.Errorf("publishing groups %s and %s both publish to %s", owner, groupPub.Group, destination)
+		}
+		destinationOwners[destination] = groupPub.Group
+	}
+
+	return nil
+}
+
 func equalSets(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -464,6 +489,15 @@ func (p *groupPublication) manifestKey() string {
 
 func (p *groupPublication) isPublished() bool {
 	return p.GroupManifest != nil && len(p.GroupManifest.Manifests) != 0
+}
+
+func (p *groupPublication) flavorManifests() []gardenlinux.FlavorManifest {
+	manifests := make([]gardenlinux.FlavorManifest, len(p.publications))
+	for i := range p.publications {
+		manifests[i] = p.publications[i].FlavorManifest
+	}
+
+	return manifests
 }
 
 type publication struct {
