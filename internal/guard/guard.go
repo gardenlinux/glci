@@ -141,15 +141,15 @@ type countingRetryDecider struct {
 func (d *countingRetryDecider) NextRetry(_ error) (time.Duration, bool) {
 	d.retry++
 
-	if d.retry > Retries {
+	return countingBackoff(d.retry)
+}
+
+func countingBackoff(retry int) (time.Duration, bool) {
+	if retry > Retries {
 		return 0, false
 	}
 
-	backoff := RetryMaxDelay
-	if d.retry <= 30 {
-		backoff = RetryBaseDelay << (d.retry - 1)
-	}
-	backoff = min(backoff, RetryMaxDelay)
+	backoff := min(RetryBaseDelay<<(retry-1), RetryMaxDelay)
 
 	//nolint:gosec // Jitter is decorrelation noise and is not security-sensitive, predictability is harmless.
 	return max(backoff+rand.N(retryJitter*2+1)-retryJitter, RetryBaseDelay), true
@@ -249,6 +249,53 @@ func (d *conflictAwareDecider) NextRetry(err error) (time.Duration, bool) {
 	}
 
 	return d.decider.NextRetry(err)
+}
+
+type timeoutError struct {
+	err error
+}
+
+// NewTimeoutError returns a timeout error wrapping err so that a TimeoutRetryPolicy retries it.
+func NewTimeoutError(err error) error {
+	if err == nil {
+		err = errors.New("timed out")
+	}
+
+	return &timeoutError{
+		err: err,
+	}
+}
+
+func (e *timeoutError) Error() string {
+	return e.err.Error()
+}
+
+func (e *timeoutError) Unwrap() error {
+	return e.err
+}
+
+// TimeoutRetryPolicy retries an operation that timed out and declines every other failure.
+type TimeoutRetryPolicy struct{}
+
+// Begin starts a bounded sequence of exponentially backed off retries of timeout failures.
+func (TimeoutRetryPolicy) Begin() RetryDecider {
+	return &timeoutRetryDecider{}
+}
+
+type timeoutRetryDecider struct {
+	retry int
+}
+
+// NextRetry returns an exponentially growing pause until the budget is exhausted on a timeout failure and declines otherwise.
+func (d *timeoutRetryDecider) NextRetry(err error) (time.Duration, bool) {
+	_, ok := errors.AsType[*timeoutError](err)
+	if !ok {
+		return RetryBaseDelay, false
+	}
+
+	d.retry++
+
+	return countingBackoff(d.retry)
 }
 
 // DelegatingTimeoutPolicy never bounds an operation because the underlying function enforces its own timeouts.

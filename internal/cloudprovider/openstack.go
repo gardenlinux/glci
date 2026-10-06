@@ -115,10 +115,11 @@ type openstackCredentials struct {
 }
 
 type openstackEnvironment struct {
-	credentials  atomic.Pointer[openstackCredentials]
-	retrier      guard.Retrier
-	imageRetrier guard.Retrier
-	imagesClient *gophercloud.ServiceClient
+	credentials    atomic.Pointer[openstackCredentials]
+	retrier        guard.Retrier
+	imageRetrier   guard.Retrier
+	publishRetrier guard.Retrier
+	imagesClient   *gophercloud.ServiceClient
 }
 
 func (p *openstack) applyCredentials(ctx context.Context, region string, rawCreds map[string]any) error {
@@ -325,16 +326,33 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 				ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+region, &openstackOperationState{
 					Region: region,
 				})
-				imageID, inErr := p.createImage(ctx, region, source, imagePath.S3Key, image, variant)
-				if inErr != nil {
-					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot create image for region %s: %w", region, inErr))
-				}
-				ctx = log.WithValues(ctx, "region", region)
+				var imageID string
+				inErr := p.environment(region).publishRetrier.Do(ctx, "publish image", func(ctx context.Context) error {
+					var inInErr error
+					imageID, inInErr = p.createImage(ctx, region, source, imagePath.S3Key, image, variant)
+					if inInErr != nil {
+						return fmt.Errorf("cannot create image for region %s: %w", region, inInErr)
+					}
 
-				inErr = p.waitForImage(ctx, imageID, region)
+					inInErr = p.waitForImage(ctx, imageID, region)
+					if inInErr == nil {
+						return nil
+					}
+					inInErr = fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region, inInErr)
+
+					delErr := p.deleteImage(ctx, imageID, region, true)
+					if delErr != nil {
+						return errors.Join(inInErr, fmt.Errorf("cannot delete image %s in region %s: %w", imageID, region, delErr))
+					}
+
+					if errors.Is(inInErr, context.DeadlineExceeded) {
+						return guard.NewTimeoutError(inInErr)
+					}
+
+					return inInErr
+				})
 				if inErr != nil {
-					return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot finalize image %s in region %s: %w", imageID, region,
-						inErr))
+					return nil, resilience.FailOperation(ctx, inErr)
 				}
 				resilience.CompleteOperation(ctx)
 
@@ -623,8 +641,9 @@ func (p *openstack) Configure(rawCfg map[string]any) error {
 	for _, config := range p.pubCfg.Configs {
 		for _, region := range config.Regions {
 			p.environments[region] = &openstackEnvironment{
-				retrier:      guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
-				imageRetrier: guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(openstackImageWaitTimeout)),
+				retrier:        guard.NewRetrier(guard.CountingRetryPolicy{}, guard.BoundedTimeoutPolicy{}),
+				imageRetrier:   guard.NewRetrier(guard.DelegatingRetryPolicy{}, guard.NewCustomTimeoutPolicy(openstackImageWaitTimeout)),
+				publishRetrier: guard.NewRetrier(guard.TimeoutRetryPolicy{}, guard.DelegatingTimeoutPolicy{}),
 			}
 		}
 	}
