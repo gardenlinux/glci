@@ -56,7 +56,12 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	err = p.validateFlavors(publications)
 	if err != nil {
-		return fmt.Errorf("cannot validate flavors: %w", err)
+		return fmt.Errorf("invalid flavors: %w", err)
+	}
+
+	err = p.validateGroupDestinations(groupPublications)
+	if err != nil {
+		return fmt.Errorf("invalid group destinations: %w", err)
 	}
 
 	manifestsInDescriptor := make([]gardenlinux.FlavorManifest, 0, len(publications))
@@ -258,13 +263,8 @@ func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication
 	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, groupPub.Group), true),
 		groupPub.Target.RollbackDomain())
 
-	manifests := make([]gardenlinux.FlavorManifest, len(groupPub.publications))
-	for i, pub := range groupPub.publications {
-		manifests[i] = pub.FlavorManifest
-	}
-
 	log.Info(ctx, "Fusing group", "count", len(groupPub.publications))
-	output, err := groupPub.Target.Fuse(ctx, manifests)
+	output, err := groupPub.Target.Fuse(ctx, groupPub.flavorManifests())
 	if err != nil {
 		return fmt.Errorf("cannot fuse group %s to %s: %w", groupPub.Group, groupPub.Target.Type(), err)
 	}
