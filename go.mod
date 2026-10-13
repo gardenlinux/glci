@@ -37,7 +37,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/wandb/parallel v0.2.3
 	golang.org/x/oauth2 v0.37.0
-	google.golang.org/api v0.300.0
+	google.golang.org/api v0.301.0
 	oras.land/oras-go/v2 v2.6.2
 )
 
@@ -47,7 +47,7 @@ require (
 	cel.dev/expr v0.25.3 // indirect
 	charm.land/lipgloss/v2 v2.0.6 // indirect
 	cloud.google.com/go v0.123.0 // indirect
-	cloud.google.com/go/auth v0.24.0 // indirect
+	cloud.google.com/go/auth v0.24.1-0.20261001053825-dbc26066f70a // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.3.0 // indirect
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	cloud.google.com/go/iam v1.14.0 // indirect
