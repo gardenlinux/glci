@@ -2,13 +2,19 @@ package cloudprovider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	specsv1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
@@ -17,6 +23,7 @@ import (
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
+	"github.com/gardenlinux/glci/internal/graph"
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
@@ -47,6 +54,10 @@ type ociEnvironment struct {
 	credsGen           atomic.Int64
 	retrier            guard.Retrier
 	repository         *remote.Repository
+	ghcrClient         *http.Client
+
+	ghcrVersionIDsMtx sync.Mutex
+	ghcrVersionIDs    map[string]int64
 }
 
 type ociRegistryCredential struct {
@@ -68,6 +79,28 @@ func (c *ociRegistryCredential) credential(_ context.Context, hostport string) (
 		Username: creds.Username,
 		Password: creds.Password,
 	}, nil
+}
+
+func (e *ociEnvironment) copyGraph(ctx context.Context, source content.ReadOnlyStorage, descriptor specsv1.Descriptor) error {
+	return e.retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
+		inErr := oras.CopyGraph(ctx, source, e.repository, descriptor, oras.DefaultCopyGraphOptions)
+		if inErr != nil {
+			return fmt.Errorf("cannot copy OCI artifact: %w", inErr)
+		}
+
+		return nil
+	})
+}
+
+func (e *ociEnvironment) tag(ctx context.Context, descriptor specsv1.Descriptor, tag string) error {
+	return e.retrier.Do(ctx, "tag", func(ctx context.Context) error {
+		inErr := e.repository.Tag(ctx, descriptor, tag)
+		if inErr != nil {
+			return fmt.Errorf("cannot tag OCI artifact: %w", inErr)
+		}
+
+		return nil
+	})
 }
 
 type ociPublishingConfig struct {
@@ -135,6 +168,19 @@ func (p *ociTarget) applyCredentials(_ context.Context, repo string, rawCreds ma
 
 	environment.repository = repository
 
+	switch environment.registryCredential.registry {
+	case "ghcr.io":
+		var ghcrClient *http.Client
+		ghcrClient, err = newGHCRClient(&environment.registryCredential)
+		if err != nil {
+			return err
+		}
+
+		environment.ghcrClient = ghcrClient
+
+	default:
+	}
+
 	return nil
 }
 
@@ -142,42 +188,26 @@ func (p *ociTarget) environment(repo string) *ociEnvironment {
 	return p.environments[repo]
 }
 
-func (p *ociTarget) repository(flavor string) (string, error) {
-	repoCfg, ok := p.pubCfg.Repositories[cname(flavor)]
+func (p *ociTarget) repository(group string) (string, error) {
+	repoCfg, ok := p.pubCfg.Repositories[group]
 	if !ok {
-		return "", fmt.Errorf("missing repository for flavor %s", flavor)
+		return "", fmt.Errorf("missing repository for group %s", group)
 	}
 
 	return repoCfg.Repository, nil
-}
-
-func (p *ociTarget) FlavorsDestination(flavorManifests []gardenlinux.FlavorManifest) (string, error) {
-	var destination string
-	for _, flavorManifest := range flavorManifests {
-		repo, err := p.repository(flavorManifest.Flavor)
-		if err != nil {
-			return "", err
-		}
-
-		if destination != "" && repo != destination {
-			return "", fmt.Errorf("flavors route to different repositories %s and %s", destination, repo)
-		}
-		destination = repo
-	}
-	if destination == "" {
-		return "", errors.New("missing flavors")
-	}
-
-	return destination, nil
 }
 
 func (*ociTarget) ImageSuffix() string {
 	return ".oci"
 }
 
-func (p *ociTarget) ValidateFlavors(flavors []string) error {
-	for _, flavor := range flavors {
-		_, err := p.repository(flavor)
+func (p *ociTarget) ValidateFlavors(manifests []*gardenlinux.Manifest) error {
+	for _, manifest := range manifests {
+		if manifest.PublishingGroup == "" {
+			return fmt.Errorf("flavor %s has no publishing group", manifest.Flavor)
+		}
+
+		_, err := p.repository(manifest.PublishingGroup)
 		if err != nil {
 			return err
 		}
@@ -199,8 +229,8 @@ func (p *ociTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return ociOutput.Repository != "" && ociOutput.Tag != "" && ociOutput.Digest != "", nil
 }
 
-func (p *ociTarget) CanReverse(flavor string) bool {
-	repoCfg, ok := p.pubCfg.Repositories[cname(flavor)]
+func (p *ociTarget) CanReverse(manifest *gardenlinux.Manifest) bool {
+	repoCfg, ok := p.pubCfg.Repositories[manifest.PublishingGroup]
 	if !ok {
 		return false
 	}
@@ -216,12 +246,32 @@ func (*ociTarget) CanFuse() bool {
 	return true
 }
 
-func (p *ociTarget) Unfuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest, steamroll bool) error {
+func (p *ociTarget) FlavorsDestination(manifests []*gardenlinux.Manifest) (string, error) {
+	var destination string
+	for _, manifest := range manifests {
+		repo, err := p.repository(manifest.PublishingGroup)
+		if err != nil {
+			return "", err
+		}
+
+		if destination != "" && repo != destination {
+			return "", fmt.Errorf("flavors route to different repositories %s and %s", destination, repo)
+		}
+		destination = repo
+	}
+	if destination == "" {
+		return "", errors.New("missing flavors")
+	}
+
+	return destination, nil
+}
+
+func (p *ociTarget) Unfuse(ctx context.Context, manifests []*gardenlinux.Manifest, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
 
-	output, err := publishingOutput[ociPublishingOutput](flavorManifests[0].Manifest.PublishedImageMetadata)
+	output, err := publishingOutput[ociPublishingOutput](manifests[0].PublishedImageMetadata)
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -238,38 +288,6 @@ func (p *ociTarget) Unfuse(ctx context.Context, flavorManifests []gardenlinux.Fl
 	err = p.deleteTag(ctx, environment, output.Tag, steamroll)
 	if err != nil {
 		return fmt.Errorf("cannot delete tag %s: %w", output.Tag, err)
-	}
-
-	return nil
-}
-
-func (*ociTarget) deleteTag(ctx context.Context, environment *ociEnvironment, tag string, steamroll bool) error {
-	var descriptor specsv1.Descriptor
-	err := environment.retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
-		var inErr error
-		descriptor, inErr = environment.repository.Resolve(ctx, tag)
-		return inErr
-	})
-	if err != nil {
-		if steamroll && errors.Is(err, errdef.ErrNotFound) {
-			log.Debug(ctx, "Tag not found but the steamroller keeps going")
-			return nil
-		}
-
-		return fmt.Errorf("cannot resolve tag: %w", err)
-	}
-
-	log.Info(ctx, "Deleting image index", "digest", descriptor.Digest)
-	err = environment.retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
-		return environment.repository.Manifests().Delete(ctx, descriptor)
-	})
-	if err != nil {
-		if steamroll && errors.Is(err, errdef.ErrNotFound) {
-			log.Debug(ctx, "Image index not found but the steamroller keeps going")
-			return nil
-		}
-
-		return fmt.Errorf("cannot delete image index %s: %w", descriptor.Digest, err)
 	}
 
 	return nil
@@ -326,6 +344,240 @@ func (p *ociTarget) Rollback(ctx context.Context, operations map[string]resilien
 	return nil
 }
 
+func (*ociTarget) deleteTag(ctx context.Context, environment *ociEnvironment, tag string, steamroll bool) error {
+	log.Debug(ctx, "Resolving tag")
+	var descriptor specsv1.Descriptor
+	err := environment.retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
+		var inErr error
+		descriptor, inErr = environment.repository.Resolve(ctx, tag)
+		if inErr != nil {
+			return fmt.Errorf("cannot resolve tag: %w", inErr)
+		}
+
+		return nil
+	})
+	if err != nil {
+		if steamroll && errors.Is(err, errdef.ErrNotFound) {
+			log.Debug(ctx, "Tag not found but the steamroller keeps going")
+			return nil
+		}
+
+		return err
+	}
+
+	log.Info(ctx, "Deleting image index")
+	switch environment.repository.Reference.Registry {
+	case "ghcr.io":
+		return environment.deleteGHCRVersionTree(ctx, descriptor, steamroll)
+
+	default:
+		err = environment.retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
+			inErr := environment.repository.Manifests().Delete(ctx, descriptor)
+			if inErr != nil {
+				return fmt.Errorf("cannot delete image index %s: %w", descriptor.Digest, inErr)
+			}
+
+			return nil
+		})
+		if err != nil {
+			if steamroll && errors.Is(err, errdef.ErrNotFound) {
+				log.Debug(ctx, "Image index not found but the steamroller keeps going")
+				return nil
+			}
+
+			return err
+		}
+
+		return nil
+	}
+}
+
+func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor specsv1.Descriptor, steamroll bool) error {
+	org, pkg, ok := strings.Cut(e.repository.Reference.Repository, "/")
+	if !ok {
+		return fmt.Errorf("invalid ghcr repository %q: expected org/package", e.repository.Reference.Repository)
+	}
+
+	return graph.WalkTree(descriptor, func(d specsv1.Descriptor) ([]specsv1.Descriptor, error) {
+		if d.MediaType != specsv1.MediaTypeImageIndex {
+			return nil, nil
+		}
+
+		log.Debug(ctx, "Fetching image index", "digest", d.Digest)
+		var rawIndex []byte
+		inErr := e.retrier.Do(ctx, "fetch image index", func(ctx context.Context) error {
+			r, inInErr := e.repository.Fetch(ctx, d)
+			if inInErr != nil {
+				return fmt.Errorf("cannot fetch image index: %w", inInErr)
+			}
+			defer func() {
+				_ = r.Close()
+			}()
+
+			rawIndex, inInErr = content.ReadAll(r, d)
+			if inInErr != nil {
+				return fmt.Errorf("cannot read image index: %w", inInErr)
+			}
+
+			inInErr = r.Close()
+			if inInErr != nil {
+				return fmt.Errorf("cannot close image index: %w", inInErr)
+			}
+
+			return nil
+		})
+		if inErr != nil {
+			return nil, inErr
+		}
+
+		var index specsv1.Index
+		inErr = json.Unmarshal(rawIndex, &index)
+		if inErr != nil {
+			return nil, fmt.Errorf("cannot decode image index: %w", inErr)
+		}
+
+		return index.Manifests, nil
+	}, graph.PostOrder, func(d specsv1.Descriptor, _ int) error {
+		var id int64
+		var inErr error
+		id, ok, inErr = e.findGHCRVersionID(ctx, org, pkg, d.Digest.String())
+		if inErr != nil {
+			return fmt.Errorf("cannot find version %s: %w", d.Digest, inErr)
+		}
+
+		if !ok {
+			if steamroll {
+				log.Debug(ctx, "Version not found but the steamroller keeps going", "digest", d.Digest)
+				return nil
+			}
+
+			return fmt.Errorf("version %s not found", d.Digest)
+		}
+
+		log.Debug(ctx, "Deleting package version", "digest", d.Digest)
+		inErr = e.deleteGHCRVersion(ctx, org, pkg, id)
+		if inErr != nil {
+			return fmt.Errorf("cannot delete version %s: %w", d.Digest, inErr)
+		}
+
+		return nil
+	})
+}
+
+func (e *ociEnvironment) findGHCRVersionID(ctx context.Context, org, pkg, digest string) (int64, bool, error) {
+	e.ghcrVersionIDsMtx.Lock()
+	defer e.ghcrVersionIDsMtx.Unlock()
+
+	if e.ghcrVersionIDs == nil {
+		versionIDs, err := e.listGHCRVersionIDs(ctx, org, pkg)
+		if err != nil {
+			return 0, false, err
+		}
+
+		e.ghcrVersionIDs = versionIDs
+	}
+
+	id, ok := e.ghcrVersionIDs[digest]
+
+	return id, ok, nil
+}
+
+func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, org, pkg string) (map[string]int64, error) {
+	type ghcrVersion struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+
+	log.Debug(ctx, "Listing package versions")
+	versionsURL := fmt.Sprintf("https://api.github.com/orgs/%s/packages/container/%s/versions?per_page=100", url.PathEscape(org),
+		url.PathEscape(pkg))
+	versionIDs := make(map[string]int64)
+	page := 1
+	for {
+		var versions []ghcrVersion
+		err := e.retrier.Do(ctx, "list package versions", func(ctx context.Context) error {
+			req, inErr := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s&page=%d", versionsURL, page), nil)
+			if inErr != nil {
+				return fmt.Errorf("cannot create request: %w", inErr)
+			}
+			req.Header.Set("Accept", "application/vnd.github+json")
+			req.Header.Set("X-Github-Api-Version", "2022-11-28")
+
+			var resp *http.Response
+			resp, inErr = e.ghcrClient.Do(req)
+			if inErr != nil {
+				return fmt.Errorf("cannot list package versions: %w", inErr)
+			}
+			defer func() {
+				_ = resp.Body.Close()
+			}()
+
+			if resp.StatusCode != http.StatusOK {
+				message, readErr := io.ReadAll(resp.Body)
+				if readErr != nil {
+					return fmt.Errorf("unexpected status %q", resp.Status)
+				}
+
+				return fmt.Errorf("unexpected status %q: %q", resp.Status, strings.TrimSpace(string(message)))
+			}
+
+			inErr = json.NewDecoder(resp.Body).Decode(&versions)
+			if inErr != nil {
+				return fmt.Errorf("cannot decode package versions: %w", inErr)
+			}
+
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, version := range versions {
+			versionIDs[version.Name] = version.ID
+		}
+
+		if len(versions) < 100 {
+			break
+		}
+		page++
+	}
+
+	return versionIDs, nil
+}
+
+func (e *ociEnvironment) deleteGHCRVersion(ctx context.Context, org, pkg string, id int64) error {
+	return e.retrier.Do(ctx, "delete package version", func(ctx context.Context) error {
+		req, inErr := http.NewRequestWithContext(ctx, http.MethodDelete,
+			fmt.Sprintf("https://api.github.com/orgs/%s/packages/container/%s/versions/%d", url.PathEscape(org), url.PathEscape(pkg), id),
+			nil)
+		if inErr != nil {
+			return fmt.Errorf("cannot create request: %w", inErr)
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-Github-Api-Version", "2022-11-28")
+
+		var resp *http.Response
+		resp, inErr = e.ghcrClient.Do(req)
+		if inErr != nil {
+			return fmt.Errorf("cannot delete package version: %w", inErr)
+		}
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+
+		if resp.StatusCode != http.StatusNoContent {
+			message, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return fmt.Errorf("unexpected status %q", resp.Status)
+			}
+
+			return fmt.Errorf("unexpected status %q: %q", resp.Status, strings.TrimSpace(string(message)))
+		}
+
+		return nil
+	})
+}
+
 func (p *ociTarget) Configure(rawCfg map[string]any) error {
 	err := parseConfig(rawCfg, &p.pubCfg)
 	if err != nil {
@@ -340,17 +592,17 @@ func (p *ociTarget) Configure(rawCfg map[string]any) error {
 	}
 
 	p.environments = make(map[string]*ociEnvironment, len(p.pubCfg.Repositories))
-	for flavor, repoCfg := range p.pubCfg.Repositories {
+	for group, repoCfg := range p.pubCfg.Repositories {
 		switch {
 		case repoCfg.Repository == "":
-			return fmt.Errorf("missing repository for %s", flavor)
+			return fmt.Errorf("missing repository for %s", group)
 		case repoCfg.Config == "":
-			return fmt.Errorf("missing config for %s", flavor)
+			return fmt.Errorf("missing config for %s", group)
 		}
 
 		_, ok := p.environments[repoCfg.Repository]
 		if ok {
-			return fmt.Errorf("repository %s configured for multiple flavors", repoCfg.Repository)
+			return fmt.Errorf("repository %s configured for multiple groups", repoCfg.Repository)
 		}
 
 		environment := &ociEnvironment{}
@@ -383,7 +635,7 @@ func (p *ociTarget) Start(ctx context.Context) error {
 	for _, repoCfg := range p.pubCfg.Repositories {
 		acquireCreds.Go(func(ctx context.Context) error {
 			err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-				Type:      fmt.Sprintf("%s_%s", p.Type(), ociCredsType(repoCfg.Repository)),
+				Type:      "OCI_" + ociCredsType(repoCfg.Repository),
 				Config:    repoCfg.Config,
 				Qualifier: repoCfg.Repository,
 				Role:      "target",
@@ -403,7 +655,7 @@ func (p *ociTarget) Start(ctx context.Context) error {
 func (p *ociTarget) Stop(ctx context.Context) error {
 	for _, repoCfg := range p.pubCfg.Repositories {
 		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
-			Type:      fmt.Sprintf("%s_%s", p.Type(), ociCredsType(repoCfg.Repository)),
+			Type:      "OCI_" + ociCredsType(repoCfg.Repository),
 			Config:    repoCfg.Config,
 			Qualifier: repoCfg.Repository,
 			Role:      "target",
@@ -466,6 +718,55 @@ func newOCIRepository(repo string, registryCredential *ociRegistryCredential) (*
 
 	registryCredential.registry = repository.Reference.Registry
 
+	var transport *retry.Transport
+	transport, err = newRetryTransport()
+	if err != nil {
+		return nil, err
+	}
+
+	repository.Client = &auth.Client{
+		Client: &http.Client{
+			Transport: transport,
+		},
+		Cache:      auth.NewCache(),
+		Credential: registryCredential.credential,
+	}
+
+	return repository, nil
+}
+
+type ghcrTransport struct {
+	registryCredential *ociRegistryCredential
+	transport          http.RoundTripper
+}
+
+func (t *ghcrTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	creds := t.registryCredential.credentials.Load()
+	if creds == nil {
+		return nil, errors.New("credentials not set")
+	}
+
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+creds.Password)
+
+	return t.transport.RoundTrip(req)
+}
+
+func newGHCRClient(registryCredential *ociRegistryCredential) (*http.Client, error) {
+	transport, err := newRetryTransport()
+	if err != nil {
+		return nil, err
+	}
+
+	return &http.Client{
+		Transport: &ghcrTransport{
+			registryCredential: registryCredential,
+			transport:          transport,
+		},
+	}, nil
+}
+
+func newRetryTransport() (*retry.Transport, error) {
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, errors.New("unexpected default transport type")
@@ -484,13 +785,5 @@ func newOCIRepository(repo string, registryCredential *ociRegistryCredential) (*
 		}
 	}
 
-	repository.Client = &auth.Client{
-		Client: &http.Client{
-			Transport: transport,
-		},
-		Cache:      auth.NewCache(),
-		Credential: registryCredential.credential,
-	}
-
-	return repository, nil
+	return transport, nil
 }

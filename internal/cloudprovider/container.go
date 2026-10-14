@@ -12,7 +12,6 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	specsv1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"oras.land/oras-go/v2"
 	orasoci "oras.land/oras-go/v2/content/oci"
 	"oras.land/oras-go/v2/errdef"
 
@@ -24,11 +23,11 @@ import (
 
 //nolint:gochecknoinits // Required for automatic registration.
 func init() {
-	module.RegisterImpl(PublishingTargetCategory, "OCI", func(b *module.Base) PublishingTarget {
+	module.RegisterImpl(PublishingTargetCategory, "Container", func(b *module.Base) PublishingTarget {
 		p := &containerTarget{
 			ociTarget: &ociTarget{
 				base:     b,
-				typeName: "OCI",
+				typeName: "Container",
 			},
 		}
 		p.self = p
@@ -58,12 +57,10 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	repo, err := p.repository(flavor)
+	repo, err := p.repository(manifest.PublishingGroup)
 	if err != nil {
 		return nil, err
 	}
-	environment := p.environment(repo)
-
 	var imagePath gardenlinux.S3ReleaseFile
 	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
 	if err != nil {
@@ -71,7 +68,8 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 	}
 	ctx = log.WithValues(ctx, "key", imagePath.S3Key, "repository", repo, "source", p.pubCfg.Source)
 
-	log.Info(ctx, "Publishing OCI artifact")
+	log.Info(ctx, "Publishing OCI container")
+
 	var archive string
 	archive, err = getObjectFile(ctx, p.source, imagePath.S3Key)
 	if err != nil {
@@ -87,10 +85,10 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 		return nil, fmt.Errorf("cannot open OCI archive: %w", err)
 	}
 
-	var descriptor specsv1.Descriptor
-	descriptor, err = store.Resolve(ctx, flavor)
+	var manifestDescriptor specsv1.Descriptor
+	manifestDescriptor, err = store.Resolve(ctx, flavor)
 	if errors.Is(err, errdef.ErrNotFound) {
-		descriptor, err = p.findArtifactRootDescriptor(archive)
+		manifestDescriptor, err = p.findArtifactRootDescriptor(archive)
 		if err != nil {
 			return nil, fmt.Errorf("cannot find artifact root descriptor: %w", err)
 		}
@@ -98,13 +96,14 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve OCI artifact: %w", err)
 	}
+	ctx = log.WithValues(ctx, "digest", manifestDescriptor.Digest)
 
-	log.Debug(ctx, "Copying artifact", "digest", descriptor.Digest)
-	err = environment.retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
-		return oras.CopyGraph(ctx, store, environment.repository, descriptor, oras.DefaultCopyGraphOptions)
-	})
+	environment := p.environment(repo)
+
+	log.Debug(ctx, "Copying artifact")
+	err = environment.copyGraph(ctx, store, manifestDescriptor)
 	if err != nil {
-		return nil, fmt.Errorf("cannot copy OCI artifact: %w", err)
+		return nil, err
 	}
 
 	err = os.Remove(archive)
@@ -114,8 +113,8 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 
 	return ociIndividualOutput{
 		Repository:   repo,
-		Digest:       descriptor.Digest.String(),
-		Size:         descriptor.Size,
+		Digest:       manifestDescriptor.Digest.String(),
+		Size:         manifestDescriptor.Size,
 		Architecture: manifest.Architecture,
 	}, nil
 }
@@ -146,7 +145,7 @@ func (*containerTarget) findArtifactRootDescriptor(archive string) (specsv1.Desc
 		var index specsv1.Index
 		err = json.NewDecoder(r).Decode(&index)
 		if err != nil {
-			return specsv1.Descriptor{}, fmt.Errorf("invalid OCI archive index: %w", err)
+			return specsv1.Descriptor{}, fmt.Errorf("cannot decode OCI archive index: %w", err)
 		}
 		if len(index.Manifests) != 1 {
 			return specsv1.Descriptor{}, fmt.Errorf("expected exactly one manifest in OCI archive, got %d", len(index.Manifests))
@@ -158,23 +157,23 @@ func (*containerTarget) findArtifactRootDescriptor(archive string) (specsv1.Desc
 	return specsv1.Descriptor{}, errors.New("OCI archive missing index.json")
 }
 
-func (p *containerTarget) Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error) {
+func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 
-	repo, err := p.repository(flavorManifests[0].Flavor)
+	repo, err := p.repository(manifests[0].PublishingGroup)
 	if err != nil {
 		return nil, err
 	}
 	environment := p.environment(repo)
 
-	descriptors := make([]specsv1.Descriptor, 0, len(flavorManifests))
-	for _, flavorManifest := range flavorManifests {
+	descriptors := make([]specsv1.Descriptor, 0, len(manifests))
+	for _, manifest := range manifests {
 		var output ociIndividualOutput
-		output, err = individualPublishingOutputFromManifest[ociIndividualOutput](flavorManifest.Manifest)
+		output, err = individualPublishingOutputFromManifest[ociIndividualOutput](manifest)
 		if err != nil {
-			return nil, fmt.Errorf("invalid manifest %s: %w", flavorManifest.Flavor, err)
+			return nil, fmt.Errorf("invalid manifest %s: %w", manifest.Flavor, err)
 		}
 
 		if output.Repository != repo {
@@ -184,7 +183,7 @@ func (p *containerTarget) Fuse(ctx context.Context, flavorManifests []gardenlinu
 		var arch string
 		arch, err = p.architecture(output.Architecture)
 		if err != nil {
-			return nil, fmt.Errorf("invalid manifest %s: %w", flavorManifest.Flavor, err)
+			return nil, fmt.Errorf("invalid manifest %s: %w", manifest.Flavor, err)
 		}
 
 		descriptors = append(descriptors, specsv1.Descriptor{
@@ -197,7 +196,7 @@ func (p *containerTarget) Fuse(ctx context.Context, flavorManifests []gardenlinu
 			},
 		})
 	}
-	ctx = log.WithValues(ctx, "repository", repo, "tag", flavorManifests[0].Manifest.Version)
+	ctx = log.WithValues(ctx, "repository", repo, "tag", manifests[0].Version)
 
 	index := specsv1.Index{
 		SchemaVersion: 2,
@@ -216,26 +215,34 @@ func (p *containerTarget) Fuse(ctx context.Context, flavorManifests []gardenlinu
 		Digest:    digest.FromBytes(rawIndex),
 		Size:      int64(len(rawIndex)),
 	}
+	ctx = log.WithValues(ctx, "digest", descriptor.Digest)
 
-	ctx = resilience.BeginOperation(ctx, "fuse/"+repo+"/"+flavorManifests[0].Manifest.Version, &ociOperationState{})
+	ctx = resilience.BeginOperation(ctx, "fuse/"+repo+"/"+manifests[0].Version, &ociOperationState{})
 
-	log.Info(ctx, "Fusing OCI artifacts", "digest", descriptor.Digest)
+	log.Info(ctx, "Fusing OCI artifacts")
+
+	log.Debug(ctx, "Tagging artifact")
 	err = environment.retrier.Do(ctx, "push reference", func(ctx context.Context) error {
-		return environment.repository.PushReference(ctx, descriptor, bytes.NewReader(rawIndex), flavorManifests[0].Manifest.Version)
+		inErr := environment.repository.PushReference(ctx, descriptor, bytes.NewReader(rawIndex), manifests[0].Version)
+		if inErr != nil {
+			return fmt.Errorf("cannot push image index: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot push image index: %w", err))
+		return nil, resilience.FailOperation(ctx, err)
 	}
 	resilience.UpdateOperation(ctx, func(s *ociOperationState) *ociOperationState {
 		s.Repository = repo
-		s.Tag = flavorManifests[0].Manifest.Version
+		s.Tag = manifests[0].Version
 		return s
 	})
 	resilience.CompleteOperation(ctx)
 
 	return ociPublishingOutput{
 		Repository: repo,
-		Tag:        flavorManifests[0].Manifest.Version,
+		Tag:        manifests[0].Version,
 		Digest:     descriptor.Digest.String(),
 	}, nil
 }

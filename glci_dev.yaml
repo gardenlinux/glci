@@ -19,6 +19,12 @@ flavors:
   in_component_descriptor: true
 - flavor: openstack-gardener_prod-amd64
   in_component_descriptor: true
+- flavor: gdch-gardener_prod-amd64
+  publishing_group: rbsc
+#  in_component_descriptor: true
+- flavor: gdch-gardener_prod-arm64
+  publishing_group: rbsc
+#  in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-amd64
   in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-arm64
@@ -113,6 +119,13 @@ publishing:
     config: gardenlinux-integration-test
     project: sap-cp-k8s-gdnlinux-gcp-test
     bucket: gardenlinux-test-images
+  - target: RBSC
+    source: S3
+    repositories:
+      rbsc:
+        repository: ghcr.io/gardenlinux/rbsc_test
+        config: gardenlinux-ghcr
+        allows_delete: true
   - target: OpenStack
     source: S3
     configs:
