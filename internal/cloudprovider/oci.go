@@ -306,14 +306,6 @@ func (*ociTarget) architecture(arch gardenlinux.Architecture) (string, error) {
 	}
 }
 
-func (p *ociTarget) RollbackDomain() string {
-	if !p.isConfigured() {
-		return ""
-	}
-
-	return "oci"
-}
-
 func (p *ociTarget) Rollback(ctx context.Context, operations map[string]resilience.Operation) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")

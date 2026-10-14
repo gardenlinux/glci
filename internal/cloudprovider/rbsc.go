@@ -314,3 +314,11 @@ func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest
 		Digest:     descriptor.Digest.String(),
 	}, nil
 }
+
+func (p *rbscTarget) RollbackDomain() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "rbsc"
+}
