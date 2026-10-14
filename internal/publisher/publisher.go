@@ -155,22 +155,7 @@ func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit strin
 		fetchManifests.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
 
-			manifest, inErr := p.fetchManifest(ctx, flavorConfig.Flavor, version, commit)
-			if inErr != nil {
-				return inErr
-			}
-
-			if manifest.PublishingGroup != "" && manifest.PublishingGroup != flavorConfig.PublishingGroup {
-				return fmt.Errorf("manifest for %s has publishing group %q conflicting with configured %q", flavorConfig.Flavor,
-					manifest.PublishingGroup, flavorConfig.PublishingGroup)
-			}
-
-			if manifest.PublishingGroup == "" {
-				manifest.PublishingGroup = flavorConfig.PublishingGroup
-			}
-
-			var target cloudprovider.PublishingTarget
-			target, inErr = p.selectTarget(manifest, flavorConfig.Flavor)
+			manifest, target, inErr := p.fetchManifest(ctx, flavorConfig, version, commit)
 			if inErr != nil {
 				return inErr
 			}
@@ -285,22 +270,22 @@ func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit strin
 	return publications, groupPublications, commit, nil
 }
 
-func (p *Publisher) fetchManifest(ctx context.Context, flavor, version, commit string) (*gardenlinux.Manifest, error) {
-	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavor, version, commit)
+func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig, version, commit string) (*gardenlinux.Manifest, cloudprovider.PublishingTarget, error) {
+	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
 
 	log.Debug(ctx, "Retrieving manifest")
 	manifest, err := cloudprovider.GetManifest(ctx, p.manifestSource, manifestKey)
 	if err != nil {
-		return nil, fmt.Errorf("cannot get manifest for %s: %w", flavor, err)
+		return nil, nil, fmt.Errorf("cannot get manifest for %s: %w", flavorConfig.Flavor, err)
 	}
 	if manifest.Version != version {
-		return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavor, manifest.Version)
+		return nil, nil, fmt.Errorf("manifest for %s has incorrect version %s", flavorConfig.Flavor, manifest.Version)
 	}
 	if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
-		return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavor, manifest.BuildCommittish)
+		return nil, nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavorConfig.Flavor, manifest.BuildCommittish)
 	}
-	if manifest.Flavor != "" && manifest.Flavor != flavor {
-		return nil, fmt.Errorf("manifest for %s has incorrect flavor %s", flavor, manifest.Flavor)
+	if manifest.Flavor != "" && manifest.Flavor != flavorConfig.Flavor {
+		return nil, nil, fmt.Errorf("manifest for %s has incorrect flavor %s", flavorConfig.Flavor, manifest.Flavor)
 	}
 
 	if p.manifestTarget != p.manifestSource {
@@ -310,27 +295,39 @@ func (p *Publisher) fetchManifest(ctx context.Context, flavor, version, commit s
 		targetManifest, err = cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
 		_, ok := errors.AsType[*cloudprovider.KeyNotFoundError](err)
 		if err != nil && !ok {
-			return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavor, err)
+			return nil, nil, fmt.Errorf("cannot get target manifest for %s: %w", flavorConfig.Flavor, err)
 		}
 
 		if targetManifest != nil {
 			if targetManifest.Version != version {
-				return nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavor, targetManifest.Version)
+				return nil, nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavorConfig.Flavor, targetManifest.Version)
 			}
 			if targetManifest.BuildCommittish != manifest.BuildCommittish {
-				return nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavor, targetManifest.BuildCommittish)
+				return nil, nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavorConfig.Flavor, targetManifest.BuildCommittish)
 			}
-			if targetManifest.Flavor != "" && targetManifest.Flavor != flavor {
-				return nil, fmt.Errorf("target manifest for %s has incorrect flavor %s", flavor, targetManifest.Flavor)
+			if targetManifest.Flavor != "" && targetManifest.Flavor != flavorConfig.Flavor {
+				return nil, nil, fmt.Errorf("target manifest for %s has incorrect flavor %s", flavorConfig.Flavor, targetManifest.Flavor)
 			}
 
 			manifest = targetManifest
 		}
 	}
 
-	manifest.Flavor = flavor
+	manifest.Flavor = flavorConfig.Flavor
+	if manifest.PublishingGroup != "" && manifest.PublishingGroup != flavorConfig.PublishingGroup {
+		return nil, nil, fmt.Errorf("manifest for %s has publishing group %q conflicting with configured %q", flavorConfig.Flavor, manifest.PublishingGroup, flavorConfig.PublishingGroup)
+	}
+	if manifest.PublishingGroup == "" {
+		manifest.PublishingGroup = flavorConfig.PublishingGroup
+	}
 
-	return manifest, nil
+	var target cloudprovider.PublishingTarget
+	target, err = p.selectTarget(manifest, flavorConfig.Flavor)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return manifest, target, nil
 }
 
 func (p *Publisher) selectTarget(manifest *gardenlinux.Manifest, flavor string) (cloudprovider.PublishingTarget, error) {
@@ -436,13 +433,7 @@ func (p *Publisher) gatherReplications(ctx context.Context, version, commit stri
 		gatherReplications.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
 
-			manifest, inErr := p.fetchManifest(ctx, flavorConfig.Flavor, version, commit)
-			if inErr != nil {
-				return inErr
-			}
-
-			var target cloudprovider.PublishingTarget
-			target, inErr = p.selectTarget(manifest, flavorConfig.Flavor)
+			manifest, target, inErr := p.fetchManifest(ctx, flavorConfig, version, commit)
 			if inErr != nil {
 				return inErr
 			}
