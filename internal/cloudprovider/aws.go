@@ -292,10 +292,14 @@ func (*awsTarget) listRegions(ctx context.Context, retrier guard.Retrier, ec2Cli
 	err := retrier.Do(ctx, "describe regions", func(ctx context.Context) error {
 		var inErr error
 		r, inErr = ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot describe regions: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cannot describe regions: %w", err)
+		return nil, err
 	}
 
 	regions := make([]string, 0, len(r.Regions))
@@ -384,10 +388,14 @@ func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error
 			Bucket: &p.srcCfg.Bucket,
 			Key:    &key,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get presigned URL: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot get presigned URL: %w", err)
+		return "", err
 	}
 
 	return presigned.URL, nil
@@ -405,17 +413,21 @@ func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (Object
 			Bucket: &p.srcCfg.Bucket,
 			Key:    &key,
 		})
-		return inErr
-	})
-	if err != nil {
-		_, ok := errors.AsType[*s3types.NotFound](err)
-		if ok {
-			err = &KeyNotFoundError{
-				err: err,
+		if inErr != nil {
+			_, ok := errors.AsType[*s3types.NotFound](inErr)
+			if ok {
+				inErr = &KeyNotFoundError{
+					err: inErr,
+				}
 			}
+
+			return fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, inErr)
 		}
 
-		return ObjectProperties{}, fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
+		return nil
+	})
+	if err != nil {
+		return ObjectProperties{}, err
 	}
 	if r.ContentLength == nil {
 		return ObjectProperties{}, fmt.Errorf("cannot head object %s from bucket %s: missing content length", key, p.srcCfg.Bucket)
@@ -773,10 +785,14 @@ func (p *awsSource) listMultipartUploads(ctx context.Context, key string) ([]str
 		err := p.retrier.Do(ctx, "list multipart uploads", func(ctx context.Context) error {
 			var inErr error
 			r, inErr = p.s3Client.ListMultipartUploads(ctx, input)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot list multipart uploads: %w", inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("cannot list multipart uploads: %w", err)
+			return nil, err
 		}
 
 		for _, upload := range r.Uploads {
@@ -809,7 +825,11 @@ func (p *awsSource) listCompletedParts(ctx context.Context, key, uploadID string
 		err := p.retrier.Do(ctx, "list parts", func(ctx context.Context) error {
 			var inErr error
 			r, inErr = p.s3Client.ListParts(ctx, input)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot list parts: %w", inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
 			_, ok := errors.AsType[*s3types.NoSuchUpload](err)
@@ -817,7 +837,7 @@ func (p *awsSource) listCompletedParts(ctx context.Context, key, uploadID string
 				return nil, 0, nil
 			}
 
-			return nil, 0, fmt.Errorf("cannot list parts: %w", err)
+			return nil, 0, err
 		}
 
 		for _, part := range r.Parts {
@@ -871,10 +891,14 @@ func (p *awsSource) createMultipartUpload(ctx context.Context, key, contentType 
 	err := p.retrier.Do(ctx, "create multipart upload", func(ctx context.Context) error {
 		var inErr error
 		r, inErr = p.s3Client.CreateMultipartUpload(ctx, input)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create multipart upload: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot create multipart upload: %w", err)
+		return "", err
 	}
 	if r.UploadId == nil {
 		return "", errors.New("cannot create multipart upload: missing upload ID")
@@ -887,12 +911,13 @@ func (p *awsSource) uploadParts(ctx context.Context, key, uploadID string, objec
 	size int64,
 ) error {
 	uploadParts := concurrency.NewLimitedActivity(ctx, multipartConcurrency)
-	for partNumber := 1; partNumber <= len(parts); partNumber++ {
-		if parts[partNumber-1].PartNumber != nil {
+	for i := range parts {
+		partNumber := i + 1
+		if parts[i].PartNumber != nil {
 			continue
 		}
 
-		offset := int64(partNumber-1) * multipartPartSize
+		offset := int64(i) * multipartPartSize
 		length := multipartPartSize
 		if offset+length > size {
 			length = size - offset
@@ -933,7 +958,7 @@ func (p *awsSource) uploadParts(ctx context.Context, key, uploadID string, objec
 				return inErr
 			}
 
-			parts[partNumber-1] = s3types.CompletedPart{
+			parts[i] = s3types.CompletedPart{
 				ChecksumCRC32: r.ChecksumCRC32,
 				ETag:          r.ETag,
 				PartNumber:    new(int32(partNumber)), //nolint:gosec // partNumber fits in int32, bounded by multipartMaxParts.
@@ -971,19 +996,18 @@ func (*awsSource) assembleETag(parts []s3types.CompletedPart) (string, error) {
 
 func (p *awsSource) abortUpload(ctx context.Context, key, uploadID string) error {
 	log.Debug(ctx, "Aborting multipart upload")
-	err := p.retrier.Do(ctx, "abort multipart upload", func(ctx context.Context) error {
+	return p.retrier.Do(ctx, "abort multipart upload", func(ctx context.Context) error {
 		_, inErr := p.s3Client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 			Bucket:   &p.srcCfg.Bucket,
 			Key:      &key,
 			UploadId: &uploadID,
 		})
-		return inErr
-	})
-	if err != nil {
-		return fmt.Errorf("cannot abort multipart upload: %w", err)
-	}
+		if inErr != nil {
+			return fmt.Errorf("cannot abort multipart upload: %w", inErr)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 func (p *awsSource) completeUpload(ctx context.Context, key, uploadID string, parts []s3types.CompletedPart, size int64) (string, error) {
@@ -1000,10 +1024,14 @@ func (p *awsSource) completeUpload(ctx context.Context, key, uploadID string, pa
 				Parts: parts,
 			},
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot complete multipart upload: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot complete multipart upload: %w", err)
+		return "", err
 	}
 	if r.ETag == nil {
 		return "", errors.New("cannot complete multipart upload: missing ETag")
@@ -1023,7 +1051,11 @@ func (p *awsSource) DeleteObject(ctx context.Context, key string, steamroll bool
 			Bucket: &p.srcCfg.Bucket,
 			Key:    &key,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		_, ok := errors.AsType[*s3types.NotFound](err)
@@ -1032,29 +1064,28 @@ func (p *awsSource) DeleteObject(ctx context.Context, key string, steamroll bool
 			return nil
 		}
 
-		return fmt.Errorf("cannot head object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
+		return err
 	}
 
 	log.Debug(ctx, "Deleting object", "bucket", p.srcCfg.Bucket, "key", key)
-	err = p.retrier.Do(ctx, "delete object", func(ctx context.Context) error {
+	return p.retrier.Do(ctx, "delete object", func(ctx context.Context) error {
 		_, inErr := p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: &p.srcCfg.Bucket,
 			Key:    &key,
 		})
-		return inErr
-	})
-	if err != nil {
-		return fmt.Errorf("cannot delete object %s from bucket %s: %w", key, p.srcCfg.Bucket, err)
-	}
+		if inErr != nil {
+			return fmt.Errorf("cannot delete object %s from bucket %s: %w", key, p.srcCfg.Bucket, inErr)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 func (*awsTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "aws"
 }
 
-func (*awsTarget) ValidateFlavors(_ []string) error {
+func (*awsTarget) ValidateFlavors(_ []*gardenlinux.Manifest) error {
 	return nil
 }
 
@@ -1330,10 +1361,14 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 			},
 			Encrypted: new(false),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot import snapshot in bucket %s: %w", bucket, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot import snapshot in bucket %s: %w", bucket, err)
+		return "", err
 	}
 	if r.ImportTaskId == nil {
 		return "", fmt.Errorf("cannot import snapshot in bucket %s: missing import task ID", bucket)
@@ -1354,10 +1389,14 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 			s, inErr = p.environment(china).ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 				ImportTaskIds: []string{*r.ImportTaskId},
 			})
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot describe import snapshot tasks with ID %s: %w", *r.ImportTaskId, inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: %w", *r.ImportTaskId, err)
+			return "", err
 		}
 		if len(s.ImportSnapshotTasks) != 1 || s.NextToken != nil {
 			return "", fmt.Errorf("cannot describe import snapshot tasks with ID %s: missing import snapshot tasks", *r.ImportTaskId)
@@ -1398,18 +1437,17 @@ func (p *awsTarget) importSnapshot(ctx context.Context, source ArtifactSource, k
 
 func (p *awsTarget) attachTags(ctx context.Context, obj string, tags []ec2types.Tag, china bool) error {
 	log.Debug(ctx, "Attaching tags", "object", obj)
-	err := p.environment(china).retrier.Do(ctx, "create tags", func(ctx context.Context) error {
+	return p.environment(china).retrier.Do(ctx, "create tags", func(ctx context.Context) error {
 		_, inErr := p.environment(china).ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
 			Resources: []string{obj},
 			Tags:      tags,
 		})
-		return inErr
-	})
-	if err != nil {
-		return fmt.Errorf("cannot create tags for %s: %w", obj, err)
-	}
+		if inErr != nil {
+			return fmt.Errorf("cannot create tags for %s: %w", obj, inErr)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, arch ec2types.ArchitectureValues, requireUEFI bool,
@@ -1446,10 +1484,14 @@ func (p *awsTarget) registerImage(ctx context.Context, snapshot, image string, a
 	err := p.environment(china).retrier.Do(ctx, "register image", func(ctx context.Context) error {
 		var inErr error
 		r, inErr = p.environment(china).ec2Client.RegisterImage(ctx, &params)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot register image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot register image: %w", err)
+		return "", err
 	}
 	if r.ImageId == nil {
 		return "", errors.New("cannot register image: missing image ID")
@@ -1475,10 +1517,14 @@ func (p *awsTarget) copyImage(ctx context.Context, image, imageID, region, toReg
 			SourceRegion:  &region,
 			CopyImageTags: new(true),
 		}, overrideRegion(toRegion))
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot copy image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot copy image: %w", err)
+		return "", err
 	}
 	if r.ImageId == nil {
 		return "", errors.New("cannot copy image: missing image ID")
@@ -1501,10 +1547,14 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 			r, inErr = p.environment(china).ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 				ImageIds: []string{imageID},
 			}, overrideRegion(region))
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot describe image: %w", inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("cannot describe image: %w", err)
+			return err
 		}
 		if len(r.Images) != 1 || r.NextToken != nil {
 			return errors.New("ccannot describe image: missing images")
@@ -1530,7 +1580,7 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 
 func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, china bool) error {
 	log.Debug(ctx, "Adding launch permission to image")
-	err := p.environment(china).retrier.Do(ctx, "modify image attribute", func(ctx context.Context) error {
+	return p.environment(china).retrier.Do(ctx, "modify image attribute", func(ctx context.Context) error {
 		_, inErr := p.environment(china).ec2Client.ModifyImageAttribute(ctx, &ec2.ModifyImageAttributeInput{
 			ImageId:   &imageID,
 			Attribute: new("launchPermission"),
@@ -1542,16 +1592,15 @@ func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, chin
 				},
 			},
 		}, overrideRegion(region))
-		return inErr
-	})
-	if err != nil {
-		return fmt.Errorf("cannot modify attribute: %w", err)
-	}
+		if inErr != nil {
+			return fmt.Errorf("cannot modify attribute: %w", inErr)
+		}
 
-	return nil
+		return nil
+	})
 }
 
-func (*awsTarget) CanReverse(_ string) bool {
+func (*awsTarget) CanReverse(_ *gardenlinux.Manifest) bool {
 	return true
 }
 
@@ -1599,7 +1648,11 @@ func (p *awsTarget) deregisterImage(ctx context.Context, imageID, region string,
 			ImageId:                   &imageID,
 			DeleteAssociatedSnapshots: new(true),
 		}, overrideRegion(region))
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot deregister image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		apiErr, ok := errors.AsType[*smithy.GenericAPIError](err)
@@ -1607,7 +1660,7 @@ func (p *awsTarget) deregisterImage(ctx context.Context, imageID, region string,
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}
-		return fmt.Errorf("cannot deregister image: %w", err)
+		return err
 	}
 	if r.Return != nil && !*r.Return {
 		return errors.New("cannot deregister image: operation failed")
@@ -1703,10 +1756,14 @@ func (p *awsTarget) deleteSnapshotFromImportTask(ctx context.Context, importTask
 			s, inErr = p.environment(china).ec2Client.DescribeImportSnapshotTasks(ctx, &ec2.DescribeImportSnapshotTasksInput{
 				ImportTaskIds: []string{importTaskID},
 			}, overrideRegion(region))
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot describe import snapshot tasks: %w", inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("cannot describe import snapshot tasks: %w", err)
+			return err
 		}
 		if len(s.ImportSnapshotTasks) == 0 && steamroll {
 			log.Debug(ctx, "Import task not found but the steamroller keeps going")
@@ -1754,7 +1811,11 @@ func (p *awsTarget) deleteSnapshot(ctx context.Context, snapshot, region string,
 		_, inErr := p.environment(china).ec2Client.DeleteSnapshot(ctx, &ec2.DeleteSnapshotInput{
 			SnapshotId: &snapshot,
 		}, overrideRegion(region))
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete snapshot: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		apiErr, ok := errors.AsType[*smithy.GenericAPIError](err)
@@ -1762,7 +1823,7 @@ func (p *awsTarget) deleteSnapshot(ctx context.Context, snapshot, region string,
 			log.Debug(ctx, "Snapshot not found but the steamroller keeps going")
 			return nil
 		}
-		return fmt.Errorf("cannot delete snapshot: %w", err)
+		return err
 	}
 
 	return nil

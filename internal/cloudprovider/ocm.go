@@ -105,14 +105,32 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 		return errors.New("config not set")
 	}
 
-	log.Debug(ctx, "Creating tarball")
+	log.Info(ctx, "Publishing OCM component descriptor")
+
+	storeDir, err := os.MkdirTemp("", "")
+	if err != nil {
+		return fmt.Errorf("cannot create temporary directory: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(storeDir)
+	}()
+
+	var store *orasfile.Store
+	store, err = orasfile.New(storeDir)
+	if err != nil {
+		return fmt.Errorf("cannot create local OCI store in %s: %w", storeDir, err)
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+
 	var tarBuf bytes.Buffer
 	tarball := tar.NewWriter(&tarBuf)
 	defer func() {
 		_ = tarball.Close()
 	}()
 
-	err := tarball.WriteHeader(&tar.Header{
+	err = tarball.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeReg,
 		Name:     "component-descriptor.yaml",
 		Size:     int64(len(descriptor)),
@@ -133,34 +151,15 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 		return fmt.Errorf("cannot close tar: %w", err)
 	}
 
-	var tmpDir string
-	tmpDir, err = os.MkdirTemp("", "")
-	if err != nil {
-		return fmt.Errorf("cannot create temporary directory: %w", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(tmpDir)
-	}()
-
-	log.Debug(ctx, "Creating local OCI store", "dir", tmpDir)
-	var store *orasfile.Store
-	store, err = orasfile.New(tmpDir)
-	if err != nil {
-		return fmt.Errorf("cannot create local OCI store in %s: %w", tmpDir, err)
-	}
-	defer func() {
-		_ = store.Close()
-	}()
-
 	tarDescriptor := specsv1.Descriptor{
 		MediaType: "application/vnd.gardener.cloud.cnudie.component-descriptor.v2+yaml+tar",
 		Digest:    digest.FromBytes(tarBuf.Bytes()),
 		Size:      int64(tarBuf.Len()),
 	}
-	log.Debug(ctx, "Pushing tarball", "digest", tarDescriptor.Digest)
+
 	err = store.Push(ctx, tarDescriptor, &tarBuf)
 	if err != nil {
-		return fmt.Errorf("cannot add OCI manifest config to local OCI store: %w", err)
+		return fmt.Errorf("cannot add OCI manifest layer to local OCI store: %w", err)
 	}
 
 	var rawConfig []byte
@@ -180,7 +179,6 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 		Digest:    digest.FromBytes(rawConfig),
 		Size:      int64(len(rawConfig)),
 	}
-	log.Debug(ctx, "Pushing config", "digest", configDescriptor.Digest)
 	err = store.Push(ctx, configDescriptor, bytes.NewReader(rawConfig))
 	if err != nil {
 		return fmt.Errorf("cannot add OCI manifest config to local OCI store: %w", err)
@@ -199,20 +197,14 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 	if err != nil {
 		return fmt.Errorf("cannot add OCI manifest to local OCI store: %w", err)
 	}
+	ctx = log.WithValues(ctx, "digest", manifestDescriptor.Digest)
 
-	log.Debug(ctx, "Tagging manifest", "size", manifestDescriptor.Size, "digest", manifestDescriptor.Digest)
-	err = store.Tag(ctx, manifestDescriptor, version)
-	if err != nil {
-		return fmt.Errorf("cannot tag OCI manifest: %w", err)
-	}
+	environment := p.environment()
 
 	log.Debug(ctx, "Copying artifact")
-	err = p.environment().retrier.Do(ctx, "copy tag", func(ctx context.Context) error {
-		_, inErr := oras.Copy(ctx, store, version, p.environment().repository, version, oras.DefaultCopyOptions)
-		return inErr
-	})
+	err = environment.copyGraph(ctx, store, manifestDescriptor)
 	if err != nil {
-		return fmt.Errorf("cannot upload OCI artifact: %w", err)
+		return err
 	}
 
 	err = store.Close()
@@ -220,9 +212,15 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 		return fmt.Errorf("cannot close local OCI store: %w", err)
 	}
 
-	err = os.RemoveAll(tmpDir)
+	err = os.RemoveAll(storeDir)
 	if err != nil {
-		return fmt.Errorf("cannot remove temporary directory %s: %w", tmpDir, err)
+		return fmt.Errorf("cannot remove temporary directory: %w", err)
+	}
+
+	log.Debug(ctx, "Tagging artifact")
+	err = environment.tag(ctx, manifestDescriptor, version)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -257,9 +255,9 @@ func (*ocmTarget) Configurables() []module.Configurable {
 
 func (p *ocmTarget) Start(ctx context.Context) error {
 	err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-		Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
+		Type:   "OCI_" + p.credsType,
 		Config: p.ocmCfg.Config,
-		Role:   "oci",
+		Role:   "ocm",
 	}, p.applyCredentials)
 	if err != nil {
 		return fmt.Errorf("cannot acquire credentials for config %s: %w", p.ocmCfg.Config, err)
@@ -271,9 +269,9 @@ func (p *ocmTarget) Start(ctx context.Context) error {
 func (p *ocmTarget) Stop(ctx context.Context) error {
 	if p.ocmCfg.Config != "" {
 		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
-			Type:   fmt.Sprintf("%s_%s", p.Type(), p.credsType),
+			Type:   "OCI_" + p.credsType,
 			Config: p.ocmCfg.Config,
-			Role:   "oci",
+			Role:   "ocm",
 		})
 	}
 

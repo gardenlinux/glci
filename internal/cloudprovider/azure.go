@@ -347,7 +347,7 @@ func (*azure) listRegions(ctx context.Context, retrier guard.Retrier, subscripti
 		for pager.More() {
 			page, inErr := pager.NextPage(ctx)
 			if inErr != nil {
-				return inErr
+				return fmt.Errorf("cannot list locations: %w", inErr)
 			}
 
 			locations = append(locations, page.Value...)
@@ -356,7 +356,7 @@ func (*azure) listRegions(ctx context.Context, retrier guard.Retrier, subscripti
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cannot list locations: %w", err)
+		return nil, err
 	}
 
 	regions := make([]string, 0, len(locations))
@@ -452,7 +452,7 @@ func (*azure) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "azure"
 }
 
-func (*azure) ValidateFlavors(_ []string) error {
+func (*azure) ValidateFlavors(_ []*gardenlinux.Manifest) error {
 	return nil
 }
 
@@ -822,12 +822,16 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, flav
 	exists := true
 	err := p.environment(china).retrier.Do(ctx, "get image definition", func(ctx context.Context) error {
 		_, inErr := p.environment(china).galleryImagesClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition, nil)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get image definition %s: %w", imageDefinition, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		respErr, ok := errors.AsType[*azcore.ResponseError](err)
 		if !ok || respErr.StatusCode != http.StatusNotFound {
-			return fmt.Errorf("cannot get image definition %s: %w", imageDefinition, err)
+			return err
 		}
 
 		exists = false
@@ -859,19 +863,27 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, flav
 				},
 			}, nil)
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot create or update image definition %s: %w", imageDefinition, inErr)
 		}
 
 		if poller.Done() {
 			_, inErr = poller.Result(ctx)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot create or update image definition %s: %w", imageDefinition, inErr)
+			}
+
+			return nil
 		}
 
 		resumeToken, inErr = poller.ResumeToken()
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create or update image definition %s: %w", imageDefinition, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot create or update image definition %s: %w", imageDefinition, err)
+		return err
 	}
 
 	if resumeToken == "" {
@@ -884,16 +896,20 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, flav
 				ResumeToken: resumeToken,
 			})
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot create or update image definition %s: %w", imageDefinition, inErr)
 		}
 
 		_, inErr = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 			Frequency: statusPollInterval,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create or update image definition %s: %w", imageDefinition, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot create or update image definition %s: %w", imageDefinition, err)
+		return err
 	}
 
 	return nil
@@ -917,10 +933,14 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 	err = p.environment(china).storageRetrier.Do(ctx, "create blob", func(ctx context.Context) error {
 		_, inErr := p.environment(china).storageClient.ServiceClient().NewContainerClient(p.pubCfg.StorageContainer).
 			NewPageBlobClient(blob).Create(ctx, properties.Size, nil)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create blob: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("cannot create blob: %w", err)
+		return "", "", err
 	}
 	resilience.UpdateOperation(ctx, func(s *azureOperationState) *azureOperationState {
 		s.Blob = blob
@@ -932,10 +952,14 @@ func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, imag
 		err = p.environment(china).storageRetrier.Do(ctx, "upload blob pages", func(ctx context.Context) error {
 			_, inErr := p.environment(china).storageClient.ServiceClient().NewContainerClient(p.pubCfg.StorageContainer).
 				NewPageBlobClient(blob).UploadPagesFromURL(ctx, url, offset, offset, block, nil)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot upload to blob %s in container %s: %w", blob, p.pubCfg.StorageContainer, inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return "", "", fmt.Errorf("cannot upload to blob %s in container %s: %w", blob, p.pubCfg.StorageContainer, err)
+			return "", "", err
 		}
 		offset += block
 	}
@@ -979,19 +1003,27 @@ func (p *azure) createImage(ctx context.Context, blobURL, image string, bios, ch
 			},
 		}, nil)
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot create or update image %s: %w", imageName, inErr)
 		}
 
 		if poller.Done() {
 			r, inErr = poller.Result(ctx)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot create or update image %s: %w", imageName, inErr)
+			}
+
+			return nil
 		}
 
 		resumeToken, inErr = poller.ResumeToken()
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create or update image %s: %w", imageName, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot create or update image %s: %w", imageName, err)
+		return "", err
 	}
 	resilience.UpdateOperation(ctx, func(s *azureOperationState) *azureOperationState {
 		s.Image = imageName
@@ -1005,16 +1037,20 @@ func (p *azure) createImage(ctx context.Context, blobURL, image string, bios, ch
 					ResumeToken: resumeToken,
 				})
 			if inErr != nil {
-				return inErr
+				return fmt.Errorf("cannot create or update image %s: %w", imageName, inErr)
 			}
 
 			r, inErr = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 				Frequency: statusPollInterval,
 			})
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot create or update image %s: %w", imageName, inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return "", fmt.Errorf("cannot create or update image %s: %w", imageName, err)
+			return "", err
 		}
 	}
 
@@ -1105,19 +1141,27 @@ func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVe
 				},
 			}, nil)
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot create or update image version: %w", inErr)
 		}
 
 		if poller.Done() {
 			_, inErr = poller.Result(ctx)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot create or update image version: %w", inErr)
+			}
+
+			return nil
 		}
 
 		resumeToken, inErr = poller.ResumeToken()
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create or update image version: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot create or update image version: %w", err)
+		return err
 	}
 	resilience.UpdateOperation(ctx, func(s *azureOperationState) *azureOperationState {
 		s.Version.Version = imageVersion
@@ -1136,16 +1180,20 @@ func (p *azure) createImageVersion(ctx context.Context, imageDefinition, imageVe
 				ResumeToken: resumeToken,
 			})
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot create or update image version: %w", inErr)
 		}
 
 		_, inErr = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 			Frequency: statusPollInterval,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create or update image version: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot create or update image version: %w", err)
+		return err
 	}
 
 	return nil
@@ -1162,10 +1210,14 @@ func (p *azure) getPublicID(ctx context.Context, imageDefinition, imageVersion s
 	err := p.environment(china).retrier.Do(ctx, "get gallery", func(ctx context.Context) error {
 		var inErr error
 		gr, inErr = p.environment(china).galleriesClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, nil)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get gallery: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot get gallery: %w", err)
+		return "", err
 	}
 	if gr.Properties == nil || gr.Properties.SharingProfile == nil || gr.Properties.SharingProfile.CommunityGalleryInfo == nil ||
 		len(gr.Properties.SharingProfile.CommunityGalleryInfo.PublicNames) != 1 ||
@@ -1180,7 +1232,11 @@ func (p *azure) getPublicID(ctx context.Context, imageDefinition, imageVersion s
 		var inErr error
 		givr, inErr = p.environment(china).communityGalleryImageVersionsClient.Get(ctx, region, publicName, imageDefinition, imageVersion,
 			nil)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get community gallery image version: %w", inErr)
+		}
+
+		return nil
 	})
 	// Azure SDK issue 27470 workaround (temporary). Remove this block, and every block bracketed by this note, once
 	// locations/communityGalleries serves the SDK native API version — getPublicID hard-fails then to flag that this is due for removal.
@@ -1194,12 +1250,16 @@ func (p *azure) getPublicID(ctx context.Context, imageDefinition, imageVersion s
 				var inErr error
 				givr, inErr = p.environment(china).communityGalleryImageVersionsClientOverride.Get(ctx, region, publicName,
 					imageDefinition, imageVersion, nil)
-				return inErr
+				if inErr != nil {
+					return fmt.Errorf("cannot get community gallery image version: %w", inErr)
+				}
+
+				return nil
 			})
 	}
 	// End Azure SDK issue 27470 workaround.
 	if err != nil {
-		return "", fmt.Errorf("cannot get community gallery image version: %w", err)
+		return "", err
 	}
 	if givr.Identifier == nil || givr.Identifier.UniqueID == nil {
 		return "", errors.New("cannot get community gallery image version: missing unique ID")
@@ -1217,7 +1277,11 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 			NewPageBlobClient(blob).Delete(ctx, &azblob.DeleteBlobOptions{
 			DeleteSnapshots: new(azblob.DeleteSnapshotsOptionTypeInclude),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete blob: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		respErr, ok := errors.AsType[*azcore.ResponseError](err)
@@ -1225,7 +1289,7 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}
-		return fmt.Errorf("cannot delete blob: %w", err)
+		return err
 	}
 	resilience.UpdateOperation(ctx, func(s *azureOperationState) *azureOperationState {
 		s.Blob = ""
@@ -1235,7 +1299,7 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 	return nil
 }
 
-func (*azure) CanReverse(_ string) bool {
+func (*azure) CanReverse(_ *gardenlinux.Manifest) bool {
 	return true
 }
 
@@ -1309,10 +1373,14 @@ func (p *azure) getMetadata(ctx context.Context, imageID string, china bool) (st
 	err := p.environment(china).retrier.Do(ctx, "get gallery", func(ctx context.Context) error {
 		var inErr error
 		gr, inErr = p.environment(china).galleriesClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, nil)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get gallery %s: %w", p.pubCfg.Gallery, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", "", "", fmt.Errorf("cannot get gallery %s: %w", p.pubCfg.Gallery, err)
+		return "", "", "", err
 	}
 	if gr.Properties == nil || gr.Properties.SharingProfile == nil || gr.Properties.SharingProfile.CommunityGalleryInfo == nil {
 		return "", "", "", fmt.Errorf("cannot get gallery %s: missing public names", p.pubCfg.Gallery)
@@ -1337,10 +1405,14 @@ func (p *azure) getMetadata(ctx context.Context, imageID string, china bool) (st
 		var inErr error
 		givr, inErr = p.environment(china).galleryImageVersionsClient.Get(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery, imageDefinition,
 			imageVersion, nil)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get gallery image version: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", "", "", fmt.Errorf("cannot get gallery image version: %w", err)
+		return "", "", "", err
 	}
 	if givr.Properties == nil || givr.Properties.StorageProfile == nil || givr.Properties.StorageProfile.Source == nil ||
 		givr.Properties.StorageProfile.Source.ID == nil {
@@ -1362,19 +1434,27 @@ func (p *azure) deleteImageVersion(ctx context.Context, imageDefinition, imageVe
 		poller, inErr := p.environment(china).galleryImageVersionsClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery,
 			imageDefinition, imageVersion, nil)
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot delete gallery image version: %w", inErr)
 		}
 
 		if poller.Done() {
 			_, inErr = poller.Result(ctx)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot delete gallery image version: %w", inErr)
+			}
+
+			return nil
 		}
 
 		resumeToken, inErr = poller.ResumeToken()
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete gallery image version: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete gallery image version: %w", err)
+		return err
 	}
 
 	if resumeToken == "" {
@@ -1387,16 +1467,20 @@ func (p *azure) deleteImageVersion(ctx context.Context, imageDefinition, imageVe
 				ResumeToken: resumeToken,
 			})
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot delete gallery image version: %w", inErr)
 		}
 
 		_, inErr = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 			Frequency: statusPollInterval,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete gallery image version: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete gallery image version: %w", err)
+		return err
 	}
 
 	return nil
@@ -1408,19 +1492,27 @@ func (p *azure) deleteImage(ctx context.Context, image string, _, china bool) er
 	err := p.environment(china).retrier.Do(ctx, "delete image", func(ctx context.Context) error {
 		poller, inErr := p.environment(china).imagesClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, image, nil)
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot delete image: %w", inErr)
 		}
 
 		if poller.Done() {
 			_, inErr = poller.Result(ctx)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot delete image: %w", inErr)
+			}
+
+			return nil
 		}
 
 		resumeToken, inErr = poller.ResumeToken()
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
+		return err
 	}
 
 	if resumeToken == "" {
@@ -1433,16 +1525,20 @@ func (p *azure) deleteImage(ctx context.Context, image string, _, china bool) er
 				ResumeToken: resumeToken,
 			})
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot delete image: %w", inErr)
 		}
 
 		_, inErr = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 			Frequency: statusPollInterval,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
+		return err
 	}
 
 	return nil
@@ -1456,10 +1552,14 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, imageDefinition 
 			imageDefinition, nil)
 		var inErr error
 		page, inErr = pager.NextPage(ctx)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot list gallery image versions: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot list gallery image versions: %w", err)
+		return err
 	}
 
 	if len(page.Value) != 0 {
@@ -1472,19 +1572,27 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, imageDefinition 
 		poller, inErr := p.environment(china).galleryImagesClient.BeginDelete(ctx, p.pubCfg.ResourceGroup, p.pubCfg.Gallery,
 			imageDefinition, nil)
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot delete gallery image definition: %w", inErr)
 		}
 
 		if poller.Done() {
 			_, inErr = poller.Result(ctx)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot delete gallery image definition: %w", inErr)
+			}
+
+			return nil
 		}
 
 		resumeToken, inErr = poller.ResumeToken()
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete gallery image definition: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete gallery image definition: %w", err)
+		return err
 	}
 
 	if resumeToken == "" {
@@ -1497,16 +1605,20 @@ func (p *azure) deleteEmptyImageDefinition(ctx context.Context, imageDefinition 
 				ResumeToken: resumeToken,
 			})
 		if inErr != nil {
-			return inErr
+			return fmt.Errorf("cannot delete gallery image definition: %w", inErr)
 		}
 
 		_, inErr = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{
 			Frequency: statusPollInterval,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete gallery image definition: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete gallery image definition: %w", err)
+		return err
 	}
 
 	return nil

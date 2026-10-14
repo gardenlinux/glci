@@ -243,10 +243,14 @@ func (*aliyun) listRegions(ctx context.Context, retrier guard.Retrier, c *client
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot describe regions: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cannot describe regions: %w", err)
+		return nil, err
 	}
 	if r.Body == nil {
 		return nil, errors.New("cannot describe regions: missing body")
@@ -289,7 +293,7 @@ func (*aliyun) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "ali"
 }
 
-func (*aliyun) ValidateFlavors(_ []string) error {
+func (*aliyun) ValidateFlavors(_ []*gardenlinux.Manifest) error {
 	return nil
 }
 
@@ -325,7 +329,7 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
 	region := p.pubCfg.Region
-	ctx = log.WithValues(ctx, "image", image, "source", p.pubCfg.Source)
+	ctx = log.WithValues(ctx, "image", image, "architecture", manifest.Architecture, "source", p.pubCfg.Source)
 
 	ctx = resilience.BeginOperation(ctx, "publish/"+image+"/"+region, &aliyunOperationState{
 		Region: region,
@@ -436,21 +440,29 @@ func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, ima
 
 	log.Info(ctx, "Uploading blob")
 	err = p.environment().retrier.Do(ctx, "put object", func(ctx context.Context) error {
-		_, inErr := obj.Seek(0, io.SeekStart)
+		inErr := func() error {
+			_, inInErr := obj.Seek(0, io.SeekStart)
+			if inInErr != nil {
+				return fmt.Errorf("cannot rewind object: %w", inInErr)
+			}
+
+			_, inInErr = p.environment().ossClient.PutObject(ctx, &oss.PutObjectRequest{
+				Bucket:        &p.pubCfg.Bucket,
+				Key:           &ossKey,
+				Body:          obj,
+				ContentLength: contentLength,
+			})
+
+			return inInErr
+		}()
 		if inErr != nil {
-			return fmt.Errorf("cannot rewind object: %w", inErr)
+			return fmt.Errorf("cannot put object %s in bucket %s: %w", ossKey, p.pubCfg.Bucket, inErr)
 		}
 
-		_, inErr = p.environment().ossClient.PutObject(ctx, &oss.PutObjectRequest{
-			Bucket:        &p.pubCfg.Bucket,
-			Key:           &ossKey,
-			Body:          obj,
-			ContentLength: contentLength,
-		})
-		return inErr
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot put object %s in bucket %s: %w", ossKey, p.pubCfg.Bucket, err)
+		return "", err
 	}
 	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Blob = ossKey
@@ -491,10 +503,14 @@ func (p *aliyun) importImage(ctx context.Context, blob, image string) (string, e
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot import image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot import image: %w", err)
+		return "", err
 	}
 	if r.Body == nil {
 		return "", errors.New("cannot import image: missing body")
@@ -527,10 +543,14 @@ func (p *aliyun) deleteBlob(ctx context.Context, blob string, _ bool) error {
 			Bucket: &p.pubCfg.Bucket,
 			Key:    &blob,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete object %s in bucket %s: %w", blob, p.pubCfg.Bucket, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete object %s in bucket %s: %w", blob, p.pubCfg.Bucket, err)
+		return err
 	}
 	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Blob = ""
@@ -554,10 +574,14 @@ func (p *aliyun) copyImage(ctx context.Context, image, imageID, region, toRegion
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot copy image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot copy image: %w", err)
+		return "", err
 	}
 	if r.Body == nil {
 		return "", errors.New("cannot copy image: missing body")
@@ -589,10 +613,14 @@ func (p *aliyun) waitForImage(ctx context.Context, imageID, region string) error
 					ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 					ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 				})
-				return inErr
+				if inErr != nil {
+					return fmt.Errorf("cannot describe image: %w", inErr)
+				}
+
+				return nil
 			})
 			if err != nil {
-				return fmt.Errorf("cannot describe image: %w", err)
+				return err
 			}
 			if r.Body == nil {
 				return errors.New("cannot describe image: missing body")
@@ -643,7 +671,11 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot modify share permission: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		sdkErr, ok := errors.AsType[*tea.SDKError](err)
@@ -657,7 +689,7 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 				return nil
 			}
 		}
-		return fmt.Errorf("cannot modify share permission: %w", err)
+		return err
 	}
 	resilience.UpdateOperation(ctx, func(s *aliyunOperationState) *aliyunOperationState {
 		s.Public = public
@@ -667,7 +699,7 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	return nil
 }
 
-func (*aliyun) CanReverse(_ string) bool {
+func (*aliyun) CanReverse(_ *gardenlinux.Manifest) bool {
 	return true
 }
 
@@ -716,10 +748,14 @@ func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region st
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot describe image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot describe image: %w", err)
+		return err
 	}
 	if r.Body == nil {
 		return errors.New("cannot describe image: missing body")
@@ -774,14 +810,17 @@ func (p *aliyun) deleteImage(ctx context.Context, imageID, region string, _ bool
 			if ok && sdkErr.Code != nil && *sdkErr.Code == "OperationDenied.ImageCopying" {
 				cancelErr := p.cancelCopyImage(ctx, imageID, region)
 				if cancelErr != nil {
-					return errors.Join(inErr, cancelErr)
+					return fmt.Errorf("cannot delete image: %w", errors.Join(inErr, cancelErr))
 				}
 			}
+
+			return fmt.Errorf("cannot delete image: %w", inErr)
 		}
-		return inErr
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot delete image: %w", err)
+		return err
 	}
 
 	return nil
@@ -797,10 +836,14 @@ func (p *aliyun) cancelCopyImage(ctx context.Context, imageID, region string) er
 			ConnectTimeout: new(int(guard.Timeout / time.Millisecond)),
 			ReadTimeout:    new(int(guard.Timeout / time.Millisecond)),
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot cancel copy: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot cancel copy: %w", err)
+		return err
 	}
 
 	return nil

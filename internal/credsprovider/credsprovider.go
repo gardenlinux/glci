@@ -37,7 +37,7 @@ type ApplyCredsFunc func(ctx context.Context, creds map[string]any) error
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)
 	if err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
+		return fmt.Errorf("cannot decode configuration: %w", err)
 	}
 
 	return nil
