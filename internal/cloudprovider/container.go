@@ -246,3 +246,11 @@ func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Man
 		Digest:     descriptor.Digest.String(),
 	}, nil
 }
+
+func (p *containerTarget) RollbackDomain() string {
+	if !p.isConfigured() {
+		return ""
+	}
+
+	return "container"
+}
