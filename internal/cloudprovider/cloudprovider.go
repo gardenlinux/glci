@@ -17,6 +17,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -78,6 +79,7 @@ type ArtifactSource interface {
 
 	Repository() string
 	GetObjectURL(ctx context.Context, key string) (string, error)
+	GetObjectAccess(ctx context.Context, key string) (access.Spec, error)
 	GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, object io.Reader, contentType string, hash ObjectHash) (ObjectHash, error)
@@ -242,12 +244,13 @@ type PublishingTarget interface {
 	module.Module
 
 	Type() string
-	ImageSuffix() string
 	RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error)
 	CanPublish(manifest *gardenlinux.Manifest) bool
 	ValidateFlavors(manifests []*gardenlinux.Manifest) error
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
 	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
+	ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error)
+	RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error)
 	CanReverse(manifest *gardenlinux.Manifest) bool
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	CanFuse() bool
@@ -504,6 +507,15 @@ func getSeekableObject(ctx context.Context, source ArtifactSource, key string) (
 	return readSeekNopCloser{
 		ReadSeeker: bytes.NewReader(data),
 	}, nil
+}
+
+func objectAccess(ctx context.Context, source ArtifactSource, manifest *gardenlinux.Manifest, suffix string) (access.Spec, error) {
+	objectPath, err := manifest.PathBySuffix(suffix)
+	if err != nil {
+		return nil, fmt.Errorf("missing %q object: %w", suffix, err)
+	}
+
+	return source.GetObjectAccess(ctx, objectPath.S3Key)
 }
 
 func subset(original, subset []string) []string {

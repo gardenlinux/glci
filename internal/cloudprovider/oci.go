@@ -197,10 +197,6 @@ func (p *ociTarget) repository(group string) (string, error) {
 	return repoCfg.Repository, nil
 }
 
-func (*ociTarget) ImageSuffix() string {
-	return ".oci"
-}
-
 func (p *ociTarget) ValidateFlavors(manifests []*gardenlinux.Manifest) error {
 	for _, manifest := range manifests {
 		if manifest.PublishingGroup == "" {

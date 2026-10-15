@@ -33,10 +33,10 @@ flavors:
   in_component_descriptor: true
 - flavor: gdch-gardener_prod-amd64
   publishing_group: rbsc
-#  in_component_descriptor: true
+  in_component_descriptor: true
 - flavor: gdch-gardener_prod-arm64
   publishing_group: rbsc
-#  in_component_descriptor: true
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-amd64
   in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-arm64

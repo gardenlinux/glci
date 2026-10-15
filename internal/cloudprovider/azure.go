@@ -29,6 +29,7 @@ import (
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -394,16 +395,12 @@ func (p *azure) environment(china bool) *azureEnvironment {
 	return &p.world
 }
 
-func (*azure) ImageSuffix() string {
-	return ".vhd"
-}
-
 func (p *azure) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
 	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
 		return nil, nil
 	}
 
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".vhd")
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +490,7 @@ func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinu
 		return nil, fmt.Errorf("invalid version %s: %w", manifest.Version, err)
 	}
 	var imagePath gardenlinux.S3ReleaseFile
-	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err = manifest.PathBySuffix(".vhd")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -916,7 +913,7 @@ func (p *azure) createImageDefinition(ctx context.Context, imageDefinition, flav
 }
 
 func (p *azure) importBlob(ctx context.Context, source ArtifactSource, key, image string, china bool) (string, string, error) {
-	blob := image + p.ImageSuffix()
+	blob := image + ".vhd"
 	properties, err := source.GetObjectProperties(ctx, key)
 	if err != nil {
 		return "", "", fmt.Errorf("cannot get object properties: %w", err)
@@ -976,7 +973,7 @@ func (p *azure) createImage(ctx context.Context, blobURL, image string, bios, ch
 		imageName += "-bios"
 		gen = armcompute.HyperVGenerationTypesV1
 	}
-	imageName += p.ImageSuffix()
+	imageName += ".vhd"
 	ctx = log.WithValues(ctx, "imageName", imageName)
 
 	region := p.pubCfg.Region
@@ -1297,6 +1294,14 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 	})
 
 	return nil
+}
+
+func (p *azure) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".vhd")
+}
+
+func (p *azure) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
 func (*azure) CanReverse(_ *gardenlinux.Manifest) bool {

@@ -64,21 +64,15 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		return fmt.Errorf("invalid group destinations: %w", err)
 	}
 
-	manifestsInDescriptor := make([]ocm.ManifestImage, 0, len(publications))
+	manifestsInDescriptor := make([]ocm.ManifestTarget, 0, len(publications))
 	for _, pub := range publications {
 		if !pub.InComponentDescriptor {
 			continue
 		}
 
-		var image gardenlinux.S3ReleaseFile
-		image, err = pub.Manifest.PathBySuffix(pub.Target.ImageSuffix())
-		if err != nil {
-			return fmt.Errorf("missing image for %s: %w", pub.Manifest.Flavor, err)
-		}
-
-		manifestsInDescriptor = append(manifestsInDescriptor, ocm.ManifestImage{
+		manifestsInDescriptor = append(manifestsInDescriptor, ocm.ManifestTarget{
 			Manifest: pub.Manifest,
-			Image:    image,
+			Target:   pub.Target,
 		})
 	}
 
@@ -159,7 +153,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		log.Info(ctx, "Skipping component descriptor")
 	} else {
 		log.Debug(ctx, "Finalizing component descriptor")
-		err = ocm.AddPublicationOutput(descriptor, manifestsInDescriptor)
+		err = ocm.AddPublicationOutput(ctx, descriptor, manifestsInDescriptor)
 		if err != nil {
 			return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
 		}

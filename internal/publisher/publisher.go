@@ -270,7 +270,9 @@ func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit strin
 	return publications, groupPublications, commit, nil
 }
 
-func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig, version, commit string) (*gardenlinux.Manifest, cloudprovider.PublishingTarget, error) {
+func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig, version, commit string) (*gardenlinux.Manifest,
+	cloudprovider.PublishingTarget, error,
+) {
 	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
 
 	log.Debug(ctx, "Retrieving manifest")
@@ -303,7 +305,8 @@ func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig
 				return nil, nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavorConfig.Flavor, targetManifest.Version)
 			}
 			if targetManifest.BuildCommittish != manifest.BuildCommittish {
-				return nil, nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavorConfig.Flavor, targetManifest.BuildCommittish)
+				return nil, nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavorConfig.Flavor,
+					targetManifest.BuildCommittish)
 			}
 			if targetManifest.Flavor != "" && targetManifest.Flavor != flavorConfig.Flavor {
 				return nil, nil, fmt.Errorf("target manifest for %s has incorrect flavor %s", flavorConfig.Flavor, targetManifest.Flavor)
@@ -315,7 +318,8 @@ func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig
 
 	manifest.Flavor = flavorConfig.Flavor
 	if manifest.PublishingGroup != "" && manifest.PublishingGroup != flavorConfig.PublishingGroup {
-		return nil, nil, fmt.Errorf("manifest for %s has publishing group %q conflicting with configured %q", flavorConfig.Flavor, manifest.PublishingGroup, flavorConfig.PublishingGroup)
+		return nil, nil, fmt.Errorf("manifest for %s has publishing group %q conflicting with configured %q", flavorConfig.Flavor,
+			manifest.PublishingGroup, flavorConfig.PublishingGroup)
 	}
 	if manifest.PublishingGroup == "" {
 		manifest.PublishingGroup = flavorConfig.PublishingGroup

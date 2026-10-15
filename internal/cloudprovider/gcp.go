@@ -29,6 +29,7 @@ import (
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -202,10 +203,6 @@ func (p *gcp) environment() *gcpEnvironment {
 	return &p.world
 }
 
-func (*gcp) ImageSuffix() string {
-	return ".gcpimage.tar.gz"
-}
-
 func (*gcp) imageName(flavor, version, committish string) string {
 	flavor = hsh.Hash(fnv.New64(), flavor)
 	version = strings.ReplaceAll(version, ".", "-")
@@ -258,7 +255,7 @@ func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".gcpimage.tar.gz")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -608,6 +605,14 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	}
 
 	return nil
+}
+
+func (p *gcp) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".gcpimage.tar.gz")
+}
+
+func (p *gcp) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
 func (*gcp) CanReverse(_ *gardenlinux.Manifest) bool {
