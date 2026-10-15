@@ -34,6 +34,7 @@ import (
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -327,10 +328,6 @@ func (p *awsTarget) environment(china bool) *awsEnvironment {
 	return &p.world
 }
 
-func (*awsTarget) ImageSuffix() string {
-	return ".raw"
-}
-
 func (p *awsTarget) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
 	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
 		return nil, nil
@@ -340,7 +337,7 @@ func (p *awsTarget) RequiredReplications(manifest *gardenlinux.Manifest) ([]Repl
 		return nil, nil
 	}
 
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".raw")
 	if err != nil {
 		return nil, err
 	}
@@ -399,6 +396,10 @@ func (p *awsSource) GetObjectURL(ctx context.Context, key string) (string, error
 	}
 
 	return presigned.URL, nil
+}
+
+func (p *awsSource) GetObjectAccess(_ context.Context, key string) (access.Spec, error) {
+	return access.S3(p.srcCfg.Bucket, key), nil
 }
 
 func (p *awsSource) GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error) {
@@ -1121,7 +1122,7 @@ func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".raw")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -1598,6 +1599,14 @@ func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, chin
 
 		return nil
 	})
+}
+
+func (p *awsTarget) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".raw")
+}
+
+func (p *awsTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
 func (*awsTarget) CanReverse(_ *gardenlinux.Manifest) bool {

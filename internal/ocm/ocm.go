@@ -14,6 +14,7 @@ import (
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 )
 
 const (
@@ -84,7 +85,7 @@ type componentDesciptorResource struct {
 	Labels        []componentDescriptorlabel `yaml:"labels,omitempty"`
 	Type          string                     `yaml:"type"`
 	Digest        componentDescriptorDigest  `yaml:"digest,omitzero"`
-	Access        componentDescriptorS3      `yaml:"access"`
+	Access        access.Spec                `yaml:"access"`
 }
 
 //nolint:tagliatelle // Defined by OCM.
@@ -94,25 +95,19 @@ type componentDescriptorDigest struct {
 	Value                  string `yaml:"value"`
 }
 
-type componentDescriptorS3 struct {
-	Type   string `yaml:"type"`
-	Bucket string `yaml:"bucket"`
-	Key    string `yaml:"key"`
-}
-
 type nameVersion struct {
 	name    string
 	version string
 }
 
-// ManifestImage pairs a manifest with an image artifact.
-type ManifestImage struct {
+// ManifestTarget pairs a manifest with the target that publishes it.
+type ManifestTarget struct {
 	Manifest *gardenlinux.Manifest
-	Image    gardenlinux.S3ReleaseFile
+	Target   cloudprovider.PublishingTarget
 }
 
 // BuildComponentDescriptor generates a component desciptor that includes all data except the results of the publishing process.
-func BuildComponentDescriptor(ctx context.Context, source cloudprovider.ArtifactSource, images []ManifestImage,
+func BuildComponentDescriptor(ctx context.Context, source cloudprovider.ArtifactSource, manifestTargets []ManifestTarget,
 	ocmTarget cloudprovider.OCMTarget, aliases map[string][]string, glciVersion, version, commit string,
 ) (*ComponentDescriptor, error) {
 	log.Debug(ctx, "Building component descriptor")
@@ -163,13 +158,13 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		},
 	}
 
-	packages := make([][]nameVersion, len(images))
+	packages := make([][]nameVersion, len(manifestTargets))
 	fetchPackages := concurrency.NewActivitySync(ctx)
-	for i, mi := range images {
+	for i, mt := range manifestTargets {
 		fetchPackages.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
-			pkgs, err := getPackages(ctx, source, mi.Manifest)
+			pkgs, err := getPackages(ctx, source, mt.Manifest)
 			if err != nil {
-				return nil, fmt.Errorf("cannot list packages for %s: %w", mi.Manifest.Flavor, err)
+				return nil, fmt.Errorf("cannot list packages for %s: %w", mt.Manifest.Flavor, err)
 			}
 
 			return func() error {
@@ -184,19 +179,13 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		return nil, err
 	}
 
-	for i, mi := range images {
-		var rootfsPath gardenlinux.S3ReleaseFile
-		rootfsPath, err = mi.Manifest.PathBySuffix(".tar")
-		if err != nil {
-			return nil, fmt.Errorf("missing rootfs for %s: %w", mi.Manifest.Flavor, err)
-		}
-
+	for i, mt := range manifestTargets {
 		labels := make([]componentDescriptorlabel, 0, 3)
 		labels = append(labels, componentDescriptorlabel{
 			Name: "gardener.cloud/gardenlinux/ci/build-metadata",
 			Value: map[string]any{
-				"modifiers":      mi.Manifest.Modifiers,
-				"buildTimestamp": mi.Manifest.BuildTimestamp,
+				"modifiers":      mt.Manifest.Modifiers,
+				"buildTimestamp": mt.Manifest.BuildTimestamp,
 			},
 		})
 		if glciVersion != "" {
@@ -215,17 +204,17 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		}
 
 		extraIdentity := map[string]string{
-			"feature-flags":    strings.Join(mi.Manifest.Modifiers, ","),
-			"architecture":     string(mi.Manifest.Architecture),
-			"platform":         mi.Manifest.Platform,
-			"platform_variant": mi.Manifest.PlatformVariant,
+			"feature-flags":    strings.Join(mt.Manifest.Modifiers, ","),
+			"architecture":     string(mt.Manifest.Architecture),
+			"platform":         mt.Manifest.Platform,
+			"platform_variant": mt.Manifest.PlatformVariant,
 		}
-		if mi.Manifest.PlatformVariant == "" {
+		if mt.Manifest.PlatformVariant == "" {
 			delete(extraIdentity, "platform_variant")
 		}
 		descriptor.Component.Resources = append(descriptor.Component.Resources, componentDesciptorResource{
 			Name:          "gardenlinux",
-			Version:       mi.Manifest.Version,
+			Version:       mt.Manifest.Version,
 			ExtraIdentity: extraIdentity,
 			Labels:        labels,
 			Type:          "virtual_machine_image",
@@ -234,21 +223,16 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 				NormalisationAlgorithm: "EXCLUDE-FROM-SIGNATURE",
 				Value:                  "NO-DIGEST",
 			},
-			Access: componentDescriptorS3{
-				Type:   "s3",
-				Bucket: mi.Manifest.S3Bucket,
-				Key:    mi.Image.S3Key,
-			},
 		}, componentDesciptorResource{
 			Name:          "rootfs",
-			Version:       mi.Manifest.Version,
+			Version:       mt.Manifest.Version,
 			ExtraIdentity: extraIdentity,
 			Labels: []componentDescriptorlabel{
 				{
 					Name: "gardener.cloud/gardenlinux/ci/build-metadata",
 					Value: map[string]any{
-						"modifiers":      mi.Manifest.Modifiers,
-						"buildTimestamp": mi.Manifest.BuildTimestamp,
+						"modifiers":      mt.Manifest.Modifiers,
+						"buildTimestamp": mt.Manifest.BuildTimestamp,
 						"debianPackages": getPackageList(packages[i]),
 					},
 				},
@@ -267,11 +251,6 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 				HashAlgorithm:          "NO-DIGEST",
 				NormalisationAlgorithm: "EXCLUDE-FROM-SIGNATURE",
 				Value:                  "NO-DIGEST",
-			},
-			Access: componentDescriptorS3{
-				Type:   "s3",
-				Bucket: mi.Manifest.S3Bucket,
-				Key:    rootfsPath.S3Key,
 			},
 		},
 		)
@@ -351,13 +330,13 @@ func getPackageList(packages []nameVersion) []string {
 }
 
 // AddPublicationOutput adds the outputs of the publishing process to an existing component descriptor.
-func AddPublicationOutput(descriptor *ComponentDescriptor, images []ManifestImage) error {
-	if len(descriptor.Component.Resources) != len(images)*2 {
-		return fmt.Errorf("invalid component descriptor: expected %d resources, got %d", len(images)*2,
+func AddPublicationOutput(ctx context.Context, descriptor *ComponentDescriptor, manifestTargets []ManifestTarget) error {
+	if len(descriptor.Component.Resources) != len(manifestTargets)*2 {
+		return fmt.Errorf("invalid component descriptor: expected %d resources, got %d", len(manifestTargets)*2,
 			len(descriptor.Component.Resources))
 	}
 
-	for i, mi := range images {
+	for i, mt := range manifestTargets {
 		if descriptor.Component.Resources[i*2].Type != "virtual_machine_image" {
 			return fmt.Errorf("invalid component descriptor: resource %d has incorrect type %s", i*2,
 				descriptor.Component.Resources[i*2].Type)
@@ -367,9 +346,28 @@ func AddPublicationOutput(descriptor *ComponentDescriptor, images []ManifestImag
 				descriptor.Component.Resources[i*2].Name)
 		}
 
+		imageAccess, err := mt.Target.ImageAccess(ctx, mt.Manifest)
+		if err != nil {
+			return fmt.Errorf("cannot get image access for %s: %w", mt.Manifest.Flavor, err)
+		}
+		if imageAccess == nil {
+			return fmt.Errorf("missing image access for %s", mt.Manifest.Flavor)
+		}
+		descriptor.Component.Resources[i*2].Access = imageAccess
+
+		var rootfsAccess access.Spec
+		rootfsAccess, err = mt.Target.RootfsAccess(ctx, mt.Manifest)
+		if err != nil {
+			return fmt.Errorf("cannot get rootfs access for %s: %w", mt.Manifest.Flavor, err)
+		}
+		if rootfsAccess == nil {
+			return fmt.Errorf("missing rootfs access for %s", mt.Manifest.Flavor)
+		}
+		descriptor.Component.Resources[i*2+1].Access = rootfsAccess
+
 		descriptor.Component.Resources[i*2].Labels = append(descriptor.Component.Resources[i*2].Labels, componentDescriptorlabel{
 			Name:  "gardener.cloud/gardenlinux/ci/published-image-metadata",
-			Value: mi.Manifest.PublishedImageMetadata,
+			Value: mt.Manifest.PublishedImageMetadata,
 		})
 	}
 

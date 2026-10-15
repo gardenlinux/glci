@@ -19,6 +19,7 @@ import (
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -217,6 +218,19 @@ func (p *rbscTarget) addObject(ctx context.Context, store *orasfile.Store, path 
 	descriptor.Annotations["io.gardenlinux.image.layer.architecture"] = arch
 
 	return descriptor, f, nil
+}
+
+func (*rbscTarget) ImageAccess(_ context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	output, err := individualPublishingOutputFromManifest[ociIndividualOutput](manifest)
+	if err != nil {
+		return nil, err
+	}
+
+	return access.OCI(output.Repository + "@" + output.Digest), nil
+}
+
+func (p *rbscTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
 func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest) (PublishingOutput, error) {

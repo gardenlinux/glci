@@ -18,6 +18,7 @@ import (
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -62,7 +63,7 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 		return nil, err
 	}
 	var imagePath gardenlinux.S3ReleaseFile
-	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err = manifest.PathBySuffix(".oci")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -155,6 +156,14 @@ func (*containerTarget) findArtifactRootDescriptor(archive string) (specsv1.Desc
 	}
 
 	return specsv1.Descriptor{}, errors.New("OCI archive missing index.json")
+}
+
+func (p *containerTarget) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".oci")
+}
+
+func (p *containerTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
 func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest) (PublishingOutput, error) {

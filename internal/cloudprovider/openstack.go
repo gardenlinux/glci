@@ -22,6 +22,7 @@ import (
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -184,10 +185,6 @@ func (p *openstack) environment(region string) *openstackEnvironment {
 	return p.environments[region]
 }
 
-func (*openstack) ImageSuffix() string {
-	return ".vmdk"
-}
-
 func (p *openstack) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
 	if p.sourceChina == nil || p.sourceChina == p.source {
 		return nil, nil
@@ -201,7 +198,7 @@ func (p *openstack) RequiredReplications(manifest *gardenlinux.Manifest) ([]Repl
 		return nil, nil
 	}
 
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".vmdk")
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +297,7 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
 	var imagePath gardenlinux.S3ReleaseFile
-	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err = manifest.PathBySuffix(".vmdk")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -507,6 +504,14 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 
 		return nil
 	})
+}
+
+func (p *openstack) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".vmdk")
+}
+
+func (p *openstack) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
 func (*openstack) CanReverse(_ *gardenlinux.Manifest) bool {

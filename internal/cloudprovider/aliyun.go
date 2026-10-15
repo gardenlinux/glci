@@ -27,6 +27,7 @@ import (
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -281,10 +282,6 @@ func (p *aliyun) environment() *aliyunEnvironment {
 	return &p.world
 }
 
-func (*aliyun) ImageSuffix() string {
-	return ".qcow2"
-}
-
 func (*aliyun) imageName(flavor, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
@@ -324,7 +321,7 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".qcow2")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -346,7 +343,7 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot import image %s from blob %s: %w", image, blob, err))
 	}
 
-	err = p.deleteBlob(ctx, image+p.ImageSuffix(), false)
+	err = p.deleteBlob(ctx, image+".qcow2", false)
 	if err != nil {
 		return nil, resilience.FailOperation(ctx, fmt.Errorf("cannot delete blob %s: %w", image, err))
 	}
@@ -414,7 +411,7 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 }
 
 func (p *aliyun) uploadBlob(ctx context.Context, source ArtifactSource, key, image string) (string, error) {
-	ossKey := image + p.ImageSuffix()
+	ossKey := image + ".qcow2"
 	ctx = log.WithValues(ctx, "bucket", p.pubCfg.Bucket, "key", key, "ossKey", ossKey)
 
 	obj, err := getSeekableObject(ctx, source, key)
@@ -697,6 +694,14 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	})
 
 	return nil
+}
+
+func (p *aliyun) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".qcow2")
+}
+
+func (p *aliyun) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
 func (*aliyun) CanReverse(_ *gardenlinux.Manifest) bool {
