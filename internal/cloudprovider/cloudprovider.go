@@ -17,6 +17,7 @@ import (
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -78,6 +79,7 @@ type ArtifactSource interface {
 
 	Repository() string
 	GetObjectURL(ctx context.Context, key string) (string, error)
+	GetObjectAccess(ctx context.Context, key string) (access.Spec, error)
 	GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, object io.Reader, contentType string, hash ObjectHash) (ObjectHash, error)
@@ -115,18 +117,18 @@ func ReplicateArtifact(ctx context.Context, origin, destination ArtifactSource, 
 
 // GetManifest retrieves a manifest from an artifact source.
 func GetManifest(ctx context.Context, source ArtifactSource, key string) (*gardenlinux.Manifest, error) {
-	body, err := source.GetObject(ctx, key)
+	object, err := source.GetObject(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_ = body.Close()
+		_ = object.Close()
 	}()
 
 	var rawManifest map[string]any
-	err = yaml.NewDecoder(body).Decode(&rawManifest)
+	err = yaml.NewDecoder(object).Decode(&rawManifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
+		return nil, fmt.Errorf("cannot decode manifest: %w", err)
 	}
 
 	manifest := &gardenlinux.Manifest{}
@@ -136,14 +138,14 @@ func GetManifest(ctx context.Context, source ArtifactSource, key string) (*garde
 		TagName: "yaml",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
+		return nil, fmt.Errorf("cannot decode manifest: %w", err)
 	}
 	err = decoder.Decode(rawManifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid manifest: %w", err)
+		return nil, fmt.Errorf("cannot decode manifest: %w", err)
 	}
 
-	err = body.Close()
+	err = object.Close()
 	if err != nil {
 		return nil, fmt.Errorf("cannot close object: %w", err)
 	}
@@ -177,18 +179,18 @@ func PutManifest(ctx context.Context, source ArtifactSource, key string, manifes
 
 // GetGroupManifest retrieves a group manifest from an artifact source.
 func GetGroupManifest(ctx context.Context, source ArtifactSource, key string) (*gardenlinux.GroupManifest, error) {
-	body, err := source.GetObject(ctx, key)
+	object, err := source.GetObject(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_ = body.Close()
+		_ = object.Close()
 	}()
 
 	var rawGroupManifest map[string]any
-	err = yaml.NewDecoder(body).Decode(&rawGroupManifest)
+	err = yaml.NewDecoder(object).Decode(&rawGroupManifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid group manifest: %w", err)
+		return nil, fmt.Errorf("cannot decode group manifest: %w", err)
 	}
 
 	groupManifest := &gardenlinux.GroupManifest{}
@@ -198,14 +200,14 @@ func GetGroupManifest(ctx context.Context, source ArtifactSource, key string) (*
 		TagName: "yaml",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("invalid group manifest: %w", err)
+		return nil, fmt.Errorf("cannot decode group manifest: %w", err)
 	}
 	err = decoder.Decode(rawGroupManifest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid group manifest: %w", err)
+		return nil, fmt.Errorf("cannot decode group manifest: %w", err)
 	}
 
-	err = body.Close()
+	err = object.Close()
 	if err != nil {
 		return nil, fmt.Errorf("cannot close object: %w", err)
 	}
@@ -242,17 +244,19 @@ type PublishingTarget interface {
 	module.Module
 
 	Type() string
-	ImageSuffix() string
 	RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error)
 	CanPublish(manifest *gardenlinux.Manifest) bool
-	ValidateFlavors(flavors []string) error
+	ValidateFlavors(manifests []*gardenlinux.Manifest) error
 	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
 	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
-	CanReverse(flavor string) bool
+	ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error)
+	RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error)
+	CanReverse(manifest *gardenlinux.Manifest) bool
 	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
 	CanFuse() bool
-	Fuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest) (PublishingOutput, error)
-	Unfuse(ctx context.Context, flavorManifests []gardenlinux.FlavorManifest, steamroll bool) error
+	FlavorsDestination(manifests []*gardenlinux.Manifest) (string, error)
+	Fuse(ctx context.Context, manifests []*gardenlinux.Manifest) (PublishingOutput, error)
+	Unfuse(ctx context.Context, manifests []*gardenlinux.Manifest, steamroll bool) error
 	resilience.RollbackHandler
 }
 
@@ -297,11 +301,11 @@ func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
 		TagName: "yaml",
 	})
 	if err != nil {
-		return output, fmt.Errorf("invalid publishing output: %w", err)
+		return output, fmt.Errorf("cannot decode publishing output: %w", err)
 	}
 	err = decoder.Decode(generic)
 	if err != nil {
-		return output, fmt.Errorf("invalid publishing output: %w", err)
+		return output, fmt.Errorf("cannot decode publishing output: %w", err)
 	}
 
 	return output, nil
@@ -350,11 +354,15 @@ func (nonFusableTarget) CanFuse() bool {
 	return false
 }
 
-func (nonFusableTarget) Fuse(_ context.Context, _ []gardenlinux.FlavorManifest) (PublishingOutput, error) {
+func (nonFusableTarget) FlavorsDestination(_ []*gardenlinux.Manifest) (string, error) {
+	return "", errors.New("target has no shared destination")
+}
+
+func (nonFusableTarget) Fuse(_ context.Context, _ []*gardenlinux.Manifest) (PublishingOutput, error) {
 	return nil, errors.New("target cannot fuse")
 }
 
-func (nonFusableTarget) Unfuse(_ context.Context, _ []gardenlinux.FlavorManifest, _ bool) error {
+func (nonFusableTarget) Unfuse(_ context.Context, _ []*gardenlinux.Manifest, _ bool) error {
 	return errors.New("target cannot unfuse")
 }
 
@@ -381,7 +389,7 @@ func cname(flavor string) string {
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)
 	if err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
+		return fmt.Errorf("cannot decode configuration: %w", err)
 	}
 
 	return nil
@@ -390,28 +398,28 @@ func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 func parseCredentials[CREDS any](rawCreds map[string]any, creds *CREDS) error {
 	err := mapstructure.Decode(rawCreds, creds)
 	if err != nil {
-		return fmt.Errorf("invalid credentials: %w", err)
+		return fmt.Errorf("cannot decode credentials: %w", err)
 	}
 
 	return nil
 }
 
 func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]byte, error) {
-	body, err := source.GetObject(ctx, key)
+	object, err := source.GetObject(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_ = body.Close()
+		_ = object.Close()
 	}()
 
 	var buf bytes.Buffer
-	_, err = buf.ReadFrom(body)
+	_, err = buf.ReadFrom(object)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read object: %w", err)
 	}
 
-	err = body.Close()
+	err = object.Close()
 	if err != nil {
 		return nil, fmt.Errorf("cannot close object: %w", err)
 	}
@@ -420,12 +428,12 @@ func getObjectBytes(ctx context.Context, source ArtifactSource, key string) ([]b
 }
 
 func getObjectFile(ctx context.Context, source ArtifactSource, key string) (string, error) {
-	body, err := source.GetObject(ctx, key)
+	object, err := source.GetObject(ctx, key)
 	if err != nil {
 		return "", err
 	}
 	defer func() {
-		_ = body.Close()
+		_ = object.Close()
 	}()
 
 	var f *os.File
@@ -444,7 +452,7 @@ func getObjectFile(ctx context.Context, source ArtifactSource, key string) (stri
 		_ = os.Remove(f.Name())
 	}()
 
-	_, err = io.Copy(f, body)
+	_, err = io.Copy(f, object)
 	if err != nil {
 		return "", fmt.Errorf("cannot copy object to file %s: %w", f.Name(), err)
 	}
@@ -454,7 +462,7 @@ func getObjectFile(ctx context.Context, source ArtifactSource, key string) (stri
 		return "", fmt.Errorf("cannot close file %s: %w", f.Name(), err)
 	}
 
-	err = body.Close()
+	err = object.Close()
 	if err != nil {
 		return "", fmt.Errorf("cannot close object: %w", err)
 	}
@@ -499,6 +507,15 @@ func getSeekableObject(ctx context.Context, source ArtifactSource, key string) (
 	return readSeekNopCloser{
 		ReadSeeker: bytes.NewReader(data),
 	}, nil
+}
+
+func objectAccess(ctx context.Context, source ArtifactSource, manifest *gardenlinux.Manifest, suffix string) (access.Spec, error) {
+	objectPath, err := manifest.PathBySuffix(suffix)
+	if err != nil {
+		return nil, fmt.Errorf("missing %q object: %w", suffix, err)
+	}
+
+	return source.GetObjectAccess(ctx, objectPath.S3Key)
 }
 
 func subset(original, subset []string) []string {

@@ -145,9 +145,11 @@ func (p *vault) Start(ctx context.Context) error {
 			log.Error(ctx, inErr)
 			p.err = inErr
 			close(p.errCh)
+
+			return fmt.Errorf("error encountered while renewing credentials: %w", inErr)
 		}
 
-		return inErr
+		return nil
 	})
 
 	return nil
@@ -383,16 +385,16 @@ func (p *vault) login(ctx context.Context) error {
 		}
 
 		p.vaultClient.SetToken(token)
-		err := p.retrier.Do(ctx, "look up token", func(ctx context.Context) error {
+
+		return p.retrier.Do(ctx, "look up token", func(ctx context.Context) error {
 			var inErr error
 			p.vaultSecret, inErr = p.vaultClient.Auth().Token().LookupSelfWithContext(ctx)
-			return inErr
-		})
-		if err != nil {
-			return fmt.Errorf("cannot look up token: %w", err)
-		}
+			if inErr != nil {
+				return fmt.Errorf("cannot look up token: %w", inErr)
+			}
 
-		return nil
+			return nil
+		})
 
 	case p.credsCfg.TokenFile != "":
 		log.Debug(ctx, "Using provided token")
@@ -406,16 +408,16 @@ func (p *vault) login(ctx context.Context) error {
 		}
 
 		p.vaultClient.SetToken(token)
-		err = p.retrier.Do(ctx, "look up token", func(ctx context.Context) error {
+
+		return p.retrier.Do(ctx, "look up token", func(ctx context.Context) error {
 			var inErr error
 			p.vaultSecret, inErr = p.vaultClient.Auth().Token().LookupSelfWithContext(ctx)
-			return inErr
-		})
-		if err != nil {
-			return fmt.Errorf("cannot look up token: %w", err)
-		}
+			if inErr != nil {
+				return fmt.Errorf("cannot look up token: %w", inErr)
+			}
 
-		return nil
+			return nil
+		})
 
 	case p.credsCfg.RoleID != "" && p.credsCfg.SecretID != "":
 		log.Debug(ctx, "Using AppRole")
@@ -429,10 +431,14 @@ func (p *vault) login(ctx context.Context) error {
 		err = p.retrier.Do(ctx, "log in", func(ctx context.Context) error {
 			var inErr error
 			p.vaultSecret, inErr = p.vaultClient.Auth().Login(ctx, appRole)
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot login using AppRole: %w", inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("cannot login using AppRole: %w", err)
+			return err
 		}
 
 		p.ownToken = true
@@ -453,10 +459,14 @@ func (p *vault) login(ctx context.Context) error {
 				"role": p.credsCfg.JWTRole,
 				"jwt":  jwt,
 			})
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot login using JWT: %w", inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("cannot login using JWT: %w", err)
+			return err
 		}
 		if p.vaultSecret == nil || p.vaultSecret.Auth == nil {
 			return errors.New("cannot login using JWT: missing authentication information")
@@ -563,7 +573,7 @@ func (p *vault) Stop(ctx context.Context) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("error encountered while renewing credentials: %w", err)
+		return err
 	}
 
 	return nil
@@ -799,10 +809,14 @@ func (p *vault) readSecret(ctx context.Context, key string) (*api.Secret, *api.L
 	err := p.retrier.Do(ctx, "read secret", func(ctx context.Context) error {
 		var inErr error
 		secret, inErr = p.vaultClient.Logical().ReadWithContext(ctx, key)
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get secret: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot get secret: %w", err)
+		return nil, nil, err
 	}
 	if secret == nil {
 		return nil, nil, errors.New("cannot get secret: secret is nil")

@@ -56,14 +56,24 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	err = p.validateFlavors(publications)
 	if err != nil {
-		return fmt.Errorf("cannot validate flavors: %w", err)
+		return fmt.Errorf("invalid flavors: %w", err)
 	}
 
-	manifestsInDescriptor := make([]gardenlinux.FlavorManifest, 0, len(publications))
+	err = p.validateGroupDestinations(groupPublications)
+	if err != nil {
+		return fmt.Errorf("invalid group destinations: %w", err)
+	}
+
+	manifestsInDescriptor := make([]ocm.ManifestTarget, 0, len(publications))
 	for _, pub := range publications {
-		if pub.InComponentDescriptor {
-			manifestsInDescriptor = append(manifestsInDescriptor, pub.FlavorManifest)
+		if !pub.InComponentDescriptor {
+			continue
 		}
+
+		manifestsInDescriptor = append(manifestsInDescriptor, ocm.ManifestTarget{
+			Manifest: pub.Manifest,
+			Target:   pub.Target,
+		})
 	}
 
 	var descriptor *ocm.ComponentDescriptor
@@ -143,7 +153,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		log.Info(ctx, "Skipping component descriptor")
 	} else {
 		log.Debug(ctx, "Finalizing component descriptor")
-		err = ocm.AddPublicationOutput(descriptor, manifestsInDescriptor)
+		err = ocm.AddPublicationOutput(ctx, descriptor, manifestsInDescriptor)
 		if err != nil {
 			return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
 		}
@@ -178,7 +188,7 @@ func (*Publisher) classifyPublishTasks(publications []publication, groupPublicat
 
 		isPublished, err := publications[i].Target.IsPublished(publications[i].Manifest)
 		if err != nil {
-			return nil, nil, fmt.Errorf("cannot determine publishing status for %s: %w", publications[i].Flavor, err)
+			return nil, nil, fmt.Errorf("cannot determine publishing status for %s: %w", publications[i].Manifest.Flavor, err)
 		}
 		if isPublished {
 			continue
@@ -210,7 +220,7 @@ func (*Publisher) classifyPublishTasks(publications []publication, groupPublicat
 }
 
 func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
-	ctx = log.WithValues(ctx, "flavor", pub.Flavor, "targetType", pub.Target.Type())
+	ctx = log.WithValues(ctx, "flavor", pub.Manifest.Flavor, "targetType", pub.Target.Type())
 	if pub.PublishingGroup != "" {
 		ctx = log.WithValues(ctx, "group", pub.PublishingGroup)
 	}
@@ -220,7 +230,7 @@ func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 		return errors.New("publishing taking too long, restart to resume")
 	}
 
-	batch := pub.Flavor
+	batch := pub.Manifest.Flavor
 	if pub.PublishingGroup != "" {
 		batch = pub.PublishingGroup
 	}
@@ -230,9 +240,9 @@ func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 	pub.Manifest.IndividualPublishedImageMetadata = nil
 
 	log.Info(ctx, "Publishing flavor")
-	output, err := pub.Target.Publish(ctx, pub.Flavor, pub.Manifest)
+	output, err := pub.Target.Publish(ctx, pub.Manifest.Flavor, pub.Manifest)
 	if err != nil {
-		return fmt.Errorf("cannot publish %s to %s: %w", pub.Flavor, pub.Target.Type(), err)
+		return fmt.Errorf("cannot publish %s to %s: %w", pub.Manifest.Flavor, pub.Target.Type(), err)
 	}
 
 	if pub.PublishingGroup != "" {
@@ -243,10 +253,10 @@ func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 
 	if pub.PublishingGroup == "" {
 		log.Info(ctx, "Updating manifest")
-		resilience.RemoveCompletedOperations(ctx, pub.Flavor)
+		resilience.RemoveCompletedOperations(ctx, pub.Manifest.Flavor)
 		err = cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
 		if err != nil {
-			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err))
+			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err))
 		}
 	}
 
@@ -258,13 +268,8 @@ func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication
 	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, groupPub.Group), true),
 		groupPub.Target.RollbackDomain())
 
-	manifests := make([]gardenlinux.FlavorManifest, len(groupPub.publications))
-	for i, pub := range groupPub.publications {
-		manifests[i] = pub.FlavorManifest
-	}
-
 	log.Info(ctx, "Fusing group", "count", len(groupPub.publications))
-	output, err := groupPub.Target.Fuse(ctx, manifests)
+	output, err := groupPub.Target.Fuse(ctx, groupPub.manifests())
 	if err != nil {
 		return fmt.Errorf("cannot fuse group %s to %s: %w", groupPub.Group, groupPub.Target.Type(), err)
 	}
@@ -275,10 +280,10 @@ func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication
 
 		pub.Manifest.PublishedImageMetadata = output
 
-		log.Info(log.WithValues(ctx, "flavor", pub.Flavor), "Updating manifest")
+		log.Info(log.WithValues(ctx, "flavor", pub.Manifest.Flavor), "Updating manifest")
 		err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKeys[i], pub.Manifest)
 		if err != nil {
-			return fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err)
+			return fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err)
 		}
 	}
 

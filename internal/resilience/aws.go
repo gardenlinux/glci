@@ -144,12 +144,16 @@ func (p *aws) Load() ([]byte, error) {
 			Bucket: &p.stateCfg.Bucket,
 			Key:    &p.key,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot get object %s from bucket %s: %w", p.key, p.stateCfg.Bucket, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		_, ok := errors.AsType[*s3types.NoSuchKey](err)
 		if !ok {
-			return nil, fmt.Errorf("cannot get object %s from bucket %s: %w", p.key, p.stateCfg.Bucket, err)
+			return nil, err
 		}
 		return nil, nil
 	}
@@ -176,7 +180,7 @@ func (p *aws) Save(state []byte) error {
 		return errors.New("config or ID not set")
 	}
 
-	err := p.retrier.Do(context.Background(), "put object", func(ctx context.Context) error {
+	return p.retrier.Do(context.Background(), "put object", func(ctx context.Context) error {
 		_, inErr := p.s3Client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:          &p.stateCfg.Bucket,
 			Key:             &p.key,
@@ -184,13 +188,12 @@ func (p *aws) Save(state []byte) error {
 			ContentEncoding: new("utf-8"),
 			ContentType:     new("application/json"),
 		})
-		return inErr
-	})
-	if err != nil {
-		return fmt.Errorf("cannot put object %s to bucket %s: %w", p.key, p.stateCfg.Bucket, err)
-	}
+		if inErr != nil {
+			return fmt.Errorf("cannot put object %s to bucket %s: %w", p.key, p.stateCfg.Bucket, inErr)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 func (p *aws) Clear() error {
@@ -198,18 +201,17 @@ func (p *aws) Clear() error {
 		return errors.New("config or ID not set")
 	}
 
-	err := p.retrier.Do(context.Background(), "delete object", func(ctx context.Context) error {
+	return p.retrier.Do(context.Background(), "delete object", func(ctx context.Context) error {
 		_, inErr := p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: &p.stateCfg.Bucket,
 			Key:    &p.key,
 		})
-		return inErr
-	})
-	if err != nil {
-		return fmt.Errorf("cannot delete object %s in bucket %s: %w", p.key, p.stateCfg.Bucket, err)
-	}
+		if inErr != nil {
+			return fmt.Errorf("cannot delete object %s in bucket %s: %w", p.key, p.stateCfg.Bucket, inErr)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 func (p *aws) Configure(rawCfg map[string]any) error {

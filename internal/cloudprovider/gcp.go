@@ -29,6 +29,7 @@ import (
 	"github.com/gardenlinux/glci/internal/hsh"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -202,10 +203,6 @@ func (p *gcp) environment() *gcpEnvironment {
 	return &p.world
 }
 
-func (*gcp) ImageSuffix() string {
-	return ".gcpimage.tar.gz"
-}
-
 func (*gcp) imageName(flavor, version, committish string) string {
 	flavor = hsh.Hash(fnv.New64(), flavor)
 	version = strings.ReplaceAll(version, ".", "-")
@@ -227,7 +224,7 @@ func (*gcp) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return manifest.Platform == "gcp"
 }
 
-func (*gcp) ValidateFlavors(_ []string) error {
+func (*gcp) ValidateFlavors(_ []*gardenlinux.Manifest) error {
 	return nil
 }
 
@@ -258,7 +255,7 @@ func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".gcpimage.tar.gz")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -386,34 +383,41 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 	log.Info(ctx, "Uploading blob")
 	bucket := p.environment().storageClient.Bucket(p.pubCfg.Bucket)
 	err = p.environment().retrier.Do(ctx, "put object", func(ctx context.Context) error {
-		_, inErr := obj.Seek(0, io.SeekStart)
+		inErr := func() error {
+			_, inInErr := obj.Seek(0, io.SeekStart)
+			if inInErr != nil {
+				return fmt.Errorf("cannot rewind object: %w", inInErr)
+			}
+
+			writeCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			w := bucket.Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1), storage.WithBackoff(gax.Backoff{
+				Initial: guard.RetryBaseDelay,
+				Max:     guard.RetryMaxDelay,
+			})).NewWriter(writeCtx)
+			w.ChunkRetryDeadline = guard.Timeout
+
+			_, inInErr = io.Copy(w, obj)
+			if inInErr != nil {
+				return fmt.Errorf("cannot copy object: %w", inInErr)
+			}
+
+			inInErr = w.Close()
+			if inInErr != nil {
+				return fmt.Errorf("cannot close object writer: %w", inInErr)
+			}
+
+			return nil
+		}()
 		if inErr != nil {
-			return fmt.Errorf("cannot rewind object: %w", inErr)
-		}
-
-		writeCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		w := bucket.Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1), storage.WithBackoff(gax.Backoff{
-			Initial: guard.RetryBaseDelay,
-			Max:     guard.RetryMaxDelay,
-		})).NewWriter(writeCtx)
-		w.ChunkRetryDeadline = guard.Timeout
-
-		_, inErr = io.Copy(w, obj)
-		if inErr != nil {
-			return fmt.Errorf("cannot copy object: %w", inErr)
-		}
-
-		inErr = w.Close()
-		if inErr != nil {
-			return fmt.Errorf("cannot close object writer: %w", inErr)
+			return fmt.Errorf("cannot put object %s in bucket %s: %w", blob, p.pubCfg.Bucket, inErr)
 		}
 
 		return nil
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("cannot put object %s in bucket %s: %w", blob, p.pubCfg.Bucket, err)
+		return "", "", err
 	}
 	resilience.UpdateOperation(ctx, func(s *gcpOperationState) *gcpOperationState {
 		s.Blob = blob
@@ -435,10 +439,14 @@ func (p *gcp) uploadBlob(ctx context.Context, source ArtifactSource, key, image 
 			Expires:        time.Now().Add(time.Hour * 7),
 			Scheme:         storage.SigningSchemeV4,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot generate signed URL for blob %s: %w", blob, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("cannot generate signed URL for blob %s: %w", blob, err)
+		return "", "", err
 	}
 
 	return blob, url, nil
@@ -502,10 +510,14 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 				retries: guard.Retries,
 			}
 		}))
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot insert image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot insert image: %w", err)
+		return err
 	}
 	resilience.UpdateOperation(ctx, func(s *gcpOperationState) *gcpOperationState {
 		s.Image = image
@@ -524,11 +536,16 @@ func (p *gcp) insertImage(ctx context.Context, disk, image, arch string, secureB
 func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error {
 	log.Info(ctx, "Deleting blob")
 	err := p.environment().retrier.Do(ctx, "delete blob", func(ctx context.Context) error {
-		return p.environment().storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1),
+		inErr := p.environment().storageClient.Bucket(p.pubCfg.Bucket).Object(blob).Retryer(storage.WithMaxAttempts(guard.Retries+1),
 			storage.WithBackoff(gax.Backoff{
 				Initial: guard.RetryBaseDelay,
 				Max:     guard.RetryMaxDelay,
 			})).Delete(ctx)
+		if inErr != nil {
+			return fmt.Errorf("cannot delete blob %s: %w", blob, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		apiErr, ok := errors.AsType[*googleapi.Error](err)
@@ -536,7 +553,7 @@ func (p *gcp) deleteBlob(ctx context.Context, blob string, steamroll bool) error
 			log.Debug(ctx, "Blob not found but the steamroller keeps going")
 			return nil
 		}
-		return fmt.Errorf("cannot delete blob %s: %w", blob, err)
+		return err
 	}
 	resilience.UpdateOperation(ctx, func(s *gcpOperationState) *gcpOperationState {
 		s.Blob = ""
@@ -577,16 +594,28 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 				retries: guard.Retries,
 			}
 		}))
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot set IAM policy: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot set IAM policy: %w", err)
+		return err
 	}
 
 	return nil
 }
 
-func (*gcp) CanReverse(_ string) bool {
+func (p *gcp) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".gcpimage.tar.gz")
+}
+
+func (p *gcp) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
+}
+
+func (*gcp) CanReverse(_ *gardenlinux.Manifest) bool {
 	return true
 }
 
@@ -635,7 +664,11 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 				retries: guard.Retries,
 			}
 		}))
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot delete image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		apiErr, ok := errors.AsType[*googleapi.Error](err)
@@ -643,7 +676,7 @@ func (p *gcp) deleteImage(ctx context.Context, image string, steamroll bool) err
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}
-		return fmt.Errorf("cannot delete image: %w", err)
+		return err
 	}
 
 	err = p.awaitOperation(ctx, "await image deletion", op.Name())
@@ -663,10 +696,14 @@ func (p *gcp) awaitOperation(ctx context.Context, operation, op string) error {
 				Operation: op,
 				Project:   p.pubCfg.Project,
 			})
-			return inErr
+			if inErr != nil {
+				return fmt.Errorf("cannot get operation status: %w", inErr)
+			}
+
+			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("cannot get operation status: %w", err)
+			return err
 		}
 
 		if o.GetStatus() == computepb.Operation_DONE {

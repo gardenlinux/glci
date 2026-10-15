@@ -29,6 +29,12 @@ flavors:
   in_component_descriptor: true
 - flavor: openstack-gardener-metal_prod-amd64
   in_component_descriptor: true
+- flavor: gdch-gardener_prod-amd64
+  publishing_group: rbsc
+  in_component_descriptor: true
+- flavor: gdch-gardener_prod-arm64
+  publishing_group: rbsc
+  in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-amd64
   in_component_descriptor: true
 - flavor: aws-gardener_prod_usi-arm64
@@ -135,13 +141,20 @@ publishing:
     config: gardenlinux
     project: sap-se-gcp-gardenlinux
     bucket: gardenlinux-images
-  - target: OCI
+  - target: Container
     source: S3
     repositories:
       container:
         repository: gardenlinux.common.repositories.cloud.sap/gardenlinux
         config: gardenlinux-hccs
         allows_delete: false
+  - target: RBSC
+    source: S3
+    repositories:
+      rbsc:
+        repository: ghcr.io/gardenlinux/rbsc
+        config: gardenlinux-ghcr
+        allows_delete: true
   - target: OpenStack
     source: S3
     source_china: S3-China

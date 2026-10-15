@@ -154,14 +154,14 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 
 		isPublished, err := publications[i].Target.IsPublished(publications[i].Manifest)
 		if err != nil {
-			return nil, fmt.Errorf("cannot determine publishing status for %s: %w", publications[i].Flavor, err)
+			return nil, fmt.Errorf("cannot determine publishing status for %s: %w", publications[i].Manifest.Flavor, err)
 		}
 		if !isPublished {
 			continue
 		}
 
 		if !publications[i].Reversible {
-			log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", publications[i].Flavor)
+			log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", publications[i].Manifest.Flavor)
 			continue
 		}
 
@@ -175,7 +175,7 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 
 		if !groupPublications[i].publications[0].Reversible {
 			for j := range groupPublications[i].publications {
-				log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", groupPublications[i].publications[j].Flavor)
+				log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", groupPublications[i].publications[j].Manifest.Flavor)
 			}
 			continue
 		}
@@ -190,7 +190,7 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 }
 
 func (p *Publisher) unpublishFlavor(ctx context.Context, pub publication, steamroll bool) error {
-	ctx = log.WithValues(ctx, "flavor", pub.Flavor, "targetType", pub.Target.Type())
+	ctx = log.WithValues(ctx, "flavor", pub.Manifest.Flavor, "targetType", pub.Target.Type())
 	if pub.PublishingGroup != "" {
 		ctx = log.WithValues(ctx, "group", pub.PublishingGroup)
 	}
@@ -208,7 +208,7 @@ func (p *Publisher) unpublishFlavor(ctx context.Context, pub publication, steamr
 	log.Info(ctx, "Unpublishing flavor")
 	err := pub.Target.Unpublish(ctx, pub.Manifest, steamroll)
 	if err != nil {
-		return fmt.Errorf("cannot unpublish %s from %s: %w", pub.Flavor, pub.Target.Type(), err)
+		return fmt.Errorf("cannot unpublish %s from %s: %w", pub.Manifest.Flavor, pub.Target.Type(), err)
 	}
 
 	if pub.PublishingGroup == "" {
@@ -217,7 +217,7 @@ func (p *Publisher) unpublishFlavor(ctx context.Context, pub publication, steamr
 		log.Info(ctx, "Updating manifest")
 		err = cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
 		if err != nil {
-			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err))
+			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err))
 		}
 	}
 
@@ -231,10 +231,10 @@ func (p *Publisher) unpublishGroup(ctx context.Context, groupPub *groupPublicati
 		pub.Manifest.PublishedImageMetadata = nil
 		pub.Manifest.IndividualPublishedImageMetadata = nil
 
-		log.Info(log.WithValues(ctx, "flavor", pub.Flavor), "Updating manifest")
+		log.Info(log.WithValues(ctx, "flavor", pub.Manifest.Flavor), "Updating manifest")
 		err := cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
 		if err != nil {
-			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Flavor, err))
+			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err))
 		}
 	}
 
@@ -260,9 +260,9 @@ func (*Publisher) unfuseGroup(ctx context.Context, groupPub *groupPublication, s
 		}
 	}
 
-	manifests := make([]gardenlinux.FlavorManifest, len(groupPub.publications))
+	manifests := make([]*gardenlinux.Manifest, len(groupPub.publications))
 	for i, pub := range groupPub.publications {
-		manifests[i] = pub.FlavorManifest
+		manifests[i] = pub.Manifest
 	}
 
 	log.Info(ctx, "Unfusing group")

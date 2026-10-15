@@ -344,11 +344,11 @@ func ParseOperationState[STATE any](generic OperationState) (STATE, error) {
 		TagName: "json",
 	})
 	if err != nil {
-		return state, fmt.Errorf("invalid operation state: %w", err)
+		return state, fmt.Errorf("cannot decode operation state: %w", err)
 	}
 	err = decoder.Decode(generic)
 	if err != nil {
-		return state, fmt.Errorf("invalid operation state: %w", err)
+		return state, fmt.Errorf("cannot decode operation state: %w", err)
 	}
 
 	return state, nil
@@ -430,7 +430,7 @@ func Rollback(ctx context.Context, handlers []RollbackHandler) error {
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 	err := mapstructure.Decode(cfg, &config)
 	if err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
+		return fmt.Errorf("cannot decode configuration: %w", err)
 	}
 
 	return nil
@@ -439,7 +439,7 @@ func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {
 func parseCredentials[CREDS any](rawCreds map[string]any, creds *CREDS) error {
 	err := mapstructure.Decode(rawCreds, creds)
 	if err != nil {
-		return fmt.Errorf("invalid credentials: %w", err)
+		return fmt.Errorf("cannot decode credentials: %w", err)
 	}
 
 	return nil

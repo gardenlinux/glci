@@ -22,6 +22,7 @@ import (
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
+	"github.com/gardenlinux/glci/internal/ocm/access"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
 
@@ -144,10 +145,14 @@ func (p *openstack) applyCredentials(ctx context.Context, region string, rawCred
 			ApplicationCredentialID:     creds.ApplicationCredentialID,
 			ApplicationCredentialSecret: creds.ApplicationCredentialSecret,
 		})
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create provider client for region %s: %w", region, inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot create provider client for region %s: %w", region, err)
+		return err
 	}
 
 	providerClient.ReauthFunc = func(ctx context.Context) error {
@@ -180,10 +185,6 @@ func (p *openstack) environment(region string) *openstackEnvironment {
 	return p.environments[region]
 }
 
-func (*openstack) ImageSuffix() string {
-	return ".vmdk"
-}
-
 func (p *openstack) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
 	if p.sourceChina == nil || p.sourceChina == p.source {
 		return nil, nil
@@ -197,7 +198,7 @@ func (p *openstack) RequiredReplications(manifest *gardenlinux.Manifest) ([]Repl
 		return nil, nil
 	}
 
-	imagePath, err := manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err := manifest.PathBySuffix(".vmdk")
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +260,7 @@ func (p *openstack) CanPublish(manifest *gardenlinux.Manifest) bool {
 	return err == nil
 }
 
-func (*openstack) ValidateFlavors(_ []string) error {
+func (*openstack) ValidateFlavors(_ []*gardenlinux.Manifest) error {
 	return nil
 }
 
@@ -296,7 +297,7 @@ func (p *openstack) Publish(ctx context.Context, flavor string, manifest *garden
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
 	var imagePath gardenlinux.S3ReleaseFile
-	imagePath, err = manifest.PathBySuffix(p.ImageSuffix())
+	imagePath, err = manifest.PathBySuffix(".vmdk")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -432,10 +433,14 @@ func (p *openstack) createImage(ctx context.Context, region string, source Artif
 			DiskFormat:      "vmdk",
 			Properties:      properties,
 		}).Extract()
-		return inErr
+		if inErr != nil {
+			return fmt.Errorf("cannot create image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot create image: %w", err)
+		return "", err
 	}
 	resilience.UpdateOperation(ctx, func(s *openstackOperationState) *openstackOperationState {
 		s.Image = img.ID
@@ -445,13 +450,18 @@ func (p *openstack) createImage(ctx context.Context, region string, source Artif
 
 	log.Debug(ctx, "Importing image")
 	err = environment.retrier.Do(ctx, "import image", func(ctx context.Context) error {
-		return imageimport.Create(ctx, environment.imagesClient, img.ID, imageimport.CreateOpts{
+		inErr := imageimport.Create(ctx, environment.imagesClient, img.ID, imageimport.CreateOpts{
 			Name: imageimport.WebDownloadMethod,
 			URI:  url,
 		}).ExtractErr()
+		if inErr != nil {
+			return fmt.Errorf("cannot import image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot import image: %w", err)
+		return "", err
 	}
 
 	return img.ID, nil
@@ -465,12 +475,16 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 		for status != images.ImageStatusActive {
 			var img *images.Image
 			inErr := environment.retrier.Do(ctx, "get image", func(ctx context.Context) error {
-				var inErr error
-				img, inErr = images.Get(ctx, environment.imagesClient, imageID).Extract()
-				return inErr
+				var inInErr error
+				img, inInErr = images.Get(ctx, environment.imagesClient, imageID).Extract()
+				if inInErr != nil {
+					return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, inInErr)
+				}
+
+				return nil
 			})
 			if inErr != nil {
-				return fmt.Errorf("cannot get image %s in region %s: %w", imageID, region, inErr)
+				return inErr
 			}
 			status = img.Status
 
@@ -492,7 +506,15 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	})
 }
 
-func (*openstack) CanReverse(_ string) bool {
+func (p *openstack) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".vmdk")
+}
+
+func (p *openstack) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+	return objectAccess(ctx, p.source, manifest, ".tar")
+}
+
+func (*openstack) CanReverse(_ *gardenlinux.Manifest) bool {
 	return true
 }
 
@@ -527,7 +549,7 @@ func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 			ctx = log.WithValues(ctx, "region", img.Region, "imageID", img.ID)
 
 			inErr := p.deleteImage(ctx, img.ID, img.Region, steamroll)
-			if err != nil {
+			if inErr != nil {
 				return fmt.Errorf("cannot delete image %s in region %s: %w", img.ID, img.Region, inErr)
 			}
 
@@ -545,7 +567,12 @@ func (p *openstack) deleteImage(ctx context.Context, id, region string, steamrol
 
 	log.Info(ctx, "Deleting image")
 	err := environment.retrier.Do(ctx, "delete image", func(ctx context.Context) error {
-		return images.Delete(ctx, environment.imagesClient, id).ExtractErr()
+		inErr := images.Delete(ctx, environment.imagesClient, id).ExtractErr()
+		if inErr != nil {
+			return fmt.Errorf("cannot delete image: %w", inErr)
+		}
+
+		return nil
 	})
 	if err != nil {
 		codeErr, ok := errors.AsType[gophercloud.ErrUnexpectedResponseCode](err)
@@ -553,7 +580,7 @@ func (p *openstack) deleteImage(ctx context.Context, id, region string, steamrol
 			log.Debug(ctx, "Image not found but the steamroller keeps going")
 			return nil
 		}
-		return fmt.Errorf("cannot delete image: %w", err)
+		return err
 	}
 
 	return nil
