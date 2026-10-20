@@ -38,7 +38,7 @@ require (
 	github.com/wandb/parallel v0.2.3
 	golang.org/x/oauth2 v0.37.0
 	google.golang.org/api v0.304.0
-	oras.land/oras-go/v2 v2.6.3
+	oras.land/oras-go/v2 v2.6.4
 )
 
 require (

@@ -1017,5 +1017,5 @@ mvdan.cc/gofumpt v0.12.0 h1:1Lbudkz2kpM9Cjz2pL4M19u7q+GaEhCTNf7N9mfpcho=
 mvdan.cc/gofumpt v0.12.0/go.mod h1:SmBHHrljiZu/uoypeKup3rFzP6eoC9UwCp2iH5E3jZA=
 mvdan.cc/unparam v0.0.0-20260823230713-2fa3d841b0c8 h1:Re1NRyLpiAt9kB+ImaaoapwWiQXrKwER4tY8fLOkDew=
 mvdan.cc/unparam v0.0.0-20260823230713-2fa3d841b0c8/go.mod h1:MrS/+zJ1M2xvGXhKktiHbNQeQPyg3Qel+KkzT+f7/i4=
-oras.land/oras-go/v2 v2.6.3 h1:72z4K9YiDKVB5jieM8cuB1WSVnbZkkD2hd+NmO3HYVI=
-oras.land/oras-go/v2 v2.6.3/go.mod h1:imXEFiYkTZUVVYkfv/r5GVmWeiLkGtNQA8FU4F/sjKs=
+oras.land/oras-go/v2 v2.6.4 h1:l4uv+UT7QK4Hju+KOEZ/c8iOjq3iZH7cULoRpUnSDAU=
+oras.land/oras-go/v2 v2.6.4/go.mod h1:imXEFiYkTZUVVYkfv/r5GVmWeiLkGtNQA8FU4F/sjKs=
