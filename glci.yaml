@@ -174,10 +174,6 @@ publishing:
       - na-us-1
       - na-us-2
       - na-us-3
-    - config: gardenlinux-qa
-      domain: monsoon3
-      regions:
-      - qa-de-1
   ocm:
     target: OCI
     config: gardener
