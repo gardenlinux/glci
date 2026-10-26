@@ -1,0 +1,265 @@
+# GLCI configuration template.
+#
+# Annotated configuration template for the accompanying GLCI guide.
+# Keep the flavors and publishing targets needed for your deployment and remove the others.
+# Official upstream resources use real values. Deployment-specific values use "example" placeholders.
+# Unless a different default is documented, omitted values use their type's zero value.
+# Zero values are false for booleans, 0 for numbers, "" for strings, and empty lists or maps.
+# Required fields still need values. Some empty values select a fallback described alongside the field.
+#
+# Publishing targets read image artifacts directly from the official upstream bucket.
+# Obtain upstream flavor manifests, modify them to an unpublished state, and store them in your own bucket.
+# Use that private bucket as manifest_source. GLCI reads and updates the prepared copies there.
+# Include package list manifests for flavors selected for the component descriptor.
+# Image artifacts remain upstream. GLCI does not provide a command for manifest preparation.
+# See "Prepare artifact sources" in the guide.
+
+# Garden Linux build variants to publish.
+flavors:
+  # Each flavor must match exactly one publishing target.
+  # Cloud publishing targets and Container select by the manifest platform, which must match the flavor prefix.
+  # RBSC selects by publishing group membership in its repositories map.
+  - flavor: ali-gardener_prod-amd64
+    # Include this flavor's published image in the component descriptor. Defaults to false.
+    in_component_descriptor: true
+  - flavor: aws-gardener_prod-amd64
+    in_component_descriptor: true
+  - flavor: azure-gardener_prod-amd64
+    in_component_descriptor: true
+  - flavor: container-amd64
+    # Flavors in the same group are published together and share published image metadata.
+    publishing_group: example_container
+  - flavor: container-arm64
+    publishing_group: example_container
+  - flavor: gcp-gardener_prod-amd64
+    in_component_descriptor: true
+  - flavor: gdch-gardener_prod-amd64
+    publishing_group: example_oci_artifact
+    in_component_descriptor: true
+  - flavor: openstack-gardener_prod-amd64
+    in_component_descriptor: true
+
+publishing:
+
+  # Credentials for artifact sources, publishing targets, and storage implementations.
+  credentials:
+    # Vault is currently the only credential provider.
+    source: Vault
+    # Vault server URL.
+    server: https://vault.example.com
+    # Vault Enterprise namespace. Leave empty when unused.
+    namespace: ""
+
+    # First complete login method wins, in this order. Configure only the intended method.
+    # Empty scalar keys are retained so environment overrides can supply their values.
+
+    # Supplied token. May be passed as GLCI_PUBLISHING_CREDENTIALS_TOKEN.
+    token: ""
+    # Path to a file containing a supplied token. Leave empty unless using token file login.
+    token_file: ""
+    # AppRole role ID.
+    role_id: ""
+    # AppRole secret ID.
+    secret_id: ""
+    # Signed JWT trusted by Vault, commonly supplied by the CI workflow.
+    # May be passed as GLCI_PUBLISHING_CREDENTIALS_JWT.
+    jwt: ""
+    # JWT auth mount used in auth/<jwt_mount_path>/login. Match the mount configured in Vault.
+    jwt_mount_path: jwt
+    # Vault JWT auth role mapping the login to policies and a token lifetime.
+    jwt_role: ""
+
+  # Artifact source ID for prepared private flavor manifests and descriptor package lists.
+  manifest_source: example_manifests
+  # Optional destination for updated manifests. Empty or omitted means manifest_source.
+  manifest_target: ""
+
+  # Artifact sources for manifests, build artifacts, or replicas. AWS S3 is currently the only implementation.
+  sources:
+    # Official upstream image artifacts. Publishing targets read these directly.
+    - id: gardenlinux_upstream
+      source: AWS
+      # Credential set resolved through Vault. Required even for public buckets.
+      # Your own AWS account can be used if its IAM identity may read the upstream objects.
+      config: example-aws-account
+      region: eu-central-1
+      bucket: gardenlinux-github-releases
+
+    # Private copies of flavor manifests processed back to an unpublished state.
+    - id: example_manifests
+      source: AWS
+      # Credential set with read and write access to this bucket.
+      config: example-aws-account
+      region: eu-central-1
+      # Populate with prepared flavor manifests and any required package list manifests before the first run.
+      bucket: example-manifest-bucket
+
+    # Optional artifact source for replicas in China. Enable when referenced by a publishing target.
+    # - id: example_s3_china
+    #   source: AWS
+    #   config: example-aws-cn-account
+    #   region: cn-northwest-1
+    #   bucket: example-china-artifact-bucket
+
+  # Publishing targets. Keep only those needed by the configured flavors.
+  targets:
+
+    # AWS registers AMIs in EC2.
+    - target: AWS
+      # Artifact source ID.
+      source: gardenlinux_upstream
+      # Credential set for publishing.
+      config: example-aws-account
+      # Initial image region, before copies to other regions.
+      region: eu-central-1
+      # Optional region filter. Must include region. Omission selects all enabled regions available to GLCI.
+      # regions:
+      #   - eu-central-1
+      #   - us-east-1
+      # Optional image tags.
+      image_tags:
+        # Add a gardenlinux-version tag with the release version.
+        include_gardenlinux_version: true
+        # Add a gardenlinux-committish tag with the build commit.
+        include_gardenlinux_committish: true
+        # Fixed tags.
+        static_tags:
+          example-tag: example-value
+      # Optional artifact source for China. Replicate populates it when distinct from source.
+      # source_china: example_s3_china
+      # Optional complete credential set name for China.
+      # config_china: example-aws-cn-account
+      # Initial image region in China.
+      # region_china: cn-northwest-1
+      # Optional China region filter. Must include region_china.
+      # regions_china:
+      #   - cn-northwest-1
+
+    # Azure creates images in a community gallery.
+    - target: Azure
+      source: gardenlinux_upstream
+      config: example-azure-account
+      # Existing blob storage container for staging images.
+      storage_container: example-storage-container
+      # Resource group holding the gallery and images.
+      resource_group: example-resource-group
+      # Existing community gallery.
+      gallery: example_community_gallery
+      # Image creation location.
+      region: westeurope
+      # Optional gallery replication regions. Must include region. Omission selects available regions.
+      # regions:
+      #   - westeurope
+      # Prefix of the gallery image definition name.
+      image_prefix: gardenlinux
+      # Image description.
+      image_description: Garden Linux
+      # EULA URL.
+      image_eula: https://github.com/gardenlinux/gardenlinux/blob/main/LICENSE.md
+      # Release note URL.
+      image_release_note: https://github.com/gardenlinux/gardenlinux/releases
+      # Publisher identifier. Must meet Azure identifier rules and contain no spaces.
+      image_publisher: GardenLinux
+      # Offer identifier.
+      image_offer: gardenlinux
+      # SKU prefix.
+      image_sku_prefix: gardenlinux
+      # Optional artifact source for China. Replicate populates it when distinct from source.
+      # source_china: example_s3_china
+      # Optional complete credential set name for Azure China.
+      # config_china: example-azure-cn-account
+      # Image creation location in China.
+      # region_china: chinanorth3
+      # Optional China replication regions. Must include region_china.
+      # regions_china:
+      #   - chinanorth3
+
+    # GCP creates images in GCE.
+    - target: GCP
+      source: gardenlinux_upstream
+      config: example-gcp-account
+      # Destination project.
+      project: example-gcp-project
+      # Existing Cloud Storage staging bucket.
+      bucket: example-images-bucket
+
+    # Aliyun imports images into ECS.
+    - target: Aliyun
+      source: gardenlinux_upstream
+      config: example-aliyun-account
+      # Initial import region, before copies to other regions.
+      region: eu-central-1
+      # Optional region filter. Must include region. Omission selects available regions.
+      # regions:
+      #   - eu-central-1
+      # Existing OSS staging bucket in the import region.
+      bucket: example-images-bucket
+
+    # OpenStack creates Glance images in every configured region.
+    - target: OpenStack
+      source: gardenlinux_upstream
+      # Config names and region names must be unique across this publishing target.
+      configs:
+        # Credential set containing OpenStack application credentials for the configured regions.
+        - config: example-openstack-account
+          # Vault path qualifier below each region. Not a separate Keystone authentication scope.
+          domain: example-domain
+          # Regions whose Glance service endpoints receive images.
+          regions:
+            - example-region-a
+            - example-region-b
+      # Optional image name suffix. Does not isolate resources or change credentials.
+      # test: true
+      # Optional artifact source for ap-cn-* regions. Replicate populates it when distinct from source.
+      # source_china: example_s3_china
+
+    # Container pushes OCI container images.
+    - target: Container
+      source: gardenlinux_upstream
+      # Each group must have a distinct repository within this publishing target.
+      repositories:
+        # Key matching a configured publishing group.
+        example_container:
+          # Destination repository.
+          repository: registry.example.com/example-container/gardenlinux
+          config: example-container-account
+          # Enable only when the registry and credentials support GLCI's deletion mechanism.
+          # False makes the group irreversible. Defaults to false.
+          allows_delete: false
+
+    # RBSC pushes Garden Linux images packaged as OCI artifacts.
+    - target: RBSC
+      source: gardenlinux_upstream
+      repositories:
+        example_oci_artifact:
+          repository: registry.example.com/example-rbsc/gardenlinux
+          config: example-oci-account
+          # Enable only when the registry and credentials support GLCI's deletion mechanism.
+          # False makes the group irreversible. Defaults to false.
+          allows_delete: false
+
+  # Required recovery state. Preserve it between attempts for the same release.
+  state:
+    # File stores state_<version>-<commit8>.json in the working directory.
+    # Suitable for local use and persistent runners.
+    backend: File
+
+    # Alternative for disposable CI runners. Replace the File setting with this block.
+    # backend: AWS
+    # config: example-aws-account
+    # region: eu-central-1
+    # bucket: example-state-bucket
+
+  # Component descriptor output for Gardener or other tooling.
+  # Required even when the descriptor is unused. File output can safely be ignored.
+  ocm:
+    # File writes a local descriptor. Parent directory must already exist.
+    target: File
+    file: example-component-descriptor.yaml
+    # Repository context recorded inside the descriptor. File output does not push to this repository.
+    repository: registry.example.com/example-ocm/gardenlinux
+
+    # Alternative normally used for Gardener. Replace the File settings with this block.
+    # target: OCI
+    # config: example-ocm-account
+    # repository: registry.example.com/example-ocm/gardenlinux
