@@ -57,6 +57,7 @@ type ociEnvironment struct {
 	ghcrClient         *http.Client
 
 	ghcrVersionIDsMtx sync.Mutex
+	ghcrOwnerSegment  string
 	ghcrVersionIDs    map[string]int64
 }
 
@@ -381,9 +382,9 @@ func (*ociTarget) deleteTag(ctx context.Context, environment *ociEnvironment, ta
 }
 
 func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor specsv1.Descriptor, steamroll bool) error {
-	org, pkg, ok := strings.Cut(e.repository.Reference.Repository, "/")
+	owner, pkg, ok := strings.Cut(e.repository.Reference.Repository, "/")
 	if !ok {
-		return fmt.Errorf("invalid ghcr repository %q: expected org/package", e.repository.Reference.Repository)
+		return fmt.Errorf("invalid ghcr repository %q: expected owner/package", e.repository.Reference.Repository)
 	}
 
 	return graph.WalkTree(descriptor, func(d specsv1.Descriptor) ([]specsv1.Descriptor, error) {
@@ -427,8 +428,9 @@ func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor s
 		return index.Manifests, nil
 	}, graph.PostOrder, func(d specsv1.Descriptor, _ int) error {
 		var id int64
+		var segment string
 		var inErr error
-		id, ok, inErr = e.findGHCRVersionID(ctx, org, pkg, d.Digest.String())
+		id, segment, ok, inErr = e.findGHCRVersionID(ctx, owner, pkg, d.Digest.String())
 		if inErr != nil {
 			return fmt.Errorf("cannot find version %s: %w", d.Digest, inErr)
 		}
@@ -443,7 +445,7 @@ func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor s
 		}
 
 		log.Debug(ctx, "Deleting package version", "digest", d.Digest)
-		inErr = e.deleteGHCRVersion(ctx, org, pkg, id)
+		inErr = e.deleteGHCRVersion(ctx, segment, owner, pkg, id)
 		if inErr != nil {
 			return fmt.Errorf("cannot delete version %s: %w", d.Digest, inErr)
 		}
@@ -452,33 +454,91 @@ func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor s
 	})
 }
 
-func (e *ociEnvironment) findGHCRVersionID(ctx context.Context, org, pkg, digest string) (int64, bool, error) {
+func (e *ociEnvironment) findGHCRVersionID(ctx context.Context, owner, pkg, digest string) (int64, string, bool, error) {
 	e.ghcrVersionIDsMtx.Lock()
 	defer e.ghcrVersionIDsMtx.Unlock()
 
 	if e.ghcrVersionIDs == nil {
-		versionIDs, err := e.listGHCRVersionIDs(ctx, org, pkg)
+		segment, err := e.resolveGHCROwnerSegment(ctx, owner)
 		if err != nil {
-			return 0, false, err
+			return 0, "", false, err
 		}
 
+		var versionIDs map[string]int64
+		versionIDs, err = e.listGHCRVersionIDs(ctx, segment, owner, pkg)
+		if err != nil {
+			return 0, "", false, err
+		}
+
+		e.ghcrOwnerSegment = segment
 		e.ghcrVersionIDs = versionIDs
 	}
 
 	id, ok := e.ghcrVersionIDs[digest]
 
-	return id, ok, nil
+	return id, e.ghcrOwnerSegment, ok, nil
 }
 
-func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, org, pkg string) (map[string]int64, error) {
+func (e *ociEnvironment) resolveGHCROwnerSegment(ctx context.Context, owner string) (string, error) {
+	log.Debug(ctx, "Resolving package owner type")
+	var ownerType string
+	err := e.retrier.Do(ctx, "get owner", func(ctx context.Context) error {
+		req, inErr := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://api.github.com/users/%s", url.PathEscape(owner)), nil)
+		if inErr != nil {
+			return fmt.Errorf("cannot create request: %w", inErr)
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-Github-Api-Version", "2022-11-28") // fixme is this the latest?
+
+		var resp *http.Response
+		resp, inErr = e.ghcrClient.Do(req)
+		if inErr != nil {
+			return fmt.Errorf("cannot get owner: %w", inErr)
+		}
+		defer func() {
+			_ = resp.Body.Close() // fixme happy path close?
+		}()
+
+		if resp.StatusCode != http.StatusOK {
+			message, readErr := io.ReadAll(resp.Body) // fixme inerr
+			if readErr != nil {
+				return fmt.Errorf("unexpected status %q", resp.Status)
+			}
+
+			return fmt.Errorf("unexpected status %q: %q", resp.Status, strings.TrimSpace(string(message)))
+		}
+
+		var account struct {
+			Type string `json:"type"`
+		}
+		inErr = json.NewDecoder(resp.Body).Decode(&account)
+		if inErr != nil {
+			return fmt.Errorf("cannot decode owner: %w", inErr)
+		}
+
+		ownerType = account.Type
+
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	if ownerType == "Organization" { // fixme switch
+		return "orgs", nil
+	}
+
+	return "users", nil
+}
+
+func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, segment, owner, pkg string) (map[string]int64, error) {
 	type ghcrVersion struct {
 		ID   int64  `json:"id"`
 		Name string `json:"name"`
 	}
 
 	log.Debug(ctx, "Listing package versions")
-	versionsURL := fmt.Sprintf("https://api.github.com/orgs/%s/packages/container/%s/versions?per_page=100", url.PathEscape(org),
-		url.PathEscape(pkg))
+	versionsURL := fmt.Sprintf("https://api.github.com/%s/%s/packages/container/%s/versions?per_page=100", segment, url.PathEscape(owner), url.PathEscape(pkg))
 	versionIDs := make(map[string]int64)
 	page := 1
 	for {
@@ -501,7 +561,7 @@ func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, org, pkg string
 			}()
 
 			if resp.StatusCode != http.StatusOK {
-				message, readErr := io.ReadAll(resp.Body)
+				message, readErr := io.ReadAll(resp.Body) // fixme inerr
 				if readErr != nil {
 					return fmt.Errorf("unexpected status %q", resp.Status)
 				}
@@ -533,11 +593,9 @@ func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, org, pkg string
 	return versionIDs, nil
 }
 
-func (e *ociEnvironment) deleteGHCRVersion(ctx context.Context, org, pkg string, id int64) error {
+func (e *ociEnvironment) deleteGHCRVersion(ctx context.Context, segment, owner, pkg string, id int64) error {
 	return e.retrier.Do(ctx, "delete package version", func(ctx context.Context) error {
-		req, inErr := http.NewRequestWithContext(ctx, http.MethodDelete,
-			fmt.Sprintf("https://api.github.com/orgs/%s/packages/container/%s/versions/%d", url.PathEscape(org), url.PathEscape(pkg), id),
-			nil)
+		req, inErr := http.NewRequestWithContext(ctx, http.MethodDelete, fmt.Sprintf("https://api.github.com/%s/%s/packages/container/%s/versions/%d", segment, url.PathEscape(owner), url.PathEscape(pkg), id), nil)
 		if inErr != nil {
 			return fmt.Errorf("cannot create request: %w", inErr)
 		}
@@ -554,7 +612,7 @@ func (e *ociEnvironment) deleteGHCRVersion(ctx context.Context, org, pkg string,
 		}()
 
 		if resp.StatusCode != http.StatusNoContent {
-			message, readErr := io.ReadAll(resp.Body)
+			message, readErr := io.ReadAll(resp.Body) // fixme inerr
 			if readErr != nil {
 				return fmt.Errorf("unexpected status %q", resp.Status)
 			}
