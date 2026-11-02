@@ -57,7 +57,7 @@ func (p *rbscTarget) Publish(ctx context.Context, flavor string, manifest *garde
 	baseName := fmt.Sprintf("%s-%s-%s", flavor, manifest.Version, commit)
 	features := strings.Join(manifest.Modifiers, ",")
 
-	repo, err := p.repository(manifest.PublishingGroup)
+	ref, err := p.repositoryRef(manifest.PublishingGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func (p *rbscTarget) Publish(ctx context.Context, flavor string, manifest *garde
 	if err != nil {
 		return nil, err
 	}
-	ctx = log.WithValues(ctx, "repository", repo, "architecture", arch, "source", p.pubCfg.Source)
+	ctx = log.WithValues(ctx, "repository", ref, "architecture", arch, "source", p.pubCfg.Source)
 
 	var buildTime time.Time
 	buildTime, err = time.ParseInLocation("2006-01-02 15:04:05.999999", manifest.BuildTimestamp, time.UTC)
@@ -163,10 +163,10 @@ func (p *rbscTarget) Publish(ctx context.Context, flavor string, manifest *garde
 	}
 	ctx = log.WithValues(ctx, "digest", manifestDescriptor.Digest)
 
-	environment := p.environment(repo)
+	repository := p.repository(ref)
 
 	log.Debug(ctx, "Copying artifact")
-	err = environment.copyGraph(ctx, store, manifestDescriptor)
+	err = repository.copyGraph(ctx, store, manifestDescriptor)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (p *rbscTarget) Publish(ctx context.Context, flavor string, manifest *garde
 	}
 
 	return ociIndividualOutput{
-		Repository:   repo,
+		Repository:   ref,
 		Digest:       manifestDescriptor.Digest.String(),
 		Size:         manifestDescriptor.Size,
 		Architecture: manifest.Architecture,
@@ -238,11 +238,11 @@ func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest
 		return nil, errors.New("config not set")
 	}
 
-	repo, err := p.repository(manifests[0].PublishingGroup)
+	ref, err := p.repositoryRef(manifests[0].PublishingGroup)
 	if err != nil {
 		return nil, err
 	}
-	environment := p.environment(repo)
+	repository := p.repository(ref)
 
 	descriptors := make([]specsv1.Descriptor, 0, len(manifests))
 	for _, manifest := range manifests {
@@ -252,8 +252,8 @@ func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest
 			return nil, fmt.Errorf("invalid manifest %s: %w", manifest.Flavor, err)
 		}
 
-		if output.Repository != repo {
-			return nil, fmt.Errorf("artifact repository %s does not match target repository %s", output.Repository, repo)
+		if output.Repository != ref {
+			return nil, fmt.Errorf("artifact repository %s does not match target repository %s", output.Repository, ref)
 		}
 
 		var arch string
@@ -278,7 +278,7 @@ func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest
 			},
 		})
 	}
-	ctx = log.WithValues(ctx, "repository", repo, "tag", manifests[0].Version)
+	ctx = log.WithValues(ctx, "repository", ref, "tag", manifests[0].Version)
 
 	index := specsv1.Index{
 		SchemaVersion: 2,
@@ -299,31 +299,24 @@ func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest
 	}
 	ctx = log.WithValues(ctx, "digest", descriptor.Digest)
 
-	ctx = resilience.BeginOperation(ctx, "fuse/"+repo+"/"+manifests[0].Version, &ociOperationState{})
+	ctx = resilience.BeginOperation(ctx, "fuse/"+ref+"/"+manifests[0].Version, &ociOperationState{})
 
 	log.Info(ctx, "Fusing OCI artifacts")
 
 	log.Debug(ctx, "Tagging artifact")
-	err = environment.retrier.Do(ctx, "push reference", func(ctx context.Context) error {
-		inErr := environment.repository.PushReference(ctx, descriptor, bytes.NewReader(rawIndex), manifests[0].Version)
-		if inErr != nil {
-			return fmt.Errorf("cannot push image index: %w", inErr)
-		}
-
-		return nil
-	})
+	err = repository.pushReference(ctx, descriptor, bytes.NewReader(rawIndex), manifests[0].Version)
 	if err != nil {
 		return nil, resilience.FailOperation(ctx, err)
 	}
 	resilience.UpdateOperation(ctx, func(s *ociOperationState) *ociOperationState {
-		s.Repository = repo
+		s.Repository = ref
 		s.Tag = manifests[0].Version
 		return s
 	})
 	resilience.CompleteOperation(ctx)
 
 	return ociPublishingOutput{
-		Repository: repo,
+		Repository: ref,
 		Tag:        manifests[0].Version,
 		Digest:     descriptor.Digest.String(),
 	}, nil

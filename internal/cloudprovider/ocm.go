@@ -9,21 +9,17 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/goccy/go-yaml"
 	"github.com/opencontainers/go-digest"
 	specsv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
 	orasfile "oras.land/oras-go/v2/content/file"
-	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry"
 
 	"github.com/gardenlinux/glci/internal/credsprovider"
-	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/guard"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/module"
-)
-
-const (
-	repoSuffix = "/component-descriptors/" + gardenlinux.GardenLinuxRepo
 )
 
 //nolint:gochecknoinits // Required for automatic registration.
@@ -61,7 +57,7 @@ type ociOCMConfig struct {
 }
 
 func (p *ocmTarget) isConfigured() bool {
-	return p.environment().repository != nil
+	return p.environment().client != nil
 }
 
 func (p *ocmTarget) applyCredentials(_ context.Context, rawCreds map[string]any) error {
@@ -74,16 +70,16 @@ func (p *ocmTarget) applyCredentials(_ context.Context, rawCreds map[string]any)
 	environment.registryCredential.credentials.Store(&creds)
 	environment.credsGen.Add(1)
 
-	if environment.repository != nil {
+	if environment.client != nil {
 		return nil
 	}
 
-	var repository *remote.Repository
-	repository, err = newOCIRepository(p.ocmCfg.Repository+repoSuffix, &environment.registryCredential)
+	var client *ociClient
+	client, err = newOCIClient(&environment.registryCredential, environment.retrier)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot create OCI client: %w", err)
 	}
-	environment.repository = repository
+	environment.client = client
 
 	return nil
 }
@@ -107,7 +103,21 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 
 	log.Info(ctx, "Publishing OCM component descriptor")
 
-	storeDir, err := os.MkdirTemp("", "")
+	var d struct {
+		Component struct {
+			Name string `yaml:"name"`
+		} `yaml:"component"`
+	}
+	err := yaml.Unmarshal(descriptor, &d)
+	if err != nil {
+		return fmt.Errorf("cannot decode component descriptor: %w", err)
+	}
+	if d.Component.Name == "" {
+		return errors.New("missing component name")
+	}
+
+	var storeDir string
+	storeDir, err = os.MkdirTemp("", "")
 	if err != nil {
 		return fmt.Errorf("cannot create temporary directory: %w", err)
 	}
@@ -199,10 +209,14 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 	}
 	ctx = log.WithValues(ctx, "digest", manifestDescriptor.Digest)
 
-	environment := p.environment()
+	var repository *ociRepository
+	repository, err = newOCIRepository(p.ocmCfg.Repository+"/component-descriptors/"+d.Component.Name, p.environment())
+	if err != nil {
+		return err
+	}
 
 	log.Debug(ctx, "Copying artifact")
-	err = environment.copyGraph(ctx, store, manifestDescriptor)
+	err = repository.copyGraph(ctx, store, manifestDescriptor)
 	if err != nil {
 		return err
 	}
@@ -218,7 +232,7 @@ func (p *ocmTarget) PublishComponentDescriptor(ctx context.Context, version stri
 	}
 
 	log.Debug(ctx, "Tagging artifact")
-	err = environment.tag(ctx, manifestDescriptor, version)
+	err = repository.tag(ctx, manifestDescriptor, version)
 	if err != nil {
 		return err
 	}
@@ -239,7 +253,13 @@ func (p *ocmTarget) Configure(rawCfg map[string]any) error {
 		return errors.New("missing repository")
 	}
 
-	p.credsType = ociCredsType(p.ocmCfg.Repository)
+	var reference registry.Reference
+	reference, err = registry.ParseReference(p.ocmCfg.Repository)
+	if err != nil {
+		return fmt.Errorf("invalid OCI repository %s: %w", p.ocmCfg.Repository, err)
+	}
+	p.world.registryCredential.registry = reference.Registry
+	p.credsType = ociCredsType(reference.Registry)
 
 	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p, &p.credsSource)
 	if err != nil {
