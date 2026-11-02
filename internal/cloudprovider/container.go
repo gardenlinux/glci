@@ -58,7 +58,7 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	repo, err := p.repository(manifest.PublishingGroup)
+	ref, err := p.repositoryRef(manifest.PublishingGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +67,7 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
-	ctx = log.WithValues(ctx, "key", imagePath.S3Key, "repository", repo, "source", p.pubCfg.Source)
+	ctx = log.WithValues(ctx, "key", imagePath.S3Key, "repository", ref, "source", p.pubCfg.Source)
 
 	log.Info(ctx, "Publishing OCI container")
 
@@ -99,10 +99,10 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 	}
 	ctx = log.WithValues(ctx, "digest", manifestDescriptor.Digest)
 
-	environment := p.environment(repo)
+	repository := p.repository(ref)
 
 	log.Debug(ctx, "Copying artifact")
-	err = environment.copyGraph(ctx, store, manifestDescriptor)
+	err = repository.copyGraph(ctx, store, manifestDescriptor)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 	}
 
 	return ociIndividualOutput{
-		Repository:   repo,
+		Repository:   ref,
 		Digest:       manifestDescriptor.Digest.String(),
 		Size:         manifestDescriptor.Size,
 		Architecture: manifest.Architecture,
@@ -171,11 +171,11 @@ func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Man
 		return nil, errors.New("config not set")
 	}
 
-	repo, err := p.repository(manifests[0].PublishingGroup)
+	ref, err := p.repositoryRef(manifests[0].PublishingGroup)
 	if err != nil {
 		return nil, err
 	}
-	environment := p.environment(repo)
+	repository := p.repository(ref)
 
 	descriptors := make([]specsv1.Descriptor, 0, len(manifests))
 	for _, manifest := range manifests {
@@ -185,8 +185,8 @@ func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Man
 			return nil, fmt.Errorf("invalid manifest %s: %w", manifest.Flavor, err)
 		}
 
-		if output.Repository != repo {
-			return nil, fmt.Errorf("artifact repository %s does not match target repository %s", output.Repository, repo)
+		if output.Repository != ref {
+			return nil, fmt.Errorf("artifact repository %s does not match target repository %s", output.Repository, ref)
 		}
 
 		var arch string
@@ -205,7 +205,7 @@ func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Man
 			},
 		})
 	}
-	ctx = log.WithValues(ctx, "repository", repo, "tag", manifests[0].Version)
+	ctx = log.WithValues(ctx, "repository", ref, "tag", manifests[0].Version)
 
 	index := specsv1.Index{
 		SchemaVersion: 2,
@@ -226,31 +226,24 @@ func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Man
 	}
 	ctx = log.WithValues(ctx, "digest", descriptor.Digest)
 
-	ctx = resilience.BeginOperation(ctx, "fuse/"+repo+"/"+manifests[0].Version, &ociOperationState{})
+	ctx = resilience.BeginOperation(ctx, "fuse/"+ref+"/"+manifests[0].Version, &ociOperationState{})
 
 	log.Info(ctx, "Fusing OCI artifacts")
 
 	log.Debug(ctx, "Tagging artifact")
-	err = environment.retrier.Do(ctx, "push reference", func(ctx context.Context) error {
-		inErr := environment.repository.PushReference(ctx, descriptor, bytes.NewReader(rawIndex), manifests[0].Version)
-		if inErr != nil {
-			return fmt.Errorf("cannot push image index: %w", inErr)
-		}
-
-		return nil
-	})
+	err = repository.pushReference(ctx, descriptor, bytes.NewReader(rawIndex), manifests[0].Version)
 	if err != nil {
 		return nil, resilience.FailOperation(ctx, err)
 	}
 	resilience.UpdateOperation(ctx, func(s *ociOperationState) *ociOperationState {
-		s.Repository = repo
+		s.Repository = ref
 		s.Tag = manifests[0].Version
 		return s
 	})
 	resilience.CompleteOperation(ctx)
 
 	return ociPublishingOutput{
-		Repository: repo,
+		Repository: ref,
 		Tag:        manifests[0].Version,
 		Digest:     descriptor.Digest.String(),
 	}, nil

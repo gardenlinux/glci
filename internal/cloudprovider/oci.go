@@ -46,19 +46,92 @@ type ociTarget struct {
 
 	pubCfg ociPublishingConfig
 
-	environments map[string]*ociEnvironment
+	environments map[ociRegistryConfig]*ociEnvironment
+	repositories map[string]*ociRepository
+}
+
+type ociRegistryConfig struct {
+	registry string
+	config   string
 }
 
 type ociEnvironment struct {
 	registryCredential ociRegistryCredential
 	credsGen           atomic.Int64
 	retrier            guard.Retrier
-	repository         *remote.Repository
-	ghcrClient         *http.Client
+	client             *ociClient
+}
 
-	ghcrVersionIDsMtx sync.Mutex
-	ghcrOwnerSegment  string
-	ghcrVersionIDs    map[string]int64
+type ociClient struct {
+	registryClient remote.Client
+	ghcrClient     *http.Client
+	retrier        guard.Retrier
+
+	ghcrCachesMtx     sync.Mutex
+	ghcrVersionCaches map[string]*ghcrVersionCache
+}
+
+type ghcrVersionCache struct {
+	versionsMtx  sync.Mutex
+	ownerSegment string
+	versionIDs   map[string]int64
+}
+
+type ociRepository struct {
+	environment *ociEnvironment
+	repository  *remote.Repository
+}
+
+type ociPublishingConfig struct {
+	Source       string                         `mapstructure:"source"`
+	Repositories map[string]ociRepositoryConfig `mapstructure:"repositories"`
+}
+
+type ociRepositoryConfig struct {
+	Repository   string `mapstructure:"repository"`
+	Config       string `mapstructure:"config"`
+	AllowsDelete bool   `mapstructure:"allows_delete,omitzero"`
+}
+
+func (p *ociTarget) isConfigured() bool {
+	if len(p.environments) == 0 {
+		return false
+	}
+
+	for _, environment := range p.environments {
+		if environment.client == nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+type ociOperationState struct {
+	Repository string `json:"repository,omitzero"`
+	Tag        string `json:"tag,omitzero"`
+}
+
+type ociPublishingOutput struct {
+	Repository string `yaml:"repository,omitzero"`
+	Tag        string `yaml:"tag,omitzero"`
+	Digest     string `yaml:"digest,omitzero"`
+}
+
+type ociIndividualOutput struct {
+	Repository   string
+	Digest       string
+	Size         int64
+	Architecture gardenlinux.Architecture
+}
+
+type ociCredentials struct {
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+}
+
+type ociGCPCredentials struct {
+	Token string `mapstructure:"token"`
 }
 
 type ociRegistryCredential struct {
@@ -82,114 +155,71 @@ func (c *ociRegistryCredential) credential(_ context.Context, hostport string) (
 	}, nil
 }
 
-func (e *ociEnvironment) copyGraph(ctx context.Context, source content.ReadOnlyStorage, descriptor specsv1.Descriptor) error {
-	return e.retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
-		inErr := oras.CopyGraph(ctx, source, e.repository, descriptor, oras.DefaultCopyGraphOptions)
-		if inErr != nil {
-			return fmt.Errorf("cannot copy OCI artifact: %w", inErr)
-		}
-
-		return nil
-	})
-}
-
-func (e *ociEnvironment) tag(ctx context.Context, descriptor specsv1.Descriptor, tag string) error {
-	return e.retrier.Do(ctx, "tag", func(ctx context.Context) error {
-		inErr := e.repository.Tag(ctx, descriptor, tag)
-		if inErr != nil {
-			return fmt.Errorf("cannot tag OCI artifact: %w", inErr)
-		}
-
-		return nil
-	})
-}
-
-type ociPublishingConfig struct {
-	Source       string                         `mapstructure:"source"`
-	Repositories map[string]ociRepositoryConfig `mapstructure:"repositories"`
-}
-
-type ociRepositoryConfig struct {
-	Repository   string `mapstructure:"repository"`
-	Config       string `mapstructure:"config"`
-	AllowsDelete bool   `mapstructure:"allows_delete,omitzero"`
-}
-
-type ociOperationState struct {
-	Repository string `json:"repository,omitzero"`
-	Tag        string `json:"tag,omitzero"`
-}
-
-type ociPublishingOutput struct {
-	Repository string `yaml:"repository,omitzero"`
-	Tag        string `yaml:"tag,omitzero"`
-	Digest     string `yaml:"digest,omitzero"`
-}
-
-type ociIndividualOutput struct {
-	Repository   string
-	Digest       string
-	Size         int64
-	Architecture gardenlinux.Architecture
-}
-
-func (p *ociTarget) isConfigured() bool {
-	if len(p.environments) == 0 {
-		return false
-	}
-
-	for _, environment := range p.environments {
-		if environment.repository == nil {
-			return false
-		}
-	}
-
-	return true
-}
-
-func (p *ociTarget) applyCredentials(_ context.Context, repo string, rawCreds map[string]any) error {
-	creds, err := parseOCICredentials(ociCredsType(repo), rawCreds)
+func (p *ociTarget) applyCredentials(_ context.Context, registryConfig ociRegistryConfig, rawCreds map[string]any) error {
+	creds, err := parseOCICredentials(ociCredsType(registryConfig.registry), rawCreds)
 	if err != nil {
 		return err
 	}
 
-	environment := p.environment(repo)
+	environment := p.environments[registryConfig]
 	environment.registryCredential.credentials.Store(&creds)
 	environment.credsGen.Add(1)
 
-	if environment.repository != nil {
+	if environment.client != nil {
 		return nil
 	}
 
-	var repository *remote.Repository
-	repository, err = newOCIRepository(repo, &environment.registryCredential)
+	var client *ociClient
+	client, err = newOCIClient(&environment.registryCredential, environment.retrier)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot create OCI client: %w", err)
 	}
-
-	environment.repository = repository
-
-	switch environment.registryCredential.registry {
-	case "ghcr.io":
-		var ghcrClient *http.Client
-		ghcrClient, err = newGHCRClient(&environment.registryCredential)
-		if err != nil {
-			return err
-		}
-
-		environment.ghcrClient = ghcrClient
-
-	default:
-	}
+	environment.client = client
 
 	return nil
 }
 
-func (p *ociTarget) environment(repo string) *ociEnvironment {
-	return p.environments[repo]
+func ociCredsType(registry string) string {
+	switch registry {
+	case "europe-docker.pkg.dev":
+		return "GCP"
+
+	default:
+		return "userpass"
+	}
 }
 
-func (p *ociTarget) repository(group string) (string, error) {
+func parseOCICredentials(credsType string, rawCreds map[string]any) (ociCredentials, error) {
+	var creds ociCredentials
+	switch credsType {
+	case "GCP":
+		var gcpCreds ociGCPCredentials
+		err := parseCredentials(rawCreds, &gcpCreds)
+		if err != nil {
+			return ociCredentials{}, err
+		}
+
+		creds.Username = "oauth2accesstoken"
+		creds.Password = gcpCreds.Token
+
+	case "userpass":
+		err := parseCredentials(rawCreds, &creds)
+		if err != nil {
+			return ociCredentials{}, err
+		}
+
+	default:
+		return ociCredentials{}, fmt.Errorf("unknown credentials type %s", credsType)
+	}
+
+	return creds, nil
+}
+
+func (p *ociTarget) repository(ref string) *ociRepository {
+	return p.repositories[ref]
+}
+
+func (p *ociTarget) repositoryRef(group string) (string, error) {
 	repoCfg, ok := p.pubCfg.Repositories[group]
 	if !ok {
 		return "", fmt.Errorf("missing repository for group %s", group)
@@ -198,13 +228,26 @@ func (p *ociTarget) repository(group string) (string, error) {
 	return repoCfg.Repository, nil
 }
 
+func (*ociTarget) architecture(arch gardenlinux.Architecture) (string, error) {
+	switch arch {
+	case gardenlinux.ArchitectureAMD64:
+		return "amd64", nil
+
+	case gardenlinux.ArchitectureARM64:
+		return "arm64", nil
+
+	default:
+		return "", fmt.Errorf("unknown architecture %s", arch)
+	}
+}
+
 func (p *ociTarget) ValidateFlavors(manifests []*gardenlinux.Manifest) error {
 	for _, manifest := range manifests {
 		if manifest.PublishingGroup == "" {
 			return fmt.Errorf("flavor %s has no publishing group", manifest.Flavor)
 		}
 
-		_, err := p.repository(manifest.PublishingGroup)
+		_, err := p.repositoryRef(manifest.PublishingGroup)
 		if err != nil {
 			return err
 		}
@@ -246,15 +289,15 @@ func (*ociTarget) CanFuse() bool {
 func (p *ociTarget) FlavorsDestination(manifests []*gardenlinux.Manifest) (string, error) {
 	var destination string
 	for _, manifest := range manifests {
-		repo, err := p.repository(manifest.PublishingGroup)
+		ref, err := p.repositoryRef(manifest.PublishingGroup)
 		if err != nil {
 			return "", err
 		}
 
-		if destination != "" && repo != destination {
-			return "", fmt.Errorf("flavors route to different repositories %s and %s", destination, repo)
+		if destination != "" && ref != destination {
+			return "", fmt.Errorf("flavors route to different repositories %s and %s", destination, ref)
 		}
-		destination = repo
+		destination = ref
 	}
 	if destination == "" {
 		return "", errors.New("missing flavors")
@@ -276,31 +319,18 @@ func (p *ociTarget) Unfuse(ctx context.Context, manifests []*gardenlinux.Manifes
 		return errors.New("missing tag")
 	}
 
-	environment := p.environment(output.Repository)
-	if environment == nil {
+	repository := p.repository(output.Repository)
+	if repository == nil {
 		return fmt.Errorf("repository %s not configured", output.Repository)
 	}
 	ctx = log.WithValues(ctx, "repository", output.Repository, "tag", output.Tag)
 
-	err = p.deleteTag(ctx, environment, output.Tag, steamroll)
+	err = repository.deleteTag(ctx, output.Tag, steamroll)
 	if err != nil {
 		return fmt.Errorf("cannot delete tag %s: %w", output.Tag, err)
 	}
 
 	return nil
-}
-
-func (*ociTarget) architecture(arch gardenlinux.Architecture) (string, error) {
-	switch arch {
-	case gardenlinux.ArchitectureAMD64:
-		return "amd64", nil
-
-	case gardenlinux.ArchitectureARM64:
-		return "arm64", nil
-
-	default:
-		return "", fmt.Errorf("unknown architecture %s", arch)
-	}
 }
 
 func (p *ociTarget) Rollback(ctx context.Context, operations map[string]resilience.Operation) error {
@@ -318,13 +348,13 @@ func (p *ociTarget) Rollback(ctx context.Context, operations map[string]resilien
 			continue
 		}
 
-		environment := p.environment(state.Repository)
-		if environment == nil {
+		repository := p.repository(state.Repository)
+		if repository == nil {
 			return fmt.Errorf("repository %s not configured", state.Repository)
 		}
 
 		lctx := log.WithValues(ctx, "repository", state.Repository, "tag", state.Tag)
-		err = p.deleteTag(lctx, environment, state.Tag, true)
+		err = repository.deleteTag(lctx, state.Tag, true)
 		if err != nil {
 			return fmt.Errorf("cannot delete tag %s: %w", state.Tag, err)
 		}
@@ -333,12 +363,12 @@ func (p *ociTarget) Rollback(ctx context.Context, operations map[string]resilien
 	return nil
 }
 
-func (*ociTarget) deleteTag(ctx context.Context, environment *ociEnvironment, tag string, steamroll bool) error {
+func (r *ociRepository) deleteTag(ctx context.Context, tag string, steamroll bool) error {
 	log.Debug(ctx, "Resolving tag")
 	var descriptor specsv1.Descriptor
-	err := environment.retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
+	err := r.environment.retrier.Do(ctx, "resolve tag", func(ctx context.Context) error {
 		var inErr error
-		descriptor, inErr = environment.repository.Resolve(ctx, tag)
+		descriptor, inErr = r.repository.Resolve(ctx, tag)
 		if inErr != nil {
 			return fmt.Errorf("cannot resolve tag: %w", inErr)
 		}
@@ -355,36 +385,39 @@ func (*ociTarget) deleteTag(ctx context.Context, environment *ociEnvironment, ta
 	}
 
 	log.Info(ctx, "Deleting image index")
-	switch environment.repository.Reference.Registry {
-	case "ghcr.io":
-		return environment.deleteGHCRVersionTree(ctx, descriptor, steamroll)
+	return r.environment.client.deleteIndex(ctx, r.repository, descriptor, steamroll)
+}
 
-	default:
-		err = environment.retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
-			inErr := environment.repository.Manifests().Delete(ctx, descriptor)
-			if inErr != nil {
-				return fmt.Errorf("cannot delete image index %s: %w", descriptor.Digest, inErr)
-			}
+func (c *ociClient) deleteIndex(ctx context.Context, repository *remote.Repository, descriptor specsv1.Descriptor, steamroll bool) error {
+	if c.ghcrClient != nil {
+		return c.deleteGHCRVersionTree(ctx, repository, descriptor, steamroll)
+	}
 
-			return nil
-		})
-		if err != nil {
-			if steamroll && errors.Is(err, errdef.ErrNotFound) {
-				log.Debug(ctx, "Image index not found but the steamroller keeps going")
-				return nil
-			}
-
-			return err
+	err := c.retrier.Do(ctx, "delete manifest", func(ctx context.Context) error {
+		inErr := repository.Manifests().Delete(ctx, descriptor)
+		if inErr != nil {
+			return fmt.Errorf("cannot delete image index %s: %w", descriptor.Digest, inErr)
 		}
 
 		return nil
+	})
+	if err != nil {
+		if steamroll && errors.Is(err, errdef.ErrNotFound) {
+			log.Debug(ctx, "Image index not found but the steamroller keeps going")
+			return nil
+		}
+
+		return err
 	}
+
+	return nil
 }
 
-func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor specsv1.Descriptor, steamroll bool) error {
-	owner, pkg, ok := strings.Cut(e.repository.Reference.Repository, "/")
+func (c *ociClient) deleteGHCRVersionTree(ctx context.Context, repository *remote.Repository, descriptor specsv1.Descriptor, steamroll bool,
+) error {
+	owner, pkg, ok := strings.Cut(repository.Reference.Repository, "/")
 	if !ok {
-		return fmt.Errorf("invalid ghcr repository %q: expected owner/package", e.repository.Reference.Repository)
+		return fmt.Errorf("invalid ghcr repository %q: expected owner/package", repository.Reference.Repository)
 	}
 
 	return graph.WalkTree(descriptor, func(d specsv1.Descriptor) ([]specsv1.Descriptor, error) {
@@ -394,21 +427,21 @@ func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor s
 
 		log.Debug(ctx, "Fetching image index", "digest", d.Digest)
 		var rawIndex []byte
-		inErr := e.retrier.Do(ctx, "fetch image index", func(ctx context.Context) error {
-			r, inInErr := e.repository.Fetch(ctx, d)
+		inErr := c.retrier.Do(ctx, "fetch image index", func(ctx context.Context) error {
+			reader, inInErr := repository.Fetch(ctx, d)
 			if inInErr != nil {
 				return fmt.Errorf("cannot fetch image index: %w", inInErr)
 			}
 			defer func() {
-				_ = r.Close()
+				_ = reader.Close()
 			}()
 
-			rawIndex, inInErr = content.ReadAll(r, d)
+			rawIndex, inInErr = content.ReadAll(reader, d)
 			if inInErr != nil {
 				return fmt.Errorf("cannot read image index: %w", inInErr)
 			}
 
-			inInErr = r.Close()
+			inInErr = reader.Close()
 			if inInErr != nil {
 				return fmt.Errorf("cannot close image index: %w", inInErr)
 			}
@@ -430,7 +463,7 @@ func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor s
 		var id int64
 		var segment string
 		var inErr error
-		id, segment, ok, inErr = e.findGHCRVersionID(ctx, owner, pkg, d.Digest.String())
+		id, segment, ok, inErr = c.findGHCRVersionID(ctx, owner, pkg, d.Digest.String())
 		if inErr != nil {
 			return fmt.Errorf("cannot find version %s: %w", d.Digest, inErr)
 		}
@@ -445,7 +478,7 @@ func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor s
 		}
 
 		log.Debug(ctx, "Deleting package version", "digest", d.Digest)
-		inErr = e.deleteGHCRVersion(ctx, segment, owner, pkg, id)
+		inErr = c.deleteGHCRVersion(ctx, segment, owner, pkg, id)
 		if inErr != nil {
 			return fmt.Errorf("cannot delete version %s: %w", d.Digest, inErr)
 		}
@@ -454,35 +487,49 @@ func (e *ociEnvironment) deleteGHCRVersionTree(ctx context.Context, descriptor s
 	})
 }
 
-func (e *ociEnvironment) findGHCRVersionID(ctx context.Context, owner, pkg, digest string) (int64, string, bool, error) {
-	e.ghcrVersionIDsMtx.Lock()
-	defer e.ghcrVersionIDsMtx.Unlock()
+func (c *ociClient) findGHCRVersionID(ctx context.Context, owner, pkg, digest string) (int64, string, bool, error) {
+	var cache *ghcrVersionCache
+	func() {
+		c.ghcrCachesMtx.Lock()
+		defer c.ghcrCachesMtx.Unlock()
 
-	if e.ghcrVersionIDs == nil {
-		segment, err := e.resolveGHCROwnerSegment(ctx, owner)
+		repository := owner + "/" + pkg
+		var ok bool
+		cache, ok = c.ghcrVersionCaches[repository]
+		if !ok {
+			cache = &ghcrVersionCache{}
+			c.ghcrVersionCaches[repository] = cache
+		}
+	}()
+
+	cache.versionsMtx.Lock()
+	defer cache.versionsMtx.Unlock()
+
+	if cache.versionIDs == nil {
+		segment, err := c.resolveGHCROwnerSegment(ctx, owner)
 		if err != nil {
 			return 0, "", false, err
 		}
 
 		var versionIDs map[string]int64
-		versionIDs, err = e.listGHCRVersionIDs(ctx, segment, owner, pkg)
+		versionIDs, err = c.listGHCRVersionIDs(ctx, segment, owner, pkg)
 		if err != nil {
 			return 0, "", false, err
 		}
 
-		e.ghcrOwnerSegment = segment
-		e.ghcrVersionIDs = versionIDs
+		cache.ownerSegment = segment
+		cache.versionIDs = versionIDs
 	}
 
-	id, ok := e.ghcrVersionIDs[digest]
+	id, ok := cache.versionIDs[digest]
 
-	return id, e.ghcrOwnerSegment, ok, nil
+	return id, cache.ownerSegment, ok, nil
 }
 
-func (e *ociEnvironment) resolveGHCROwnerSegment(ctx context.Context, owner string) (string, error) {
+func (c *ociClient) resolveGHCROwnerSegment(ctx context.Context, owner string) (string, error) {
 	log.Debug(ctx, "Resolving package owner type")
 	var ownerType string
-	err := e.retrier.Do(ctx, "get owner", func(ctx context.Context) error {
+	err := c.retrier.Do(ctx, "get owner", func(ctx context.Context) error {
 		req, inErr := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/users/"+url.PathEscape(owner), nil)
 		if inErr != nil {
 			return fmt.Errorf("cannot create request: %w", inErr)
@@ -491,7 +538,7 @@ func (e *ociEnvironment) resolveGHCROwnerSegment(ctx context.Context, owner stri
 		req.Header.Set("X-Github-Api-Version", "2026-03-10")
 
 		var resp *http.Response
-		resp, inErr = e.ghcrClient.Do(req)
+		resp, inErr = c.ghcrClient.Do(req)
 		if inErr != nil {
 			return fmt.Errorf("cannot get owner: %w", inErr)
 		}
@@ -542,7 +589,7 @@ func (e *ociEnvironment) resolveGHCROwnerSegment(ctx context.Context, owner stri
 	}
 }
 
-func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, segment, owner, pkg string) (map[string]int64, error) {
+func (c *ociClient) listGHCRVersionIDs(ctx context.Context, segment, owner, pkg string) (map[string]int64, error) {
 	type ghcrVersion struct {
 		ID   int64  `json:"id"`
 		Name string `json:"name"`
@@ -555,7 +602,7 @@ func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, segment, owner,
 	page := 1
 	for {
 		var versions []ghcrVersion
-		err := e.retrier.Do(ctx, "list package versions", func(ctx context.Context) error {
+		err := c.retrier.Do(ctx, "list package versions", func(ctx context.Context) error {
 			req, inErr := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s&page=%d", versionsURL, page), nil)
 			if inErr != nil {
 				return fmt.Errorf("cannot create request: %w", inErr)
@@ -564,7 +611,7 @@ func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, segment, owner,
 			req.Header.Set("X-Github-Api-Version", "2026-03-10")
 
 			var resp *http.Response
-			resp, inErr = e.ghcrClient.Do(req)
+			resp, inErr = c.ghcrClient.Do(req)
 			if inErr != nil {
 				return fmt.Errorf("cannot list package versions: %w", inErr)
 			}
@@ -611,8 +658,8 @@ func (e *ociEnvironment) listGHCRVersionIDs(ctx context.Context, segment, owner,
 	return versionIDs, nil
 }
 
-func (e *ociEnvironment) deleteGHCRVersion(ctx context.Context, segment, owner, pkg string, id int64) error {
-	return e.retrier.Do(ctx, "delete package version", func(ctx context.Context) error {
+func (c *ociClient) deleteGHCRVersion(ctx context.Context, segment, owner, pkg string, id int64) error {
+	return c.retrier.Do(ctx, "delete package version", func(ctx context.Context) error {
 		req, inErr := http.NewRequestWithContext(ctx, http.MethodDelete,
 			fmt.Sprintf("https://api.github.com/%s/%s/packages/container/%s/versions/%d", segment, url.PathEscape(owner),
 				url.PathEscape(pkg), id), nil)
@@ -623,7 +670,7 @@ func (e *ociEnvironment) deleteGHCRVersion(ctx context.Context, segment, owner, 
 		req.Header.Set("X-Github-Api-Version", "2026-03-10")
 
 		var resp *http.Response
-		resp, inErr = e.ghcrClient.Do(req)
+		resp, inErr = c.ghcrClient.Do(req)
 		if inErr != nil {
 			return fmt.Errorf("cannot delete package version: %w", inErr)
 		}
@@ -650,6 +697,39 @@ func (e *ociEnvironment) deleteGHCRVersion(ctx context.Context, segment, owner, 
 	})
 }
 
+func (r *ociRepository) copyGraph(ctx context.Context, source content.ReadOnlyStorage, descriptor specsv1.Descriptor) error {
+	return r.environment.retrier.Do(ctx, "copy graph", func(ctx context.Context) error {
+		inErr := oras.CopyGraph(ctx, source, r.repository, descriptor, oras.DefaultCopyGraphOptions)
+		if inErr != nil {
+			return fmt.Errorf("cannot copy OCI artifact: %w", inErr)
+		}
+
+		return nil
+	})
+}
+
+func (r *ociRepository) tag(ctx context.Context, descriptor specsv1.Descriptor, tag string) error {
+	return r.environment.retrier.Do(ctx, "tag", func(ctx context.Context) error {
+		inErr := r.repository.Tag(ctx, descriptor, tag)
+		if inErr != nil {
+			return fmt.Errorf("cannot tag OCI artifact: %w", inErr)
+		}
+
+		return nil
+	})
+}
+
+func (r *ociRepository) pushReference(ctx context.Context, descriptor specsv1.Descriptor, reader io.Reader, tag string) error {
+	return r.environment.retrier.Do(ctx, "push reference", func(ctx context.Context) error {
+		inErr := r.repository.PushReference(ctx, descriptor, reader, tag)
+		if inErr != nil {
+			return fmt.Errorf("cannot push image index: %w", inErr)
+		}
+
+		return nil
+	})
+}
+
 func (p *ociTarget) Configure(rawCfg map[string]any) error {
 	err := parseConfig(rawCfg, &p.pubCfg)
 	if err != nil {
@@ -663,7 +743,9 @@ func (p *ociTarget) Configure(rawCfg map[string]any) error {
 		return errors.New("missing repositories")
 	}
 
-	p.environments = make(map[string]*ociEnvironment, len(p.pubCfg.Repositories))
+	p.environments = make(map[ociRegistryConfig]*ociEnvironment)
+	p.repositories = make(map[string]*ociRepository)
+	seen := make(map[string]struct{}, len(p.pubCfg.Repositories))
 	for group, repoCfg := range p.pubCfg.Repositories {
 		switch {
 		case repoCfg.Repository == "":
@@ -672,17 +754,39 @@ func (p *ociTarget) Configure(rawCfg map[string]any) error {
 			return fmt.Errorf("missing config for %s", group)
 		}
 
-		_, ok := p.environments[repoCfg.Repository]
+		_, ok := seen[repoCfg.Repository]
 		if ok {
 			return fmt.Errorf("repository %s configured for multiple groups", repoCfg.Repository)
 		}
+		seen[repoCfg.Repository] = struct{}{}
 
-		environment := &ociEnvironment{}
-		environment.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
-			return int(environment.credsGen.Load())
-		}), guard.DelegatingTimeoutPolicy{})
+		var repository *remote.Repository
+		repository, err = remote.NewRepository(repoCfg.Repository)
+		if err != nil {
+			return fmt.Errorf("invalid OCI repository %s: %w", repoCfg.Repository, err)
+		}
 
-		p.environments[repoCfg.Repository] = environment
+		registryConfig := ociRegistryConfig{
+			registry: repository.Reference.Registry,
+			config:   repoCfg.Config,
+		}
+
+		var environment *ociEnvironment
+		environment, ok = p.environments[registryConfig]
+		if !ok {
+			environment = &ociEnvironment{}
+			environment.registryCredential.registry = registryConfig.registry
+			environment.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+				return int(environment.credsGen.Load())
+			}), guard.DelegatingTimeoutPolicy{})
+
+			p.environments[registryConfig] = environment
+		}
+
+		p.repositories[repoCfg.Repository] = &ociRepository{
+			environment: environment,
+			repository:  repository,
+		}
 	}
 
 	err = p.base.RegisterTypeRef[credsprovider.CredsSource](p.self, &p.credsSource)
@@ -704,32 +808,41 @@ func (*ociTarget) Configurables() []module.Configurable {
 
 func (p *ociTarget) Start(ctx context.Context) error {
 	acquireCreds := concurrency.NewActivity(ctx)
-	for _, repoCfg := range p.pubCfg.Repositories {
+	for registryConfig := range p.environments {
 		acquireCreds.Go(func(ctx context.Context) error {
 			err := p.credsSource.AcquireCreds(ctx, credsprovider.CredsID{
-				Type:      "OCI_" + ociCredsType(repoCfg.Repository),
-				Config:    repoCfg.Config,
-				Qualifier: repoCfg.Repository,
+				Type:      "OCI_" + ociCredsType(registryConfig.registry),
+				Config:    registryConfig.config,
+				Qualifier: registryConfig.registry,
 				Role:      "target",
 			}, func(ctx context.Context, creds map[string]any) error {
-				return p.applyCredentials(ctx, repoCfg.Repository, creds)
+				return p.applyCredentials(ctx, registryConfig, creds)
 			})
 			if err != nil {
-				return fmt.Errorf("cannot acquire credentials for config %s: %w", repoCfg.Config, err)
+				return fmt.Errorf("cannot acquire credentials for config %s: %w", registryConfig.config, err)
 			}
 
 			return nil
 		})
 	}
-	return acquireCreds.Wait()
+	err := acquireCreds.Wait()
+	if err != nil {
+		return err
+	}
+
+	for _, repository := range p.repositories {
+		repository.repository.Client = repository.environment.client.registryClient
+	}
+
+	return nil
 }
 
 func (p *ociTarget) Stop(ctx context.Context) error {
-	for _, repoCfg := range p.pubCfg.Repositories {
+	for registryConfig := range p.environments {
 		p.credsSource.ReleaseCreds(ctx, credsprovider.CredsID{
-			Type:      "OCI_" + ociCredsType(repoCfg.Repository),
-			Config:    repoCfg.Config,
-			Qualifier: repoCfg.Repository,
+			Type:      "OCI_" + ociCredsType(registryConfig.registry),
+			Config:    registryConfig.config,
+			Qualifier: registryConfig.registry,
 			Role:      "target",
 		})
 	}
@@ -737,74 +850,50 @@ func (p *ociTarget) Stop(ctx context.Context) error {
 	return nil
 }
 
-type ociCredentials struct {
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
-}
-
-type ociGCPCredentials struct {
-	Token string `mapstructure:"token"`
-}
-
-func ociCredsType(repository string) string {
-	switch {
-	case strings.HasPrefix(repository, "europe-docker.pkg.dev/"):
-		return "GCP"
-
-	default:
-		return "userpass"
-	}
-}
-
-func parseOCICredentials(credsType string, rawCreds map[string]any) (ociCredentials, error) {
-	var creds ociCredentials
-	switch credsType {
-	case "GCP":
-		var gcpCreds ociGCPCredentials
-		err := parseCredentials(rawCreds, &gcpCreds)
-		if err != nil {
-			return ociCredentials{}, err
-		}
-
-		creds.Username = "oauth2accesstoken"
-		creds.Password = gcpCreds.Token
-
-	case "userpass":
-		err := parseCredentials(rawCreds, &creds)
-		if err != nil {
-			return ociCredentials{}, err
-		}
-
-	default:
-		return ociCredentials{}, fmt.Errorf("unknown credentials type %s", credsType)
-	}
-
-	return creds, nil
-}
-
-func newOCIRepository(repo string, registryCredential *ociRegistryCredential) (*remote.Repository, error) {
-	repository, err := remote.NewRepository(repo)
-	if err != nil {
-		return nil, fmt.Errorf("invalid OCI repository %s: %w", repo, err)
-	}
-
-	registryCredential.registry = repository.Reference.Registry
-
-	var transport *retry.Transport
-	transport, err = newRetryTransport()
+func newOCIClient(registryCredential *ociRegistryCredential, retrier guard.Retrier) (*ociClient, error) {
+	transport, err := newRetryTransport()
 	if err != nil {
 		return nil, err
 	}
 
-	repository.Client = &auth.Client{
-		Client: &http.Client{
-			Transport: transport,
+	client := &ociClient{
+		registryClient: &auth.Client{
+			Client: &http.Client{
+				Transport: transport,
+			},
+			Cache:      auth.NewCache(),
+			Credential: registryCredential.credential,
 		},
-		Cache:      auth.NewCache(),
-		Credential: registryCredential.credential,
+		retrier: retrier,
 	}
 
-	return repository, nil
+	switch registryCredential.registry {
+	case "ghcr.io":
+		client.ghcrClient, err = newGHCRClient(registryCredential)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create GHCR client: %w", err)
+		}
+
+		client.ghcrVersionCaches = make(map[string]*ghcrVersionCache)
+
+	default:
+	}
+
+	return client, nil
+}
+
+func newOCIRepository(ref string, environment *ociEnvironment) (*ociRepository, error) {
+	repository, err := remote.NewRepository(ref)
+	if err != nil {
+		return nil, fmt.Errorf("invalid OCI repository %s: %w", ref, err)
+	}
+
+	repository.Client = environment.client.registryClient
+
+	return &ociRepository{
+		environment: environment,
+		repository:  repository,
+	}, nil
 }
 
 type ghcrTransport struct {
