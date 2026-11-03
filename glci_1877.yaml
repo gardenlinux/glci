@@ -185,6 +185,10 @@ publishing:
       - na-us-2
       - na-us-3
   ocm:
+    project_repository: github.com/gardenlinux/gardenlinux
+    provider: SAP SE
+    responsibles:
+    - andre.russ@sap.com
     target: OCI
     config: gardener
     repository: europe-docker.pkg.dev/gardener-project/releases

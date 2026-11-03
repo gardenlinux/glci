@@ -485,8 +485,6 @@ GLCI normally deletes the image index referenced by the publishing group's tag. 
 
 For `ghcr.io`, GLCI explicitly deletes the GitHub package versions corresponding to the image index and its child manifests. The credential's `password` must be a token that supports both registry authentication and the required GitHub package API operations.
 
-**Limitation.** GLCI's GHCR cleanup currently supports organization-owned packages only.
-
 ### State storage reference
 
 #### File state
@@ -517,6 +515,14 @@ GLCI creates an OCM v2 descriptor containing image and root filesystem resources
 
 **Limitation.** For Container, the descriptor's image resource points to the source `.oci` archive rather than the container image published to the registry.
 
+These settings apply to the descriptor regardless of the output type selected by `target`:
+
+| Key | Type | Requirement or default | Description |
+| --- | --- | --- | --- |
+| `project_repository` | String | Required | Repository of the released project, recorded as the component name and its git source. |
+| `provider` | String | Required | Component provider recorded in the descriptor, such as an organization name. |
+| `responsibles` | List of strings | `[]` | Email addresses of responsible parties on the root filesystem resource. |
+
 #### File output
 
 Use `target: File`.
@@ -535,9 +541,7 @@ Use `target: OCI`.
 | `config` | String | Required | Credential set for repository access. |
 | `repository` | String | Required | OCI repository context recorded inside the descriptor. GLCI also publishes the descriptor beneath this repository base. |
 
-Grant registry push access beneath `repository`. GLCI writes the descriptor at `component-descriptors/github.com/gardenlinux/gardenlinux:<version>` beneath that base. For credential lookup, see [Credential provider reference](#credential-provider-reference).
-
-**Limitation.** The component name `github.com/gardenlinux/gardenlinux` is hardcoded.
+Grant registry push access beneath `repository`. GLCI writes the descriptor at `component-descriptors/<project_repository>:<version>` beneath that base. For credential lookup, see [Credential provider reference](#credential-provider-reference).
 
 ### Credential provider reference
 

@@ -77,8 +77,8 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	}
 
 	var descriptor *ocm.ComponentDescriptor
-	descriptor, err = ocm.BuildComponentDescriptor(ctx, p.manifestSource, manifestsInDescriptor, p.ocmTarget, p.aliases, cli.Version(ctx),
-		version, commit)
+	descriptor, err = ocm.BuildComponentDescriptor(ctx, p.manifestSource, manifestsInDescriptor, p.cfg.OCM.ProjectRepository,
+		p.cfg.OCM.Provider, p.cfg.OCM.Responsibles, p.ocmTarget, p.aliases, cli.Version(ctx), version, commit)
 	if err != nil {
 		return fmt.Errorf("cannot build component descriptor: %w", err)
 	}
