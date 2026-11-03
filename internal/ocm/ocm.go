@@ -17,11 +17,6 @@ import (
 	"github.com/gardenlinux/glci/internal/ocm/access"
 )
 
-const (
-	componentProvider = "SAP SE"
-	githubRepoURL     = "https://" + gardenlinux.GardenLinuxRepo
-)
-
 // ComponentDescriptor is an OCM data structure that Gardener consumes.
 type ComponentDescriptor struct {
 	Meta      componentDescriptorMetadata  `yaml:"meta"`
@@ -108,7 +103,8 @@ type ManifestTarget struct {
 
 // BuildComponentDescriptor generates a component desciptor that includes all data except the results of the publishing process.
 func BuildComponentDescriptor(ctx context.Context, source cloudprovider.ArtifactSource, manifestTargets []ManifestTarget,
-	ocmTarget cloudprovider.OCMTarget, aliases map[string][]string, glciVersion, version, commit string,
+	projectRepository, provider string, responsibles []string, ocmTarget cloudprovider.OCMTarget, aliases map[string][]string, glciVersion,
+	version, commit string,
 ) (*ComponentDescriptor, error) {
 	log.Debug(ctx, "Building component descriptor")
 
@@ -117,7 +113,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			ConfiguredVersion: "v2",
 		},
 		Component: componentDescriptorComponent{
-			Name:    gardenlinux.GardenLinuxRepo,
+			Name:    projectRepository,
 			Version: version,
 			Labels: []componentDescriptorlabel{
 				{
@@ -126,7 +122,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 				},
 			},
 			CreationTime: time.Now().Format(time.RFC3339),
-			Provider:     componentProvider,
+			Provider:     provider,
 			RepositoryContexts: []componentDescriptorRepositoryContext{
 				{
 					Type:    ocmTarget.OCMType(),
@@ -149,7 +145,7 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 					Type: "git",
 					Access: componentDescriptorGitHub{
 						Type:    "gitHub",
-						RepoURL: githubRepoURL,
+						RepoURL: "https://" + projectRepository,
 						Commit:  commit,
 					},
 				},
@@ -177,6 +173,23 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 	err := fetchPackages.Wait()
 	if err != nil {
 		return nil, err
+	}
+
+	var responsiblesLabels []componentDescriptorlabel
+	if len(responsibles) > 0 {
+		entries := make([]map[string]string, 0, len(responsibles))
+		for _, email := range responsibles {
+			entries = append(entries, map[string]string{
+				"type":  "emailAddress",
+				"email": email,
+			})
+		}
+		responsiblesLabels = []componentDescriptorlabel{
+			{
+				Name:  "cloud.gardener.cnudie/responsibles",
+				Value: entries,
+			},
+		}
 	}
 
 	for i, mt := range manifestTargets {
@@ -212,6 +225,18 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		if mt.Manifest.PlatformVariant == "" {
 			delete(extraIdentity, "platform_variant")
 		}
+
+		rootfsLabels := make([]componentDescriptorlabel, 0, 1+len(responsiblesLabels))
+		rootfsLabels = append(rootfsLabels, componentDescriptorlabel{
+			Name: "gardener.cloud/gardenlinux/ci/build-metadata",
+			Value: map[string]any{
+				"modifiers":      mt.Manifest.Modifiers,
+				"buildTimestamp": mt.Manifest.BuildTimestamp,
+				"debianPackages": getPackageList(packages[i]),
+			},
+		})
+		rootfsLabels = append(rootfsLabels, responsiblesLabels...)
+
 		descriptor.Component.Resources = append(descriptor.Component.Resources, componentDesciptorResource{
 			Name:          "gardenlinux",
 			Version:       mt.Manifest.Version,
@@ -227,26 +252,8 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 			Name:          "rootfs",
 			Version:       mt.Manifest.Version,
 			ExtraIdentity: extraIdentity,
-			Labels: []componentDescriptorlabel{
-				{
-					Name: "gardener.cloud/gardenlinux/ci/build-metadata",
-					Value: map[string]any{
-						"modifiers":      mt.Manifest.Modifiers,
-						"buildTimestamp": mt.Manifest.BuildTimestamp,
-						"debianPackages": getPackageList(packages[i]),
-					},
-				},
-				{
-					Name: "cloud.gardener.cnudie/responsibles",
-					Value: []map[string]string{
-						{
-							"type":  "emailAddress",
-							"email": "andre.russ@sap.com",
-						},
-					},
-				},
-			},
-			Type: "application/tar+vm-image-rootfs",
+			Labels:        rootfsLabels,
+			Type:          "application/tar+vm-image-rootfs",
 			Digest: componentDescriptorDigest{
 				HashAlgorithm:          "NO-DIGEST",
 				NormalisationAlgorithm: "EXCLUDE-FROM-SIGNATURE",

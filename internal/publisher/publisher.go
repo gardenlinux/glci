@@ -50,10 +50,18 @@ type publisherConfig struct {
 	ManifestSource string                                           `mapstructure:"manifest_source"`
 	ManifestTarget string                                           `mapstructure:"manifest_target,omitzero"`
 	Targets        module.SliceSlot[cloudprovider.PublishingTarget] `mapstructure:"targets"`
-	OCM            module.Slot[cloudprovider.OCMTarget]             `mapstructure:"ocm"`
+	OCM            ocmConfig                                        `mapstructure:"ocm"`
 	State          module.Slot[resilience.StatePersistor]           `mapstructure:"state"`
 	Flavors        []FlavorConfig                                   `mapstructure:"flavors"`
 	Aliases        map[string][]string                              `mapstructure:"aliases,omitempty"`
+}
+
+type ocmConfig struct {
+	ProjectRepository string   `mapstructure:"project_repository"`
+	Provider          string   `mapstructure:"provider"`
+	Responsibles      []string `mapstructure:"responsibles,omitempty"`
+	//nolint:revive,nolintlint // The remain tag overrides the -, which is necessary to avoid an implicit name.
+	Target module.Slot[cloudprovider.OCMTarget] `mapstructure:"-,remain"`
 }
 
 // NewPublisher creates a publisher.
@@ -97,10 +105,16 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 		return fmt.Errorf("cannot configure targets: %w", err)
 	}
 
-	if p.cfg.OCM == nil {
+	if p.cfg.OCM.ProjectRepository == "" {
+		return errors.New("missing OCM project repository")
+	}
+	if p.cfg.OCM.Provider == "" {
+		return errors.New("missing OCM provider")
+	}
+	if p.cfg.OCM.Target == nil {
 		return errors.New("missing OCM")
 	}
-	p.ocmTarget, err = p.base.ConfigureModule(cloudprovider.OCMTargetCategory, p.cfg.OCM)
+	p.ocmTarget, err = p.base.ConfigureModule(cloudprovider.OCMTargetCategory, p.cfg.OCM.Target)
 	if err != nil {
 		return fmt.Errorf("cannot configure OCM: %w", err)
 	}

@@ -253,6 +253,13 @@ publishing:
   # Component descriptor output for Gardener or other tooling.
   # Required even when the descriptor is unused. File output can safely be ignored.
   ocm:
+    # Required. Repository of the released project, recorded as the component name and its git source.
+    project_repository: github.com/example-org/example-project
+    # Component provider recorded in the descriptor, such as an organization name.
+    provider: Example Oraginzation
+    # Optional. Email addresses recorded as responsible parties. Omit for none.
+    responsibles:
+    - someone@example.com
     # File writes a local descriptor. Parent directory must already exist.
     target: File
     file: example-component-descriptor.yaml

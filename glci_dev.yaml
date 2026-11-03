@@ -131,6 +131,10 @@ publishing:
       regions: [ eu-nl-1 ]
     test: true
   ocm:
+    project_repository: github.com/gardenlinux/gardenlinux
+    provider: SAP SE
+    responsibles:
+    - andre.russ@sap.com
     target: OCI
     config: gardenlinux
     repository: europe-docker.pkg.dev/sap-se-gcp-gardenlinux/tests
