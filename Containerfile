@@ -27,9 +27,5 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
 
 ENTRYPOINT ["/glci"]
 COPY --from=builder /glci/glci .
-COPY glci.yaml glci.yaml
-COPY glci_2150.yaml glci_2150.yaml
-COPY glci_1877.yaml glci_1877.yaml
-COPY glci_dev.yaml glci_dev.yaml
 
 USER 65532:65532
