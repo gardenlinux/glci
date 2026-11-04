@@ -1,0 +1,28 @@
+name: Documentation Quality Check
+
+# Thin caller for the documentation CI orchestrator in gardenlinux/docs.
+#
+# All documentation-path logic and the notify/commit-lock decision live in
+# gardenlinux/docs/.github/workflows/aggregated-repo-docs.yml, which uses
+# repos-config.json as the single source of truth for documentation paths.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches: [main]
+
+jobs:
+  docs:
+    uses: gardenlinux/docs/.github/workflows/aggregated-repo-docs.yml@main
+    # The called orchestrator's detect-changes and docs-checks jobs request
+    # `pull-requests: read`. This repository restricts the default GITHUB_TOKEN
+    # to read-only (pull-requests: none), so the grant must be explicit here or
+    # the reusable workflow fails to start.
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      repo: gardenlinux
+    secrets: inherit
