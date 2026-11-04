@@ -81,7 +81,7 @@ Provision the required engines, roles, records, and access policies using the [c
 
 ### Create the configuration
 
-Start from the annotated [configuration template](glci_template.yaml). Keep the flavors and publishing targets you need, replace the deployment placeholders, and complete the manifest preparation described above. The [configuration reference](#configuration-reference) explains how the sections and references fit together.
+Start from the annotated [configuration template](https://github.com/gardenlinux/glci/blob/main/glci_template.yaml). Keep the flavors and publishing targets you need, replace the deployment placeholders, and complete the manifest preparation described above. The [configuration reference](#configuration-reference) explains how the sections and references fit together.
 
 GLCI maps configuration keys to environment variables using the `GLCI_` prefix, uppercase letters, and underscores in place of dots and hyphens. This lets a workflow supply credentials and override settings without rewriting YAML.
 
