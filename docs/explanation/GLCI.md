@@ -41,7 +41,7 @@ For your own builds, use the Garden Linux build system and store its artifacts a
 
 For unmodified upstream Garden Linux, publishing targets can read the image artifacts directly from the public `gardenlinux-github-releases` bucket. Obtain the upstream manifests, modify them to an unpublished state, and store the modified manifests in your own bucket before running GLCI. Use your bucket as the manifest source and the official bucket as the publishing targets' artifact source.
 
-GLCI writes published image metadata back to the manifests. By default, it updates them in the same bucket from which it reads them. You can configure a separate writable manifest destination if you want to keep subsequent updates apart from the prepared input manifests. The [configuration template](glci_template.yaml) reads and updates your private manifests while reading the image artifacts upstream.
+GLCI writes published image metadata back to the manifests. By default, it updates them in the same bucket from which it reads them. You can configure a separate writable manifest destination if you want to keep subsequent updates apart from the prepared input manifests. The [configuration template](https://github.com/gardenlinux/glci/blob/main/glci_template.yaml) reads and updates your private manifests while reading the image artifacts upstream.
 
 **Limitation.** GLCI requires AWS credentials even for public artifact sources. You can use credentials from your own AWS account, provided the IAM identity is allowed to read the public upstream objects.
 
@@ -235,7 +235,7 @@ GLCI manages leased credentials and renews Vault login tokens, subject to Vault'
 
 ### Configuration reference
 
-The annotated [configuration template](glci_template.yaml) provides a complete example to adapt. The tables below cover the shared settings. Implementation-specific fields are described in the corresponding reference sections.
+The annotated [configuration template](https://github.com/gardenlinux/glci/blob/main/glci_template.yaml) provides a complete example to adapt. The tables below cover the shared settings. Implementation-specific fields are described in the corresponding reference sections.
 
 Unless a different default is documented, omitted configuration values use their type's zero value. This means `false` for booleans, `0` for numbers, `""` for strings, and empty lists or maps. Required fields still need values. Some empty values have specific behavior, such as `manifest_target` falling back to `manifest_source`.
 
