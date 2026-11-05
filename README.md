@@ -4,7 +4,7 @@ GLCI publishes Garden Linux images to cloud providers and OCI registries. It rec
 
 ## Documentation
 
-The documentation is here.
+Everything you need to know is in the [documentation](docs/explanation/GLCI.md) and the [configuration template](glci_template.yaml).
 
 ![GLCI](glci.png)
 
