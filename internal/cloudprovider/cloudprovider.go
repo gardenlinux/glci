@@ -14,7 +14,6 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/goccy/go-yaml"
 
-	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/module"
 	"github.com/gardenlinux/glci/internal/ocm/access"
@@ -153,10 +152,8 @@ func GetManifest(ctx context.Context, source ArtifactSource, key string) (*garde
 	return manifest, nil
 }
 
-// PutManifest stores a manifest into an ArtifactSource, stamping the version that wrote it.
+// PutManifest stores a manifest into an ArtifactSource.
 func PutManifest(ctx context.Context, source ArtifactSource, key string, manifest *gardenlinux.Manifest) error {
-	manifest.GLCIVersion = cli.Version(ctx)
-
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	defer func() {
@@ -215,10 +212,8 @@ func GetGroupManifest(ctx context.Context, source ArtifactSource, key string) (*
 	return groupManifest, nil
 }
 
-// PutGroupManifest stores a group manifest into an ArtifactSource, stamping the version that wrote it.
+// PutGroupManifest stores a group manifest into an ArtifactSource.
 func PutGroupManifest(ctx context.Context, source ArtifactSource, key string, groupManifest *gardenlinux.GroupManifest) error {
-	groupManifest.GLCIVersion = cli.Version(ctx)
-
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	defer func() {

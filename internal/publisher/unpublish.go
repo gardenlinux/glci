@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/errorreport"
@@ -239,6 +240,7 @@ func (p *Publisher) unpublishGroup(ctx context.Context, groupPub *groupPublicati
 	}
 
 	groupPub.GroupManifest.Manifests = nil
+	groupPub.GroupManifest.GLCIVersion = cli.Version(ctx)
 
 	log.Info(ctx, "Updating group manifest")
 	err := cloudprovider.PutGroupManifest(ctx, p.manifestTarget, groupPub.manifestKey(), groupPub.GroupManifest)

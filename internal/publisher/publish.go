@@ -290,6 +290,7 @@ func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication
 	groupPub.GroupManifest = &gardenlinux.GroupManifest{
 		Version:         groupPub.publications[0].Manifest.Version,
 		BuildCommittish: groupPub.publications[0].Manifest.BuildCommittish,
+		GLCIVersion:     cli.Version(ctx),
 		Manifests:       manifestKeys,
 	}
 
