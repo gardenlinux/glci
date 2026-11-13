@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/credsprovider"
@@ -331,6 +332,7 @@ func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig
 	}
 
 	manifest.Flavor = flavorConfig.Flavor
+	manifest.GLCIVersion = cli.Version(ctx)
 	if manifest.PublishingGroup != "" && manifest.PublishingGroup != flavorConfig.PublishingGroup {
 		return nil, nil, fmt.Errorf("manifest for %s has publishing group %q conflicting with configured %q", flavorConfig.Flavor,
 			manifest.PublishingGroup, flavorConfig.PublishingGroup)
