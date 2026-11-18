@@ -16,7 +16,7 @@ require (
 	github.com/alibabacloud-go/tea v1.5.4
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.6.1
 	github.com/aliyun/credentials-go v1.4.14
-	github.com/aws/aws-sdk-go-v2 v1.47.5
+	github.com/aws/aws-sdk-go-v2 v1.47.7
 	github.com/aws/aws-sdk-go-v2/config v1.33.13
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.5.2
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.343.0
