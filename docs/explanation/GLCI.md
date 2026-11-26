@@ -1,6 +1,11 @@
 ---
 title: "GLCI"
 description: "Overview of the GLCI publishing tool"
+related_topics:
+  - /explanation/github-workflows.md
+  - /reference/supporting_tools/glrd/
+  - /how-to/releases/apt-repos.md
+  - /reference/releases/release-lifecycle.md
 github_org: gardenlinux
 github_repo: glci
 github_source_path: docs/explanation/GLCI.md
@@ -579,3 +584,7 @@ For JWT, Vault must already trust the issuer. GLCI submits the JWT to `auth/<jwt
 ## That is all
 
 If you read this far, you are awesome.
+
+## Related topics
+
+<RelatedTopics />
