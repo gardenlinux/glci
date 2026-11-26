@@ -335,6 +335,7 @@ func (*azure) listRegions(ctx context.Context, retrier guard.Retrier, subscripti
 ) ([]string, error) {
 	unusableRegions := []string{
 		"jioindiacentral",
+		"jioindiawest",
 		"chinaeast",
 		"chinanorth",
 	}
