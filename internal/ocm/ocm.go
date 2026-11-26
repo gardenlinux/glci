@@ -208,8 +208,12 @@ func BuildComponentDescriptor(ctx context.Context, source cloudprovider.Artifact
 		}
 
 		extraIdentity := map[string]string{
-			"feature-flags":    strings.Join(md.Manifest.Modifiers, ","),
-			"architecture":     string(md.Manifest.Architecture),
+			"architecture":  string(md.Manifest.Architecture),
+			"feature-flags": strings.Join(md.Manifest.Modifiers, ","),
+			"location-id": cloudprovider.Destination{
+				Target: md.Target.Type(),
+				Key:    md.Key,
+			}.String(),
 			"platform":         md.Manifest.Platform,
 			"platform_variant": md.Manifest.PlatformVariant,
 		}
