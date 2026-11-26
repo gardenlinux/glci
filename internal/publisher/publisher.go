@@ -154,6 +154,10 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 
 	flavors := make(map[string]struct{}, len(p.flavors))
 	for _, flavorConfig := range p.flavors {
+		_, ok := flavors[flavorConfig.Flavor]
+		if ok {
+			return fmt.Errorf("duplicate flavor %q", flavorConfig.Flavor)
+		}
 		flavors[flavorConfig.Flavor] = struct{}{}
 	}
 
@@ -187,11 +191,18 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 		}
 	}
 
+	seen := make(map[string]struct{}, len(p.cfg.OCM.Flavors))
 	for _, flavorCfg := range p.cfg.OCM.Flavors {
 		_, ok := flavors[flavorCfg.Flavor]
 		if !ok {
 			return fmt.Errorf("unknown flavor %q in component descriptor", flavorCfg.Flavor)
 		}
+
+		_, ok = seen[flavorCfg.Flavor]
+		if ok {
+			return fmt.Errorf("duplicate flavor %q in component descriptor", flavorCfg.Flavor)
+		}
+		seen[flavorCfg.Flavor] = struct{}{}
 
 		err = p.validateDestinations(flavorCfg.Destinations, targetDestinationKeys)
 		if err != nil {

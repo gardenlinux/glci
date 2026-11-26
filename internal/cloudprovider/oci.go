@@ -807,6 +807,10 @@ func (p *ociTarget) Configure(rawCfg map[string]any) error {
 
 			flavors := make(map[string]struct{}, len(groupCfg.Flavors))
 			for _, flavor := range groupCfg.Flavors {
+				_, ok := flavors[flavor]
+				if ok {
+					return fmt.Errorf("duplicate flavor %q in publishing group %q", flavor, group)
+				}
 				flavors[flavor] = struct{}{}
 			}
 			p.explicitPublishingGroups[group] = ociPublishingGroup{
