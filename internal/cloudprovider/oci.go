@@ -37,22 +37,55 @@ func (p *ociTarget) Type() string {
 type ociTarget struct {
 	noReplicationsTarget
 
-	base     *module.Base
-	self     module.Configurable
-	typeName string
+	base *module.Base
+	self module.Configurable
+
+	typeName                     string
+	publishingGroupsFromManifest bool
 
 	credsSource credsprovider.CredsSource
 	source      ArtifactSource
 
-	pubCfg ociPublishingConfig
+	pubCfg                   ociPublishingConfig
+	explicitPublishingGroups map[string]ociPublishingGroup
+	destinations             map[string]ociDestination
+	environments             map[ociRegistryConfig]*ociEnvironment
+	repositories             map[string]*ociRepository
+}
 
-	environments map[ociRegistryConfig]*ociEnvironment
-	repositories map[string]*ociRepository
+type ociPublishingConfig struct {
+	Source           string                              `mapstructure:"source"`
+	PublishingGroups map[string]ociPublishingGroupConfig `mapstructure:"publishing_groups"`
+}
+
+type ociPublishingGroupConfig struct {
+	Flavors      []string                        `mapstructure:"flavors,omitempty"`
+	Destinations map[string]ociDestinationConfig `mapstructure:"destinations"`
+}
+
+type ociDestinationConfig struct {
+	Repository   string `mapstructure:"repository"`
+	Config       string `mapstructure:"config"`
+	AllowsDelete bool   `mapstructure:"allows_delete,omitzero"`
+}
+
+type ociPublishingGroup struct {
+	flavors map[string]struct{}
+}
+
+type ociDestination struct {
+	publishingGroup string
+	config          ociDestinationConfig
 }
 
 type ociRegistryConfig struct {
 	registry string
 	config   string
+}
+
+type ociRepository struct {
+	environment *ociEnvironment
+	repository  *remote.Repository
 }
 
 type ociEnvironment struct {
@@ -75,22 +108,6 @@ type ghcrVersionCache struct {
 	versionsMtx  sync.Mutex
 	ownerSegment string
 	versionIDs   map[string]int64
-}
-
-type ociRepository struct {
-	environment *ociEnvironment
-	repository  *remote.Repository
-}
-
-type ociPublishingConfig struct {
-	Source       string                         `mapstructure:"source"`
-	Repositories map[string]ociRepositoryConfig `mapstructure:"repositories"`
-}
-
-type ociRepositoryConfig struct {
-	Repository   string `mapstructure:"repository"`
-	Config       string `mapstructure:"config"`
-	AllowsDelete bool   `mapstructure:"allows_delete,omitzero"`
 }
 
 func (p *ociTarget) isConfigured() bool {
@@ -219,13 +236,68 @@ func (p *ociTarget) repository(ref string) *ociRepository {
 	return p.repositories[ref]
 }
 
-func (p *ociTarget) repositoryRef(group string) (string, error) {
-	repoCfg, ok := p.pubCfg.Repositories[group]
+func (p *ociTarget) destinationRepo(key string) (string, error) {
+	dest, ok := p.destinations[key]
 	if !ok {
-		return "", fmt.Errorf("missing repository for group %s", group)
+		return "", fmt.Errorf("missing destination %q", key)
 	}
 
-	return repoCfg.Repository, nil
+	return dest.config.Repository, nil
+}
+
+func (p *ociTarget) Destinations(manifest *gardenlinux.Manifest) []Destination {
+	var destinations []Destination
+	for key, dest := range p.destinations {
+		var grouped bool
+		if p.publishingGroupsFromManifest {
+			grouped = manifest.PublishingGroup == dest.publishingGroup
+		} else {
+			_, grouped = p.explicitPublishingGroups[dest.publishingGroup].flavors[manifest.Flavor]
+		}
+
+		if grouped {
+			destinations = append(destinations, Destination{
+				Target: p.Type(),
+				Key:    key,
+			})
+		}
+	}
+
+	return destinations
+}
+
+func (p *ociTarget) DestinationPublishingGroup(key string) string {
+	return p.destinations[key].publishingGroup
+}
+
+func (p *ociTarget) PublishingGroupConfigs() []PublishingGroupConfig {
+	groups := make([]PublishingGroupConfig, 0, len(p.pubCfg.PublishingGroups))
+	for name, groupCfg := range p.pubCfg.PublishingGroups {
+		groups = append(groups, PublishingGroupConfig{
+			PublishingGroup: name,
+			Flavors:         groupCfg.Flavors,
+		})
+	}
+
+	return groups
+}
+
+func (p *ociTarget) Resources() []string {
+	resources := make([]string, 0, len(p.destinations))
+	for _, dest := range p.destinations {
+		resources = append(resources, "oci:"+dest.config.Repository)
+	}
+
+	return resources
+}
+
+func (p *ociTarget) DestinationKeys() []string {
+	destinationKeys := make([]string, 0, len(p.destinations))
+	for key := range p.destinations {
+		destinationKeys = append(destinationKeys, key)
+	}
+
+	return destinationKeys
 }
 
 func (*ociTarget) architecture(arch gardenlinux.Architecture) (string, error) {
@@ -241,27 +313,15 @@ func (*ociTarget) architecture(arch gardenlinux.Architecture) (string, error) {
 	}
 }
 
-func (p *ociTarget) ValidateFlavors(manifests []*gardenlinux.Manifest) error {
-	for _, manifest := range manifests {
-		if manifest.PublishingGroup == "" {
-			return fmt.Errorf("flavor %s has no publishing group", manifest.Flavor)
-		}
-
-		_, err := p.repositoryRef(manifest.PublishingGroup)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (p *ociTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
+func (p *ociTarget) IsPublished(manifest *gardenlinux.Manifest, key string) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
 
-	ociOutput, err := publishingOutputFromManifest[ociPublishingOutput](manifest)
+	ociOutput, err := publishingOutputFromManifest[ociPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return false, err
 	}
@@ -269,16 +329,16 @@ func (p *ociTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return ociOutput.Repository != "" && ociOutput.Tag != "" && ociOutput.Digest != "", nil
 }
 
-func (p *ociTarget) CanReverse(manifest *gardenlinux.Manifest) bool {
-	repoCfg, ok := p.pubCfg.Repositories[manifest.PublishingGroup]
+func (p *ociTarget) Reversible(_ *gardenlinux.Manifest, key string) (bool, error) {
+	dest, ok := p.destinations[key]
 	if !ok {
-		return false
+		return false, fmt.Errorf("missing destination %q", key)
 	}
 
-	return repoCfg.AllowsDelete
+	return dest.config.AllowsDelete, nil
 }
 
-func (*ociTarget) Unpublish(context.Context, *gardenlinux.Manifest, bool) error {
+func (*ociTarget) Unpublish(context.Context, *gardenlinux.Manifest, string, bool) error {
 	return nil
 }
 
@@ -286,32 +346,15 @@ func (*ociTarget) CanFuse() bool {
 	return true
 }
 
-func (p *ociTarget) FlavorsDestination(manifests []*gardenlinux.Manifest) (string, error) {
-	var destination string
-	for _, manifest := range manifests {
-		ref, err := p.repositoryRef(manifest.PublishingGroup)
-		if err != nil {
-			return "", err
-		}
-
-		if destination != "" && ref != destination {
-			return "", fmt.Errorf("flavors route to different repositories %s and %s", destination, ref)
-		}
-		destination = ref
-	}
-	if destination == "" {
-		return "", errors.New("missing flavors")
-	}
-
-	return destination, nil
-}
-
-func (p *ociTarget) Unfuse(ctx context.Context, manifests []*gardenlinux.Manifest, steamroll bool) error {
+func (p *ociTarget) Unfuse(ctx context.Context, manifests []*gardenlinux.Manifest, key string, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
 
-	output, err := publishingOutput[ociPublishingOutput](manifests[0].PublishedImageMetadata)
+	output, err := publishingOutput[ociPublishingOutput](manifests[0].PublishedImageMetadata[Destination{
+		Target: p.Type(),
+		Key:    key,
+	}.String()])
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -739,53 +782,90 @@ func (p *ociTarget) Configure(rawCfg map[string]any) error {
 	switch {
 	case p.pubCfg.Source == "":
 		return errors.New("missing source")
-	case len(p.pubCfg.Repositories) == 0:
-		return errors.New("missing repositories")
+	case len(p.pubCfg.PublishingGroups) == 0:
+		return errors.New("missing publishing groups")
 	}
 
+	p.explicitPublishingGroups = make(map[string]ociPublishingGroup, len(p.pubCfg.PublishingGroups))
+	p.destinations = make(map[string]ociDestination)
 	p.environments = make(map[ociRegistryConfig]*ociEnvironment)
 	p.repositories = make(map[string]*ociRepository)
-	seen := make(map[string]struct{}, len(p.pubCfg.Repositories))
-	for group, repoCfg := range p.pubCfg.Repositories {
-		switch {
-		case repoCfg.Repository == "":
-			return fmt.Errorf("missing repository for %s", group)
-		case repoCfg.Config == "":
-			return fmt.Errorf("missing config for %s", group)
+	seen := make(map[string]struct{})
+	for group, groupCfg := range p.pubCfg.PublishingGroups {
+		if len(groupCfg.Destinations) == 0 {
+			return fmt.Errorf("missing destinations for publishing group %q", group)
 		}
 
-		_, ok := seen[repoCfg.Repository]
-		if ok {
-			return fmt.Errorf("repository %s configured for multiple groups", repoCfg.Repository)
-		}
-		seen[repoCfg.Repository] = struct{}{}
+		if p.publishingGroupsFromManifest {
+			if len(groupCfg.Flavors) != 0 {
+				return fmt.Errorf("unexpected flavors for publishing group %q", group)
+			}
+		} else {
+			if len(groupCfg.Flavors) == 0 {
+				return fmt.Errorf("missing flavors for publishing group %q", group)
+			}
 
-		var repository *remote.Repository
-		repository, err = remote.NewRepository(repoCfg.Repository)
-		if err != nil {
-			return fmt.Errorf("invalid OCI repository %s: %w", repoCfg.Repository, err)
-		}
-
-		registryConfig := ociRegistryConfig{
-			registry: repository.Reference.Registry,
-			config:   repoCfg.Config,
-		}
-
-		var environment *ociEnvironment
-		environment, ok = p.environments[registryConfig]
-		if !ok {
-			environment = &ociEnvironment{}
-			environment.registryCredential.registry = registryConfig.registry
-			environment.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
-				return int(environment.credsGen.Load())
-			}), guard.DelegatingTimeoutPolicy{})
-
-			p.environments[registryConfig] = environment
+			flavors := make(map[string]struct{}, len(groupCfg.Flavors))
+			for _, flavor := range groupCfg.Flavors {
+				flavors[flavor] = struct{}{}
+			}
+			p.explicitPublishingGroups[group] = ociPublishingGroup{
+				flavors: flavors,
+			}
 		}
 
-		p.repositories[repoCfg.Repository] = &ociRepository{
-			environment: environment,
-			repository:  repository,
+		for key, destCfg := range groupCfg.Destinations {
+			switch {
+			case destCfg.Repository == "":
+				return fmt.Errorf("missing repository for destination %q", key)
+
+			case destCfg.Config == "":
+				return fmt.Errorf("missing config for destination %q", key)
+			}
+
+			_, ok := p.destinations[key]
+			if ok {
+				return fmt.Errorf("duplicate destination %q", key)
+			}
+
+			_, ok = seen[destCfg.Repository]
+			if ok {
+				return fmt.Errorf("duplicate repository %q", destCfg.Repository)
+			}
+			seen[destCfg.Repository] = struct{}{}
+
+			var repository *remote.Repository
+			repository, err = remote.NewRepository(destCfg.Repository)
+			if err != nil {
+				return fmt.Errorf("invalid OCI repository %s: %w", destCfg.Repository, err)
+			}
+
+			registryConfig := ociRegistryConfig{
+				registry: repository.Reference.Registry,
+				config:   destCfg.Config,
+			}
+
+			var environment *ociEnvironment
+			environment, ok = p.environments[registryConfig]
+			if !ok {
+				environment = &ociEnvironment{}
+				environment.registryCredential.registry = registryConfig.registry
+				environment.retrier = guard.NewRetrier(guard.NewGenerationalRetryPolicy(func() int {
+					return int(environment.credsGen.Load())
+				}), guard.DelegatingTimeoutPolicy{})
+
+				p.environments[registryConfig] = environment
+			}
+
+			p.repositories[destCfg.Repository] = &ociRepository{
+				environment: environment,
+				repository:  repository,
+			}
+
+			p.destinations[key] = ociDestination{
+				publishingGroup: group,
+				config:          destCfg,
+			}
 		}
 	}
 

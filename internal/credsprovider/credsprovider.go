@@ -19,6 +19,7 @@ type CredsSource interface {
 	module.Module
 
 	Type() string
+
 	AcquireCreds(ctx context.Context, id CredsID, apply ApplyCredsFunc) error
 	ReleaseCreds(ctx context.Context, id CredsID)
 }

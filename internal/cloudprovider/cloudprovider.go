@@ -77,10 +77,12 @@ type ArtifactSource interface {
 	module.Module
 
 	Repository() string
+
 	GetObjectURL(ctx context.Context, key string) (string, error)
 	GetObjectAccess(ctx context.Context, key string) (access.Spec, error)
 	GetObjectProperties(ctx context.Context, key string) (ObjectProperties, error)
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
+
 	PutObject(ctx context.Context, key string, object io.Reader, contentType string, hash ObjectHash) (ObjectHash, error)
 	DeleteObject(ctx context.Context, key string, steamroll bool) error
 }
@@ -239,20 +241,43 @@ type PublishingTarget interface {
 	module.Module
 
 	Type() string
+	Resources() []string
+	DestinationKeys() []string
+	PublishingGroupConfigs() []PublishingGroupConfig
+
 	RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error)
-	CanPublish(manifest *gardenlinux.Manifest) bool
-	ValidateFlavors(manifests []*gardenlinux.Manifest) error
-	IsPublished(manifest *gardenlinux.Manifest) (bool, error)
-	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error)
-	ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error)
-	RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error)
-	CanReverse(manifest *gardenlinux.Manifest) bool
-	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error
+
+	Destinations(manifest *gardenlinux.Manifest) []Destination
+
+	IsPublished(manifest *gardenlinux.Manifest, key string) (bool, error)
+	Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput, error)
+	ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error)
+	RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error)
+	Reversible(manifest *gardenlinux.Manifest, key string) (bool, error)
+	Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, key string, steamroll bool) error
+
 	CanFuse() bool
-	FlavorsDestination(manifests []*gardenlinux.Manifest) (string, error)
-	Fuse(ctx context.Context, manifests []*gardenlinux.Manifest) (PublishingOutput, error)
-	Unfuse(ctx context.Context, manifests []*gardenlinux.Manifest, steamroll bool) error
+	DestinationPublishingGroup(key string) string
+	Fuse(ctx context.Context, manifests []*gardenlinux.Manifest, key string) (PublishingOutput, error)
+	Unfuse(ctx context.Context, manifests []*gardenlinux.Manifest, key string, steamroll bool) error
+
 	resilience.RollbackHandler
+}
+
+// PublishingGroupConfig is a target's configuration of one publishing group.
+type PublishingGroupConfig struct {
+	PublishingGroup string
+	Flavors         []string
+}
+
+// Destination identifies one place a target publishes an artifact, a target type and a within-target key.
+type Destination struct {
+	Target string
+	Key    string
+}
+
+func (d Destination) String() string {
+	return fmt.Sprintf("%s/%s", d.Target, d.Key)
 }
 
 // Replication describes an artifact object to be copied from one artifact source to another.
@@ -288,7 +313,7 @@ func (r Replication) IsReplicated(ctx context.Context) (bool, error) {
 // PublishingOutput is an opaque representation of the result of a publishing operation.
 type PublishingOutput any
 
-func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
+func publishingOutput[PUBOUT any](rawOutput PublishingOutput) (PUBOUT, error) {
 	var output PUBOUT
 
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
@@ -298,7 +323,7 @@ func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
 	if err != nil {
 		return output, fmt.Errorf("cannot decode publishing output: %w", err)
 	}
-	err = decoder.Decode(generic)
+	err = decoder.Decode(rawOutput)
 	if err != nil {
 		return output, fmt.Errorf("cannot decode publishing output: %w", err)
 	}
@@ -306,8 +331,8 @@ func publishingOutput[PUBOUT any](generic PublishingOutput) (PUBOUT, error) {
 	return output, nil
 }
 
-func publishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest) (PUBOUT, error) {
-	output, err := publishingOutput[PUBOUT](manifest.PublishedImageMetadata)
+func publishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest, dest Destination) (PUBOUT, error) {
+	output, err := publishingOutput[PUBOUT](manifest.PublishedImageMetadata[dest.String()])
 	if err != nil {
 		return output, fmt.Errorf("invalid published image metadata in manifest: %w", err)
 	}
@@ -315,8 +340,8 @@ func publishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest) (P
 	return output, nil
 }
 
-func individualPublishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest) (PUBOUT, error) {
-	output, err := publishingOutput[PUBOUT](manifest.IndividualPublishedImageMetadata)
+func individualPublishingOutputFromManifest[PUBOUT any](manifest *gardenlinux.Manifest, dest Destination) (PUBOUT, error) {
+	output, err := publishingOutput[PUBOUT](manifest.IndividualPublishedImageMetadata[dest.String()])
 	if err != nil {
 		return output, fmt.Errorf("invalid individual published image metadata in manifest: %w", err)
 	}
@@ -331,6 +356,7 @@ type OCMTarget interface {
 	Type() string
 	OCMType() string
 	OCMRepositoryBase() string
+
 	PublishComponentDescriptor(ctx context.Context, version string, descriptor []byte) error
 }
 
@@ -345,25 +371,29 @@ func (e *KeyNotFoundError) Error() string {
 
 type nonFusableTarget struct{}
 
+func (nonFusableTarget) PublishingGroupConfigs() []PublishingGroupConfig {
+	return nil
+}
+
 func (nonFusableTarget) CanFuse() bool {
 	return false
 }
 
-func (nonFusableTarget) FlavorsDestination(_ []*gardenlinux.Manifest) (string, error) {
-	return "", errors.New("target has no shared destination")
+func (nonFusableTarget) DestinationPublishingGroup(string) string {
+	return ""
 }
 
-func (nonFusableTarget) Fuse(_ context.Context, _ []*gardenlinux.Manifest) (PublishingOutput, error) {
+func (nonFusableTarget) Fuse(context.Context, []*gardenlinux.Manifest, string) (PublishingOutput, error) {
 	return nil, errors.New("target cannot fuse")
 }
 
-func (nonFusableTarget) Unfuse(_ context.Context, _ []*gardenlinux.Manifest, _ bool) error {
+func (nonFusableTarget) Unfuse(context.Context, []*gardenlinux.Manifest, string, bool) error {
 	return errors.New("target cannot unfuse")
 }
 
 type noReplicationsTarget struct{}
 
-func (noReplicationsTarget) RequiredReplications(_ *gardenlinux.Manifest) ([]Replication, error) {
+func (noReplicationsTarget) RequiredReplications(*gardenlinux.Manifest) ([]Replication, error) {
 	return nil, nil
 }
 
@@ -379,6 +409,14 @@ func cname(flavor string) string {
 	}
 
 	return c
+}
+
+func validateDefaultKey(key string) error {
+	if key != "default" {
+		return fmt.Errorf("invalid destination key: expected default, got %q", key)
+	}
+
+	return nil
 }
 
 func parseConfig[CONFIG any](cfg map[string]any, config *CONFIG) error {

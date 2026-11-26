@@ -27,20 +27,20 @@ func (p *Publisher) Replicate(ctx context.Context, version, commit string) error
 
 	objectReplications := make(map[object][]cloudprovider.Replication)
 	for _, r := range replications {
-		destination := object{
+		destinationObject := object{
 			source: r.Destination,
 			key:    r.Key,
 		}
-		objectReplications[destination] = append(objectReplications[destination], r)
+		objectReplications[destinationObject] = append(objectReplications[destinationObject], r)
 	}
 
 	err = concurrency.RunTasks(ctx, replications, func(replication cloudprovider.Replication) ([]cloudprovider.Replication, error) {
-		origin := object{
+		originObject := object{
 			source: replication.Origin,
 			key:    replication.Key,
 		}
 
-		return objectReplications[origin], nil
+		return objectReplications[originObject], nil
 	}, func(ctx context.Context, replication cloudprovider.Replication) error {
 		ctx = log.WithValues(ctx, "key", replication.Key, "origin", replication.OriginID, "destination", replication.DestinationID)
 

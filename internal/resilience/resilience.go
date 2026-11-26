@@ -33,6 +33,7 @@ type StatePersistor interface {
 
 	Type() string
 	SetID(id string)
+
 	Load() ([]byte, error)
 	Save(state []byte) error
 	Clear() error

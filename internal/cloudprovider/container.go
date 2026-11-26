@@ -27,8 +27,9 @@ func init() {
 	module.RegisterImpl(PublishingTargetCategory, "Container", func(b *module.Base) PublishingTarget {
 		p := &containerTarget{
 			ociTarget: &ociTarget{
-				base:     b,
-				typeName: "Container",
+				base:                         b,
+				typeName:                     "Container",
+				publishingGroupsFromManifest: true,
 			},
 		}
 		p.self = p
@@ -41,11 +42,9 @@ type containerTarget struct {
 	*ociTarget
 }
 
-func (*containerTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
-	return manifest.Platform == "container"
-}
-
-func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput,
+	error,
+) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
@@ -58,7 +57,7 @@ func (p *containerTarget) Publish(ctx context.Context, flavor string, manifest *
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
 
-	ref, err := p.repositoryRef(manifest.PublishingGroup)
+	ref, err := p.destinationRepo(key)
 	if err != nil {
 		return nil, err
 	}
@@ -158,20 +157,38 @@ func (*containerTarget) findArtifactRootDescriptor(archive string) (specsv1.Desc
 	return specsv1.Descriptor{}, errors.New("OCI archive missing index.json")
 }
 
-func (p *containerTarget) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
-	return objectAccess(ctx, p.source, manifest, ".oci")
+func (p *containerTarget) ImageAccess(_ context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	_, ok := p.destinations[key]
+	if !ok {
+		return nil, fmt.Errorf("missing destination %q", key)
+	}
+
+	output, err := individualPublishingOutputFromManifest[ociIndividualOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return access.OCI(output.Repository + "@" + output.Digest), nil
 }
 
-func (p *containerTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *containerTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	_, ok := p.destinations[key]
+	if !ok {
+		return nil, fmt.Errorf("missing destination %q", key)
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
-func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 
-	ref, err := p.repositoryRef(manifests[0].PublishingGroup)
+	ref, err := p.destinationRepo(key)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +197,10 @@ func (p *containerTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Man
 	descriptors := make([]specsv1.Descriptor, 0, len(manifests))
 	for _, manifest := range manifests {
 		var output ociIndividualOutput
-		output, err = individualPublishingOutputFromManifest[ociIndividualOutput](manifest)
+		output, err = individualPublishingOutputFromManifest[ociIndividualOutput](manifest, Destination{
+			Target: p.Type(),
+			Key:    key,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("invalid manifest %s: %w", manifest.Flavor, err)
 		}

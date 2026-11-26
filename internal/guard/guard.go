@@ -138,7 +138,7 @@ type countingRetryDecider struct {
 }
 
 // NextRetry returns an exponentially growing pause with a constant decorrelation jitter until the retry budget is exhausted.
-func (d *countingRetryDecider) NextRetry(_ error) (time.Duration, bool) {
+func (d *countingRetryDecider) NextRetry(error) (time.Duration, bool) {
 	d.retry++
 
 	return countingBackoff(d.retry)
@@ -164,7 +164,7 @@ func (DelegatingRetryPolicy) Begin() RetryDecider {
 }
 
 // NextRetry always declines because retries are delegated.
-func (DelegatingRetryPolicy) NextRetry(_ error) (time.Duration, bool) {
+func (DelegatingRetryPolicy) NextRetry(error) (time.Duration, bool) {
 	return 0, false
 }
 
@@ -195,7 +195,7 @@ type generationalRetryDecider struct {
 }
 
 // NextRetry retries immediately if the generation has advanced since the last attempt, otherwise declines.
-func (d *generationalRetryDecider) NextRetry(_ error) (time.Duration, bool) {
+func (d *generationalRetryDecider) NextRetry(error) (time.Duration, bool) {
 	gen := d.generation()
 	if gen == d.currentGen {
 		return 0, false

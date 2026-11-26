@@ -42,13 +42,7 @@ type rbscTarget struct {
 	*ociTarget
 }
 
-func (p *rbscTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
-	_, ok := p.pubCfg.Repositories[manifest.PublishingGroup]
-
-	return ok
-}
-
-func (p *rbscTarget) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *rbscTarget) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
@@ -57,7 +51,7 @@ func (p *rbscTarget) Publish(ctx context.Context, flavor string, manifest *garde
 	baseName := fmt.Sprintf("%s-%s-%s", flavor, manifest.Version, commit)
 	features := strings.Join(manifest.Modifiers, ",")
 
-	ref, err := p.repositoryRef(manifest.PublishingGroup)
+	ref, err := p.destinationRepo(key)
 	if err != nil {
 		return nil, err
 	}
@@ -220,8 +214,16 @@ func (p *rbscTarget) addObject(ctx context.Context, store *orasfile.Store, path 
 	return descriptor, f, nil
 }
 
-func (*rbscTarget) ImageAccess(_ context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
-	output, err := individualPublishingOutputFromManifest[ociIndividualOutput](manifest)
+func (p *rbscTarget) ImageAccess(_ context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	_, ok := p.destinations[key]
+	if !ok {
+		return nil, fmt.Errorf("missing destination %q", key)
+	}
+
+	output, err := individualPublishingOutputFromManifest[ociIndividualOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -229,16 +231,21 @@ func (*rbscTarget) ImageAccess(_ context.Context, manifest *gardenlinux.Manifest
 	return access.OCI(output.Repository + "@" + output.Digest), nil
 }
 
-func (p *rbscTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *rbscTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	_, ok := p.destinations[key]
+	if !ok {
+		return nil, fmt.Errorf("missing destination %q", key)
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
-func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
 
-	ref, err := p.repositoryRef(manifests[0].PublishingGroup)
+	ref, err := p.destinationRepo(key)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +254,10 @@ func (p *rbscTarget) Fuse(ctx context.Context, manifests []*gardenlinux.Manifest
 	descriptors := make([]specsv1.Descriptor, 0, len(manifests))
 	for _, manifest := range manifests {
 		var output ociIndividualOutput
-		output, err = individualPublishingOutputFromManifest[ociIndividualOutput](manifest)
+		output, err = individualPublishingOutputFromManifest[ociIndividualOutput](manifest, Destination{
+			Target: p.Type(),
+			Key:    key,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("invalid manifest %s: %w", manifest.Flavor, err)
 		}

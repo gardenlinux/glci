@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
+	"sync"
 
 	"github.com/gardenlinux/glci/internal/cli"
 	"github.com/gardenlinux/glci/internal/cloudprovider"
@@ -39,10 +42,8 @@ type Publisher struct {
 
 // FlavorConfig is a Garden Linux release flavor together with its publishing configuration.
 type FlavorConfig struct {
-	Flavor                string `mapstructure:"flavor"`
-	PublishingGroup       string `mapstructure:"publishing_group,omitzero"`
-	CloudProfile          bool   `mapstructure:"cloud_profile,omitzero"`
-	InComponentDescriptor bool   `mapstructure:"in_component_descriptor,omitzero"`
+	Flavor       string   `mapstructure:"flavor"`
+	Destinations []string `mapstructure:"destinations,omitempty"`
 }
 
 type publisherConfig struct {
@@ -58,11 +59,17 @@ type publisherConfig struct {
 }
 
 type ocmConfig struct {
-	ProjectRepository string   `mapstructure:"project_repository"`
-	Provider          string   `mapstructure:"provider"`
-	Responsibles      []string `mapstructure:"responsibles,omitempty"`
+	ProjectRepository string            `mapstructure:"project_repository"`
+	Provider          string            `mapstructure:"provider"`
+	Responsibles      []string          `mapstructure:"responsibles,omitempty"`
+	Flavors           []ocmFlavorConfig `mapstructure:"flavors,omitempty"`
 	//nolint:revive,nolintlint // The remain tag overrides the -, which is necessary to avoid an implicit name.
 	Target module.Slot[cloudprovider.OCMTarget] `mapstructure:"-,remain"`
+}
+
+type ocmFlavorConfig struct {
+	Flavor       string   `mapstructure:"flavor"`
+	Destinations []string `mapstructure:"destinations,omitempty"`
 }
 
 // NewPublisher creates a publisher.
@@ -145,6 +152,60 @@ func (p *Publisher) Configure(rawCfg map[string]any) error {
 		return fmt.Errorf("cannot register manifest target: %w", err)
 	}
 
+	flavors := make(map[string]struct{}, len(p.flavors))
+	for _, flavorConfig := range p.flavors {
+		flavors[flavorConfig.Flavor] = struct{}{}
+	}
+
+	publishingGroupOwners := make(map[string]cloudprovider.PublishingTarget)
+	resourceOwners := make(map[string]cloudprovider.PublishingTarget)
+	targetDestinationKeys := make(map[string][]string)
+	for _, t := range p.targets {
+		for _, resource := range t.Resources() {
+			owner, ok := resourceOwners[resource]
+			if ok && owner != t {
+				return fmt.Errorf("duplicate resource %q", resource)
+			}
+			resourceOwners[resource] = t
+		}
+
+		targetDestinationKeys[t.Type()] = t.DestinationKeys()
+
+		for _, groupCfg := range t.PublishingGroupConfigs() {
+			owner, ok := publishingGroupOwners[groupCfg.PublishingGroup]
+			if ok && owner != t {
+				return fmt.Errorf("duplicate publishing group %q", groupCfg.PublishingGroup)
+			}
+			publishingGroupOwners[groupCfg.PublishingGroup] = t
+
+			for _, f := range groupCfg.Flavors {
+				_, ok = flavors[f]
+				if !ok {
+					return fmt.Errorf("unknown flavor %q in publishing group %q", f, groupCfg.PublishingGroup)
+				}
+			}
+		}
+	}
+
+	for _, flavorCfg := range p.cfg.OCM.Flavors {
+		_, ok := flavors[flavorCfg.Flavor]
+		if !ok {
+			return fmt.Errorf("unknown flavor %q in component descriptor", flavorCfg.Flavor)
+		}
+
+		err = p.validateDestinations(flavorCfg.Destinations, targetDestinationKeys)
+		if err != nil {
+			return fmt.Errorf("cannot validate destinations in component descriptor: %w", err)
+		}
+	}
+
+	for _, flavorCfg := range p.flavors {
+		err = p.validateDestinations(flavorCfg.Destinations, targetDestinationKeys)
+		if err != nil {
+			return fmt.Errorf("cannot validate destinations in flavor %q: %w", flavorCfg.Flavor, err)
+		}
+	}
+
 	return nil
 }
 
@@ -161,28 +222,45 @@ func (p *Publisher) SourceConfigurables() []module.Configurable {
 	return module.AppendConfigurables(nil, p.sources)
 }
 
-func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit string, steamroll bool) ([]publication, []groupPublication,
-	string, error,
+func (p *Publisher) assembleFlavors(ctx context.Context, version, commit string) ([]*flavor, []groupPublication, string,
+	error,
 ) {
-	publications := make([]publication, len(p.flavors))
+	flavors := make([]*flavor, len(p.flavors))
 	fetchManifests := concurrency.NewActivity(ctx)
 	for i, flavorConfig := range p.flavors {
 		fetchManifests.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
 
-			manifest, target, inErr := p.fetchManifest(ctx, flavorConfig, version, commit)
+			manifest, inErr := p.fetchManifest(ctx, flavorConfig, version, commit)
 			if inErr != nil {
 				return inErr
 			}
 
-			publications[i] = publication{
-				Manifest:              manifest,
-				Target:                target,
-				Reversible:            target.CanReverse(manifest),
-				PublishingGroup:       manifest.PublishingGroup,
-				CloudProfile:          flavorConfig.CloudProfile,
-				InComponentDescriptor: flavorConfig.InComponentDescriptor,
+			var destinations []destination
+			destinations, inErr = p.selectDestinations(manifest, flavorConfig.Destinations)
+			if inErr != nil {
+				return inErr
 			}
+
+			f := &flavor{
+				manifest:     manifest,
+				publications: make([]publication, len(destinations)),
+			}
+			for j, dest := range destinations {
+				var reversible bool
+				reversible, inErr = dest.target.Reversible(manifest, dest.key)
+				if inErr != nil {
+					return fmt.Errorf("cannot determine reversibility for %s: %w", manifest.Flavor, inErr)
+				}
+
+				f.publications[j] = publication{
+					flavor:         f,
+					target:         dest.target,
+					destinationKey: dest.key,
+					reversible:     reversible,
+				}
+			}
+			flavors[i] = f
 
 			return nil
 		})
@@ -192,89 +270,81 @@ func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit strin
 		return nil, nil, "", err
 	}
 
-	if len(publications) != 0 {
-		commit = publications[0].Manifest.BuildCommittish
-		for i := range publications {
-			if publications[i].Manifest.BuildCommittish != commit {
-				return nil, nil, "", fmt.Errorf("manifests for %s and %s have a different commit", publications[0].Manifest.Flavor,
-					publications[i].Manifest.Flavor)
+	if len(flavors) != 0 {
+		commit = flavors[0].manifest.BuildCommittish
+		for _, f := range flavors {
+			if f.manifest.BuildCommittish != commit {
+				return nil, nil, "", fmt.Errorf("manifests for %s and %s have a different commit", flavors[0].manifest.Flavor,
+					f.manifest.Flavor)
 			}
 		}
 	}
 
-	groups := make(map[string][]*publication)
-	for i := range publications {
-		if publications[i].PublishingGroup == "" {
-			continue
-		}
-
-		groups[publications[i].PublishingGroup] = append(groups[publications[i].PublishingGroup], &publications[i])
+	type groupPublicationKey struct {
+		target          cloudprovider.PublishingTarget
+		publishingGroup string
 	}
 
-	groupPublications := make([]groupPublication, 0, len(groups))
-	fetchGroupManifests := concurrency.NewActivitySync(ctx)
-	for group, pubs := range groups {
-		fetchGroupManifests.Go(func(ctx context.Context) (concurrency.ResultSyncFunc, error) {
-			target := pubs[0].Target
-			for _, pub := range pubs {
-				if pub.Target != target {
-					return nil, fmt.Errorf("publishing group %s spans multiple targets", group)
-				}
+	var groupPublications []groupPublication
+	groupPublicationIndex := make(map[groupPublicationKey]int)
+	for _, f := range flavors {
+		for i := range f.publications {
+			pub := f.publications[i]
+			if !pub.target.CanFuse() {
+				continue
 			}
 
-			if !target.CanFuse() {
-				return nil, fmt.Errorf("target %s for publishing group %s cannot fuse", target.Type(), group)
+			key := groupPublicationKey{
+				target:          pub.target,
+				publishingGroup: pub.publishingGroup(),
 			}
+			j, ok := groupPublicationIndex[key]
+			if !ok {
+				j = len(groupPublications)
+				groupPublicationIndex[key] = j
 
-			pub := groupPublication{
-				Group:        group,
-				Target:       target,
-				publications: pubs,
+				groupPublications = append(groupPublications, groupPublication{
+					group:  key.publishingGroup,
+					target: key.target,
+				})
 			}
-			ctx = log.WithValues(ctx, "group", group)
+			groupPublications[j].publications = append(groupPublications[j].publications, pub)
+		}
+	}
+
+	for i := range groupPublications {
+		groupPub := &groupPublications[i]
+		groupPub.manifests = make([]*gardenlinux.Manifest, 0, len(groupPub.publications))
+		groupPub.manifestKeys = make([]string, 0, len(groupPub.publications))
+		flavorsSeen := make(map[*flavor]struct{}, len(groupPub.publications))
+
+		for j := range groupPub.publications {
+			pub := groupPub.publications[j]
+
+			_, ok := flavorsSeen[pub.flavor]
+			if !ok {
+				flavorsSeen[pub.flavor] = struct{}{}
+				groupPub.manifests = append(groupPub.manifests, pub.flavor.manifest)
+				groupPub.manifestKeys = append(groupPub.manifestKeys, pub.manifestKey())
+			}
+		}
+	}
+
+	fetchGroupManifests := concurrency.NewActivity(ctx)
+	for i := range groupPublications {
+		fetchGroupManifests.Go(func(ctx context.Context) error {
+			ctx = log.WithValues(ctx, "publishingGroup", groupPublications[i].group)
 
 			log.Debug(ctx, "Retrieving group manifest")
-			var inErr error
-			pub.GroupManifest, inErr = cloudprovider.GetGroupManifest(ctx, p.manifestTarget, pub.manifestKey())
+			groupManifest, inErr := cloudprovider.GetGroupManifest(ctx, p.manifestTarget, groupPublications[i].manifestKey())
 			_, ok := errors.AsType[*cloudprovider.KeyNotFoundError](inErr)
 			if inErr != nil && !ok {
-				return nil, fmt.Errorf("cannot get group manifest for %s: %w", group, inErr)
+				return fmt.Errorf("cannot get group manifest for %s: %w", groupPublications[i].group, inErr)
 			}
 
-			if pub.GroupManifest != nil && len(pub.GroupManifest.Manifests) != 0 {
-				manifestKeys := make([]string, len(pub.publications))
-				for i := range pub.publications {
-					manifestKeys[i] = pub.publications[i].manifestKey()
-				}
-				if !equalSets(manifestKeys, pub.GroupManifest.Manifests) {
-					return nil, fmt.Errorf("publishing group %s has incorrect members", group)
-				}
+			groupPublications[i].groupManifest = groupManifest
 
-				var fusedOutput cloudprovider.PublishingOutput
-				for i := range pub.publications {
-					output := pub.publications[i].Manifest.PublishedImageMetadata
-					if output == nil {
-						if !steamroll {
-							return nil, fmt.Errorf("publishing group %s has unpublished member %s", group,
-								pub.publications[i].Manifest.Flavor)
-						}
-
-						continue
-					}
-
-					if fusedOutput == nil {
-						fusedOutput = output
-					} else if fmt.Sprint(fusedOutput) != fmt.Sprint(output) {
-						return nil, fmt.Errorf("publishing group %s has divergent published metadata", group)
-					}
-				}
-			}
-
-			return func() error {
-				groupPublications = append(groupPublications, pub)
-
-				return nil
-			}, nil
+			return nil
 		})
 	}
 	err = fetchGroupManifests.Wait()
@@ -282,27 +352,25 @@ func (p *Publisher) fetchAllManifests(ctx context.Context, version, commit strin
 		return nil, nil, "", err
 	}
 
-	return publications, groupPublications, commit, nil
+	return flavors, groupPublications, commit, nil
 }
 
-func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig, version, commit string) (*gardenlinux.Manifest,
-	cloudprovider.PublishingTarget, error,
-) {
+func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig, version, commit string) (*gardenlinux.Manifest, error) {
 	manifestKey := fmt.Sprintf("meta/singles/%s-%s-%.8s", flavorConfig.Flavor, version, commit)
 
 	log.Debug(ctx, "Retrieving manifest")
 	manifest, err := cloudprovider.GetManifest(ctx, p.manifestSource, manifestKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot get manifest for %s: %w", flavorConfig.Flavor, err)
+		return nil, fmt.Errorf("cannot get manifest for %s: %w", flavorConfig.Flavor, err)
 	}
 	if manifest.Version != version {
-		return nil, nil, fmt.Errorf("manifest for %s has incorrect version %s", flavorConfig.Flavor, manifest.Version)
+		return nil, fmt.Errorf("manifest for %s has incorrect version %s", flavorConfig.Flavor, manifest.Version)
 	}
 	if manifest.BuildCommittish != commit && fmt.Sprintf("%.8s", manifest.BuildCommittish) != commit {
-		return nil, nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavorConfig.Flavor, manifest.BuildCommittish)
+		return nil, fmt.Errorf("manifest for %s has incorrect commit %s", flavorConfig.Flavor, manifest.BuildCommittish)
 	}
 	if manifest.Flavor != "" && manifest.Flavor != flavorConfig.Flavor {
-		return nil, nil, fmt.Errorf("manifest for %s has incorrect flavor %s", flavorConfig.Flavor, manifest.Flavor)
+		return nil, fmt.Errorf("manifest for %s has incorrect flavor %s", flavorConfig.Flavor, manifest.Flavor)
 	}
 
 	if p.manifestTarget != p.manifestSource {
@@ -312,19 +380,19 @@ func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig
 		targetManifest, err = cloudprovider.GetManifest(ctx, p.manifestTarget, manifestKey)
 		_, ok := errors.AsType[*cloudprovider.KeyNotFoundError](err)
 		if err != nil && !ok {
-			return nil, nil, fmt.Errorf("cannot get target manifest for %s: %w", flavorConfig.Flavor, err)
+			return nil, fmt.Errorf("cannot get target manifest for %s: %w", flavorConfig.Flavor, err)
 		}
 
 		if targetManifest != nil {
 			if targetManifest.Version != version {
-				return nil, nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavorConfig.Flavor, targetManifest.Version)
+				return nil, fmt.Errorf("target manifest for %s has incorrect version %s", flavorConfig.Flavor, targetManifest.Version)
 			}
 			if targetManifest.BuildCommittish != manifest.BuildCommittish {
-				return nil, nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavorConfig.Flavor,
+				return nil, fmt.Errorf("target manifest for %s has incorrect commit %s", flavorConfig.Flavor,
 					targetManifest.BuildCommittish)
 			}
 			if targetManifest.Flavor != "" && targetManifest.Flavor != flavorConfig.Flavor {
-				return nil, nil, fmt.Errorf("target manifest for %s has incorrect flavor %s", flavorConfig.Flavor, targetManifest.Flavor)
+				return nil, fmt.Errorf("target manifest for %s has incorrect flavor %s", flavorConfig.Flavor, targetManifest.Flavor)
 			}
 
 			manifest = targetManifest
@@ -333,78 +401,208 @@ func (p *Publisher) fetchManifest(ctx context.Context, flavorConfig FlavorConfig
 
 	manifest.Flavor = flavorConfig.Flavor
 	manifest.GLCIVersion = cli.Version(ctx)
-	if manifest.PublishingGroup != "" && manifest.PublishingGroup != flavorConfig.PublishingGroup {
-		return nil, nil, fmt.Errorf("manifest for %s has publishing group %q conflicting with configured %q", flavorConfig.Flavor,
-			manifest.PublishingGroup, flavorConfig.PublishingGroup)
-	}
-	if manifest.PublishingGroup == "" {
-		manifest.PublishingGroup = flavorConfig.PublishingGroup
-	}
 
-	var target cloudprovider.PublishingTarget
-	target, err = p.selectTarget(manifest, flavorConfig.Flavor)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return manifest, target, nil
+	return manifest, nil
 }
 
-func (p *Publisher) selectTarget(manifest *gardenlinux.Manifest, flavor string) (cloudprovider.PublishingTarget, error) {
-	var target cloudprovider.PublishingTarget
+type destination struct {
+	target cloudprovider.PublishingTarget
+	key    string
+}
+
+func (p *Publisher) selectDestinations(manifest *gardenlinux.Manifest, configuredDestinations []string) ([]destination, error) {
+	var destinations []destination
 	for _, t := range p.targets {
-		if !t.CanPublish(manifest) {
-			continue
+		for _, d := range t.Destinations(manifest) {
+			destinations = append(destinations, destination{
+				target: t,
+				key:    d.Key,
+			})
 		}
-
-		if target != nil {
-			return nil, fmt.Errorf("multiple publishing targets for %s", flavor)
-		}
-		target = t
 	}
-	if target == nil {
-		return nil, fmt.Errorf("no publishing target for %s", flavor)
+	if len(destinations) == 0 {
+		return nil, fmt.Errorf("no destination configured for %q", manifest.Flavor)
 	}
 
-	return target, nil
+	if len(configuredDestinations) == 0 {
+		return destinations, nil
+	}
+
+	var selectedDestinations []destination
+	for _, d := range configuredDestinations {
+		var found bool
+		for _, dest := range destinations {
+			candidate := cloudprovider.Destination{
+				Target: dest.target.Type(),
+				Key:    dest.key,
+			}
+			if p.destinationMatches(candidate, d) {
+				selectedDestinations = append(selectedDestinations, dest)
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("flavor %q not published to destination %q", manifest.Flavor, d)
+		}
+	}
+
+	return selectedDestinations, nil
 }
 
-func (*Publisher) validateFlavors(publications []publication) error {
-	targetManifests := make(map[cloudprovider.PublishingTarget][]*gardenlinux.Manifest)
-	for i := range publications {
-		targetManifests[publications[i].Target] = append(targetManifests[publications[i].Target], publications[i].Manifest)
-	}
+func (*Publisher) destinationMatches(destination cloudprovider.Destination, dest string) bool {
+	target, key, ok := strings.Cut(dest, "/")
 
-	for target, manifests := range targetManifests {
-		err := target.ValidateFlavors(manifests)
-		if err != nil {
-			return fmt.Errorf("cannot validate flavors for target %s: %w", target.Type(), err)
+	return destination.Target == target && (!ok || destination.Key == key)
+}
+
+func (*Publisher) validateDestinations(configuredDestinations []string, targetDestinationKeys map[string][]string) error {
+	seen := make(map[string]struct{})
+	for _, dest := range configuredDestinations {
+		target, destinationKey, keyed := strings.Cut(dest, "/")
+
+		destinationKeys, ok := targetDestinationKeys[target]
+		if !ok {
+			return fmt.Errorf("unknown target %q", target)
+		}
+
+		var destinations []string
+		if keyed {
+			if destinationKey != strings.ToLower(destinationKey) || strings.Contains(destinationKey, ".") {
+				return fmt.Errorf("invalid destination %q: key must be lowercase and contain no '.'", dest)
+			}
+			if !slices.Contains(destinationKeys, destinationKey) {
+				return fmt.Errorf("unknown destination %q", dest)
+			}
+			destinations = []string{dest}
+		} else {
+			for _, key := range destinationKeys {
+				destinations = append(destinations, cloudprovider.Destination{
+					Target: target,
+					Key:    key,
+				}.String())
+			}
+		}
+
+		for _, d := range destinations {
+			_, ok = seen[d]
+			if ok {
+				return fmt.Errorf("duplicate destination %q", d)
+			}
+			seen[d] = struct{}{}
 		}
 	}
 
 	return nil
 }
 
-func (*Publisher) validateGroupDestinations(groupPublications []groupPublication) error {
-	targetDestinationOwners := make(map[cloudprovider.PublishingTarget]map[string]string)
-	for _, groupPub := range groupPublications {
-		destination, err := groupPub.Target.FlavorsDestination(groupPub.manifests())
-		if err != nil {
-			return fmt.Errorf("cannot determine destination for group %s: %w", groupPub.Group, err)
+func (p *Publisher) validatePreconditions(flavors []*flavor, groupPublications []groupPublication, allowUnpublishedGroupMembers bool,
+) error {
+	err := p.validateManifestPublishingGroups(flavors)
+	if err != nil {
+		return fmt.Errorf("invalid manifest publishing groups: %w", err)
+	}
+
+	err = p.validatePublishedFlavors(flavors)
+	if err != nil {
+		return fmt.Errorf("invalid published flavors: %w", err)
+	}
+
+	err = p.validatePublishedGroups(groupPublications, allowUnpublishedGroupMembers)
+	if err != nil {
+		return fmt.Errorf("invalid published groups: %w", err)
+	}
+
+	return nil
+}
+
+func (p *Publisher) validateManifestPublishingGroups(flavors []*flavor) error {
+	groups := make(map[string]struct{})
+	groupsFromConfig := make(map[string]struct{})
+	for _, t := range p.targets {
+		for _, groupCfg := range t.PublishingGroupConfigs() {
+			groups[groupCfg.PublishingGroup] = struct{}{}
+			if len(groupCfg.Flavors) != 0 {
+				groupsFromConfig[groupCfg.PublishingGroup] = struct{}{}
+			}
+		}
+	}
+
+	for _, f := range flavors {
+		group := f.manifest.PublishingGroup
+		if group == "" {
+			continue
 		}
 
-		destinationOwners, ok := targetDestinationOwners[groupPub.Target]
+		_, ok := groups[group]
 		if !ok {
-			destinationOwners = make(map[string]string)
-			targetDestinationOwners[groupPub.Target] = destinationOwners
+			return fmt.Errorf("publishing group %q has no destination", group)
 		}
 
-		var owner string
-		owner, ok = destinationOwners[destination]
+		_, ok = groupsFromConfig[group]
 		if ok {
-			return fmt.Errorf("publishing groups %s and %s both publish to %s", owner, groupPub.Group, destination)
+			return fmt.Errorf("publishing group %q configured and also named in a manifest", group)
 		}
-		destinationOwners[destination] = groupPub.Group
+	}
+
+	return nil
+}
+
+func (*Publisher) validatePublishedFlavors(flavors []*flavor) error {
+	for _, f := range flavors {
+		destinations := make(map[string]struct{})
+		for i := range f.publications {
+			destinations[f.publications[i].destination().String()] = struct{}{}
+		}
+
+		for dest := range f.manifest.PublishedImageMetadata {
+			_, ok := destinations[dest]
+			if !ok {
+				return fmt.Errorf("unknown destination %q in published image metadata for %s", dest, f.manifest.Flavor)
+			}
+		}
+		for dest := range f.manifest.IndividualPublishedImageMetadata {
+			_, ok := destinations[dest]
+			if !ok {
+				return fmt.Errorf("unknown destination %q in individual published image metadata for %s", dest, f.manifest.Flavor)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (*Publisher) validatePublishedGroups(groupPublications []groupPublication, allowUnpublishedGroupMembers bool) error {
+	for i := range groupPublications {
+		groupPub := groupPublications[i]
+		if !groupPub.isPublished() {
+			continue
+		}
+
+		if !equalSets(groupPub.manifestKeys, groupPub.groupManifest.Manifests) {
+			return fmt.Errorf("publishing group %q does not match its published record", groupPub.group)
+		}
+
+		outputs := make(map[string]any)
+		for j := range groupPub.publications {
+			pub := groupPub.publications[j]
+
+			output := pub.flavor.manifest.PublishedImageMetadata[pub.destination().String()]
+			if output == nil {
+				if allowUnpublishedGroupMembers {
+					continue
+				}
+
+				return fmt.Errorf("publishing group %q has unpublished member %q", groupPub.group, pub.flavor.manifest.Flavor)
+			}
+
+			expectedOutput, ok := outputs[pub.destinationKey]
+			switch {
+			case !ok:
+				outputs[pub.destinationKey] = output
+			case fmt.Sprint(expectedOutput) != fmt.Sprint(output):
+				return fmt.Errorf("publishing group %q has inconsistent published metadata", groupPub.group)
+			}
+		}
 	}
 
 	return nil
@@ -437,7 +635,7 @@ type publishingTask interface {
 func (*Publisher) countFlavors(tasks []publishingTask) int {
 	var count int
 	for _, t := range tasks {
-		_, ok := t.(*publication)
+		_, ok := t.(publication)
 		if ok {
 			count++
 		}
@@ -453,15 +651,20 @@ func (p *Publisher) gatherReplications(ctx context.Context, version, commit stri
 		gatherReplications.Go(func(ctx context.Context) error {
 			ctx = log.WithValues(ctx, "flavor", flavorConfig.Flavor)
 
-			manifest, target, inErr := p.fetchManifest(ctx, flavorConfig, version, commit)
+			manifest, inErr := p.fetchManifest(ctx, flavorConfig, version, commit)
 			if inErr != nil {
 				return inErr
 			}
 
 			var replications []cloudprovider.Replication
-			replications, inErr = target.RequiredReplications(manifest)
-			if inErr != nil {
-				return fmt.Errorf("cannot determine replications for %s: %w", flavorConfig.Flavor, inErr)
+			for _, t := range p.targets {
+				var targetReplications []cloudprovider.Replication
+				targetReplications, inErr = t.RequiredReplications(manifest)
+				if inErr != nil {
+					return fmt.Errorf("cannot determine replications for %s: %w", flavorConfig.Flavor, inErr)
+				}
+
+				replications = append(replications, targetReplications...)
 			}
 			requiredReplications[i] = replications
 
@@ -491,43 +694,55 @@ func (p *Publisher) gatherReplications(ctx context.Context, version, commit stri
 }
 
 type groupPublication struct {
-	Group         string
-	GroupManifest *gardenlinux.GroupManifest
+	group  string
+	target cloudprovider.PublishingTarget
 
-	Target       cloudprovider.PublishingTarget
-	publications []*publication
+	publications []publication
+	manifests    []*gardenlinux.Manifest
+	manifestKeys []string
+
+	groupManifest *gardenlinux.GroupManifest
 }
 
 func (*groupPublication) isPublishingTask() {}
 
 func (p *groupPublication) manifestKey() string {
-	return fmt.Sprintf("meta/singles/%s-%s-%.8s", p.Group, p.publications[0].Manifest.Version, p.publications[0].Manifest.BuildCommittish)
+	return fmt.Sprintf("meta/singles/%s-%s-%.8s", p.group, p.publications[0].flavor.manifest.Version,
+		p.publications[0].flavor.manifest.BuildCommittish)
 }
 
 func (p *groupPublication) isPublished() bool {
-	return p.GroupManifest != nil && len(p.GroupManifest.Manifests) != 0
+	return p.groupManifest != nil && len(p.groupManifest.Manifests) != 0
 }
 
-func (p *groupPublication) manifests() []*gardenlinux.Manifest {
-	manifests := make([]*gardenlinux.Manifest, len(p.publications))
-	for i := range p.publications {
-		manifests[i] = p.publications[i].Manifest
-	}
+type flavor struct {
+	manifestMtx sync.Mutex
+	manifest    *gardenlinux.Manifest
 
-	return manifests
+	publications []publication
 }
 
 type publication struct {
-	Manifest              *gardenlinux.Manifest
-	Target                cloudprovider.PublishingTarget
-	Reversible            bool
-	PublishingGroup       string
-	CloudProfile          bool
-	InComponentDescriptor bool
+	flavor *flavor
+
+	target         cloudprovider.PublishingTarget
+	destinationKey string
+	reversible     bool
 }
 
-func (*publication) isPublishingTask() {}
+func (publication) isPublishingTask() {}
 
-func (p *publication) manifestKey() string {
-	return fmt.Sprintf("meta/singles/%s-%s-%.8s", p.Manifest.Flavor, p.Manifest.Version, p.Manifest.BuildCommittish)
+func (p publication) manifestKey() string {
+	return fmt.Sprintf("meta/singles/%s-%s-%.8s", p.flavor.manifest.Flavor, p.flavor.manifest.Version, p.flavor.manifest.BuildCommittish)
+}
+
+func (p publication) destination() cloudprovider.Destination {
+	return cloudprovider.Destination{
+		Target: p.target.Type(),
+		Key:    p.destinationKey,
+	}
+}
+
+func (p publication) publishingGroup() string {
+	return p.target.DestinationPublishingGroup(p.destinationKey)
 }

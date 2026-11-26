@@ -82,6 +82,20 @@ func (*awsTarget) Type() string {
 	return "AWS"
 }
 
+func (p *awsTarget) Resources() []string {
+	resources := make([]string, 0, 2)
+	resources = append(resources, "aws:world")
+	if p.enableChina {
+		resources = append(resources, "aws:china")
+	}
+
+	return resources
+}
+
+func (*awsTarget) DestinationKeys() []string {
+	return []string{"default"}
+}
+
 type awsSource struct {
 	base *module.Base
 
@@ -176,7 +190,7 @@ type awsCredentialsProvider struct {
 	credentials atomic.Pointer[awsCredentials]
 }
 
-func (p *awsCredentialsProvider) Retrieve(_ context.Context) (awssdk.Credentials, error) {
+func (p *awsCredentialsProvider) Retrieve(context.Context) (awssdk.Credentials, error) {
 	creds := p.credentials.Load()
 	if creds == nil {
 		return awssdk.Credentials{}, errors.New("credentials not set")
@@ -278,7 +292,7 @@ func (p *awsTarget) applyCredentials(ctx context.Context, rawCreds map[string]an
 		return errors.New("no available regions")
 	}
 	if !slices.Contains(regions, region) {
-		return fmt.Errorf("region %s is not available", region)
+		return fmt.Errorf("region %s not available", region)
 	}
 
 	environment.ec2Client = ec2Client
@@ -329,6 +343,10 @@ func (p *awsTarget) environment(china bool) *awsEnvironment {
 }
 
 func (p *awsTarget) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if len(p.Destinations(manifest)) == 0 {
+		return nil, nil
+	}
+
 	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
 		return nil, nil
 	}
@@ -1082,20 +1100,32 @@ func (p *awsSource) DeleteObject(ctx context.Context, key string, steamroll bool
 	})
 }
 
-func (*awsTarget) CanPublish(manifest *gardenlinux.Manifest) bool {
-	return manifest.Platform == "aws"
+func (p *awsTarget) Destinations(manifest *gardenlinux.Manifest) []Destination {
+	if manifest.Platform != "aws" {
+		return nil
+	}
+
+	return []Destination{{
+		Target: p.Type(),
+		Key:    "default",
+	}}
 }
 
-func (*awsTarget) ValidateFlavors(_ []*gardenlinux.Manifest) error {
-	return nil
-}
-
-func (p *awsTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
+func (p *awsTarget) IsPublished(manifest *gardenlinux.Manifest, key string) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
 
-	awsOutput, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	var awsOutput awsPublishingOutput
+	awsOutput, err = publishingOutputFromManifest[awsPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return false, err
 	}
@@ -1103,9 +1133,14 @@ func (p *awsTarget) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return len(awsOutput.Images) > 0, nil
 }
 
-func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
 	}
 
 	pl := platform(flavor)
@@ -1122,7 +1157,8 @@ func (p *awsTarget) Publish(ctx context.Context, flavor string, manifest *garden
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(".raw")
+	var imagePath gardenlinux.S3ReleaseFile
+	imagePath, err = manifest.PathBySuffix(".raw")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -1558,7 +1594,7 @@ func (p *awsTarget) waitForImage(ctx context.Context, imageID, region string, ch
 			return err
 		}
 		if len(r.Images) != 1 || r.NextToken != nil {
-			return errors.New("ccannot describe image: missing images")
+			return errors.New("cannot describe image: missing images")
 		}
 		state = r.Images[0].State
 
@@ -1586,11 +1622,9 @@ func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, chin
 			ImageId:   &imageID,
 			Attribute: new("launchPermission"),
 			LaunchPermission: &ec2types.LaunchPermissionModifications{
-				Add: []ec2types.LaunchPermission{
-					{
-						Group: ec2types.PermissionGroupAll,
-					},
-				},
+				Add: []ec2types.LaunchPermission{{
+					Group: ec2types.PermissionGroupAll,
+				}},
 			},
 		}, overrideRegion(region))
 		if inErr != nil {
@@ -1601,28 +1635,52 @@ func (p *awsTarget) makePublic(ctx context.Context, imageID, region string, chin
 	})
 }
 
-func (p *awsTarget) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *awsTarget) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".raw")
 }
 
-func (p *awsTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *awsTarget) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
-func (*awsTarget) CanReverse(_ *gardenlinux.Manifest) bool {
-	return true
+func (*awsTarget) Reversible(_ *gardenlinux.Manifest, key string) (bool, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
-func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *awsTarget) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, key string, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return err
 	}
 
 	if manifest.Platform != "aws" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 
-	pubOut, err := publishingOutputFromManifest[awsPublishingOutput](manifest)
+	var pubOut awsPublishingOutput
+	pubOut, err = publishingOutputFromManifest[awsPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}

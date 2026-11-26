@@ -45,6 +45,14 @@ func (*openstack) Type() string {
 	return "OpenStack"
 }
 
+func (*openstack) Resources() []string {
+	return []string{"openstack:all"}
+}
+
+func (*openstack) DestinationKeys() []string {
+	return []string{"default"}
+}
+
 type openstack struct {
 	nonFusableTarget
 
@@ -186,6 +194,10 @@ func (p *openstack) environment(region string) *openstackEnvironment {
 }
 
 func (p *openstack) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if len(p.Destinations(manifest)) == 0 {
+		return nil, nil
+	}
+
 	if p.sourceChina == nil || p.sourceChina == p.source {
 		return nil, nil
 	}
@@ -251,31 +263,42 @@ func (*openstack) architecture(arch gardenlinux.Architecture) (string, error) {
 	}
 }
 
-func (p *openstack) CanPublish(manifest *gardenlinux.Manifest) bool {
+func (p *openstack) Destinations(manifest *gardenlinux.Manifest) []Destination {
 	if manifest.Platform != "openstack" && manifest.Platform != "openstackbaremetal" {
-		return false
+		return nil
 	}
 
 	_, err := p.variant(manifest.Platform, manifest.PlatformVariant)
-	return err == nil
+	if err != nil {
+		return nil
+	}
+
+	return []Destination{{
+		Target: p.Type(),
+		Key:    "default",
+	}}
 }
 
-func (*openstack) ValidateFlavors(_ []*gardenlinux.Manifest) error {
-	return nil
-}
-
-func (p *openstack) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
+func (p *openstack) IsPublished(manifest *gardenlinux.Manifest, key string) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
 
-	_, err := p.variant(manifest.Platform, manifest.PlatformVariant)
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = p.variant(manifest.Platform, manifest.PlatformVariant)
 	if err != nil {
 		return false, fmt.Errorf("invalid manifest: %w", err)
 	}
 
 	var openstackOutput openstackPublishingOutput
-	openstackOutput, err = publishingOutputFromManifest[openstackPublishingOutput](manifest)
+	openstackOutput, err = publishingOutputFromManifest[openstackPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return false, err
 	}
@@ -283,14 +306,21 @@ func (p *openstack) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return len(openstackOutput.Images) > 0, nil
 }
 
-func (p *openstack) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *openstack) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
 	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	if platform(flavor) != manifest.Platform {
 		return nil, fmt.Errorf("flavor %s does not match platform %s", flavor, manifest.Platform)
 	}
-	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
+	var variant openstackVariant
+	variant, err = p.variant(manifest.Platform, manifest.PlatformVariant)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -506,30 +536,54 @@ func (p *openstack) waitForImage(ctx context.Context, imageID, region string) er
 	})
 }
 
-func (p *openstack) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *openstack) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".vmdk")
 }
 
-func (p *openstack) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *openstack) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
-func (*openstack) CanReverse(_ *gardenlinux.Manifest) bool {
-	return true
+func (*openstack) Reversible(_ *gardenlinux.Manifest, key string) (bool, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
-func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, key string, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
 	}
 
-	variant, err := p.variant(manifest.Platform, manifest.PlatformVariant)
+	err := validateDefaultKey(key)
+	if err != nil {
+		return err
+	}
+
+	var variant openstackVariant
+	variant, err = p.variant(manifest.Platform, manifest.PlatformVariant)
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
 
 	var pubOut *openstackPublishingOutput
-	pubOut, err = publishingOutputFromManifest[*openstackPublishingOutput](manifest)
+	pubOut, err = publishingOutputFromManifest[*openstackPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -542,7 +596,7 @@ func (p *openstack) Unpublish(ctx context.Context, manifest *gardenlinux.Manifes
 	removeImages := concurrency.NewActivity(ctx)
 	for _, img := range pubOut.Images {
 		if p.environment(img.Region) == nil {
-			return fmt.Errorf("image %s is in unknown region %s", img.ID, img.Region)
+			return fmt.Errorf("image %s in unknown region %s", img.ID, img.Region)
 		}
 
 		removeImages.Go(func(ctx context.Context) error {

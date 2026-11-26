@@ -19,8 +19,8 @@ type Manifest struct {
 	Paths                            []S3ReleaseFile `yaml:"paths"`
 	RequireUEFI                      bool            `yaml:"require_uefi,omitzero"`
 	SecureBoot                       bool            `yaml:"secureboot,omitzero"`
-	PublishedImageMetadata           any             `yaml:"published_image_metadata,omitzero"`
-	IndividualPublishedImageMetadata any             `yaml:"individual_published_image_metadata,omitzero"`
+	PublishedImageMetadata           map[string]any  `yaml:"published_image_metadata,omitempty"`
+	IndividualPublishedImageMetadata map[string]any  `yaml:"individual_published_image_metadata,omitempty"`
 	S3Bucket                         string          `yaml:"s3_bucket"`
 	//nolint:revive // The inline and remain tags overrides the -, which is necessary to avoid an implicit name.
 	Unknown map[string]any `yaml:"-,inline,remain"`

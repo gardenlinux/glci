@@ -28,20 +28,20 @@ func (p *Publisher) Unreplicate(ctx context.Context, version, commit string, ste
 
 	originReplications := make(map[object][]cloudprovider.Replication)
 	for _, r := range replications {
-		origin := object{
+		originObject := object{
 			source: r.Origin,
 			key:    r.Key,
 		}
-		originReplications[origin] = append(originReplications[origin], r)
+		originReplications[originObject] = append(originReplications[originObject], r)
 	}
 
 	err = concurrency.RunTasks(ctx, replications, func(replication cloudprovider.Replication) ([]cloudprovider.Replication, error) {
-		destination := object{
+		destinationObject := object{
 			source: replication.Destination,
 			key:    replication.Key,
 		}
 
-		return originReplications[destination], nil
+		return originReplications[destinationObject], nil
 	}, func(ctx context.Context, replication cloudprovider.Replication) error {
 		ctx = log.WithValues(ctx, "key", replication.Key, "origin", replication.OriginID, "destination", replication.DestinationID)
 

@@ -62,6 +62,20 @@ func (*azure) Type() string {
 	return "Azure"
 }
 
+func (p *azure) Resources() []string {
+	resources := make([]string, 0, 2)
+	resources = append(resources, "azure:world")
+	if p.enableChina {
+		resources = append(resources, "azure:china")
+	}
+
+	return resources
+}
+
+func (*azure) DestinationKeys() []string {
+	return []string{"default"}
+}
+
 type azure struct {
 	nonFusableTarget
 
@@ -313,7 +327,7 @@ func (p *azure) applyCredentials(ctx context.Context, rawCreds map[string]any, c
 		return errors.New("no available regions")
 	}
 	if !slices.Contains(regions, region) {
-		return fmt.Errorf("region %s is not available", region)
+		return fmt.Errorf("region %s not available", region)
 	}
 
 	environment.subscriptionsClient = subscriptionsClient
@@ -336,6 +350,7 @@ func (*azure) listRegions(ctx context.Context, retrier guard.Retrier, subscripti
 	unusableRegions := []string{
 		"jioindiacentral",
 		"jioindiawest",
+		"taiwannorth",
 		"chinaeast",
 		"chinanorth",
 	}
@@ -397,6 +412,10 @@ func (p *azure) environment(china bool) *azureEnvironment {
 }
 
 func (p *azure) RequiredReplications(manifest *gardenlinux.Manifest) ([]Replication, error) {
+	if len(p.Destinations(manifest)) == 0 {
+		return nil, nil
+	}
+
 	if !p.enableChina || p.sourceChina == nil || p.sourceChina == p.source {
 		return nil, nil
 	}
@@ -446,20 +465,32 @@ func (*azure) sku(base, flavor string, bios bool) string {
 	return fmt.Sprintf("%s-%s", base, suffix)
 }
 
-func (*azure) CanPublish(manifest *gardenlinux.Manifest) bool {
-	return manifest.Platform == "azure"
+func (p *azure) Destinations(manifest *gardenlinux.Manifest) []Destination {
+	if manifest.Platform != "azure" {
+		return nil
+	}
+
+	return []Destination{{
+		Target: p.Type(),
+		Key:    "default",
+	}}
 }
 
-func (*azure) ValidateFlavors(_ []*gardenlinux.Manifest) error {
-	return nil
-}
-
-func (p *azure) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
+func (p *azure) IsPublished(manifest *gardenlinux.Manifest, key string) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
 
-	azureOutput, err := publishingOutputFromManifest[azurePublishingOutput](manifest)
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	var azureOutput azurePublishingOutput
+	azureOutput, err = publishingOutputFromManifest[azurePublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return false, err
 	}
@@ -467,9 +498,14 @@ func (p *azure) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return len(azureOutput.Images) > 0, nil
 }
 
-func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
 	}
 
 	pl := platform(flavor)
@@ -486,7 +522,8 @@ func (p *azure) Publish(ctx context.Context, flavor string, manifest *gardenlinu
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imageVersion, err := p.version(manifest.Version)
+	var imageVersion string
+	imageVersion, err = p.version(manifest.Version)
 	if err != nil {
 		return nil, fmt.Errorf("invalid version %s: %w", manifest.Version, err)
 	}
@@ -1297,28 +1334,52 @@ func (p *azure) deleteBlob(ctx context.Context, blob string, steamroll, china bo
 	return nil
 }
 
-func (p *azure) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *azure) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".vhd")
 }
 
-func (p *azure) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *azure) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
-func (*azure) CanReverse(_ *gardenlinux.Manifest) bool {
-	return true
+func (*azure) Reversible(_ *gardenlinux.Manifest, key string) (bool, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
-func (p *azure) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *azure) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, key string, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return err
 	}
 
 	if manifest.Platform != "azure" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 
-	pubOut, err := publishingOutputFromManifest[azurePublishingOutput](manifest)
+	var pubOut azurePublishingOutput
+	pubOut, err = publishingOutputFromManifest[azurePublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}

@@ -77,7 +77,7 @@ type awsCredentialsProvider struct {
 	credentials atomic.Pointer[awsCredentials]
 }
 
-func (p *awsCredentialsProvider) Retrieve(_ context.Context) (awssdk.Credentials, error) {
+func (p *awsCredentialsProvider) Retrieve(context.Context) (awssdk.Credentials, error) {
 	creds := p.credentials.Load()
 	if creds == nil {
 		return awssdk.Credentials{}, errors.New("credentials not set")
