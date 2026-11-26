@@ -26,7 +26,8 @@ Start with [Concepts](#concepts), [Setup](#setup), and [Operations](#operations)
 | Platform | The build platform recorded in a manifest, such as `aws` or `container`. It must match the first part of the flavor name. |
 | Manifest | A build's metadata and artifact list. GLCI also records published image metadata in it. |
 | Artifact source | A location from which GLCI reads build artifacts or manifests, and to which GLCI writes modified manifests. |
-| Publishing target | A destination where Garden Linux images are published, such as a cloud account or an OCI repository. |
+| Publishing target | A location where Garden Linux images are published, such as `AWS`, `Container`, or `RBSC`. A target can have several destinations. |
+| Destination | A place where a target publishes a flavor. Its ID is the target name and a target-specific key, separated by `/`. |
 | Published image metadata | Information identifying the published images and where to find them, such as image IDs, regions, repository references, or digests. GLCI records it in manifests for later use, including deciding whether work is already complete. |
 | Publishing group | One or more flavors published together as a single result, with shared published image metadata. |
 | Component descriptor | A release description intended for consumption by Gardener. It contains published image metadata references, build information, and package metadata. |
@@ -42,7 +43,7 @@ GLCI needs the artifacts and manifests for the Garden Linux flavors you want to 
 
 For your own builds, use the Garden Linux build system and store its artifacts and manifests in your S3 bucket. Keep artifact object keys consistent with those recorded in the manifests. The [artifact source reference](#artifact-source-reference) describes the required layout.
 
-**Limitation.** Official manifests may already contain published image metadata, which GLCI can interpret as work already completed. Pointing the manifest source at upstream and selecting a separate manifest destination does not reset that metadata. The manifest source must contain your own copies, derived by scrubbing published image metadata from the upstream manifests. GLCI does not provide a command to perform that preparation.
+**Limitation.** Official manifests may already contain published image metadata, which GLCI can interpret as work already completed. Pointing the manifest source at upstream and selecting a separate manifest destination does not reset that metadata. For an independent deployment, prepare your own copies by scrubbing `published_image_metadata` and `individual_published_image_metadata` from the upstream manifests. GLCI does not provide a command to perform that preparation.
 
 For unmodified upstream Garden Linux, publishing targets can read the image artifacts directly from the public `gardenlinux-github-releases` bucket. Obtain the upstream manifests, modify them to an unpublished state, and store the modified manifests in your own bucket before running GLCI. Use your bucket as the manifest source and the official bucket as the publishing targets' artifact source.
 
@@ -110,24 +111,24 @@ Every operation takes a release version and build commit. Use the full commit re
 
 | Command | Effect |
 | --- | --- |
-| `publish` | Publishes the configured images, records their published image metadata, and writes the component descriptor unless omitted. |
-| `unpublish` | Removes published images that support unpublishing and clears their published image metadata. |
-| `replicate` | Copies artifacts between configured artifact sources as required by the publishing targets. Currently intended for China publishing paths. |
+| `publish` | Publishes the configured flavors and groups, records their published image metadata, and writes the component descriptor unless omitted. |
+| `unpublish` | Unpublishes flavors and groups that support unpublishing and clears their published image metadata. |
+| `replicate` | Copies artifacts between configured artifact sources as required by the publishing targets. |
 | `unreplicate` | Removes the replicated artifacts. |
 
 ### Publish and unpublish
 
-`publish` skips flavors already recorded as published. A publishing group is complete when its group manifest records all members. GLCI uses these records to decide what remains to do, rather than checking every remote image on each run.
+GLCI uses the manifests to decide what still needs publishing. When publishing a flavor individually, it skips that flavor at any destination where its manifest already records a published result. It skips a publishing group as a whole when the group manifest lists the expected flavors and their manifests agree on what was published at each destination.
 
-Most flavors can be unpublished, or in other words publishing them is reversible. Exceptions include flavors pushed to OCI repositories which do not support deleting existing tags. In such cases, publishing those flavors is irreversible. The OCM component descriptor is always considered irreversible, since it signifies the completion of publishing and is used as a release gate.
+Most flavors can be unpublished, or in other words publishing them is reversible. Exceptions include flavors pushed to OCI repositories which do not support deleting existing tags. In such cases, publishing those flavors is irreversible. The OCM component descriptor is always considered irreversible, since it signifies the completion of publishing and is used as a release gate. A flavor can be published reversibly at one destination and irreversibly at another. When flavors are published together, reversibility applies to the group as a whole.
 
-GLCI publishes reversible flavors first, then irreversible flavors, and finally writes the component descriptor. Use `--omit-irreversible` to run only the reversible part. This also omits the descriptor. `--omit-component-descriptor` omits only the descriptor.
+GLCI publishes reversible flavors and groups first, then irreversible flavors and groups, and finally writes the component descriptor. Use `--omit-irreversible` to run only the reversible part. This also omits the descriptor. `--omit-component-descriptor` omits only the descriptor.
 
-After an interrupted or failed publish, rerun with the same release version and commit, and the same configuration. GLCI first rolls back unfinished work, then starts that work again. Completed flavors remain published and are skipped. See [Recovery](#recovery) for persistence failures and other cases that need intervention.
+After an interrupted or failed publish, rerun with the same release version and commit, and the same configuration. GLCI first rolls back unfinished work, then starts that work again. Completed flavors and groups remain published and are skipped. See [Recovery](#recovery) for persistence failures and other cases that need intervention.
 
-`unpublish` skips flavors already recorded as unpublished and those that cannot be reversed. After a partial unpublish, rerun with the same release version and commit, and the same configuration. If some resources were removed before their manifest could be updated, normal consistency checks can stop the retry. `--steamroll` permits supported cleanup of such partial results.
+`unpublish` skips flavors and groups that are already unpublished or cannot be reversed. After a partial unpublish, rerun with the same release version and commit, and the same configuration. If some resources were removed before their manifest could be updated, normal consistency checks can stop the retry. `--steamroll` permits supported cleanup of such partial results.
 
-In other words, publishing is always idempotent, while unpublishing is idempotent when used with `--steamroll`.
+In other words, publishing is always idempotent, while unpublishing is idempotent when used with `--steamroll`. By default, `publish` writes the component descriptor even when all selected flavors and groups are already published.
 
 Examples, with `RELEASE_VERSION` and `BUILD_COMMIT` supplied by your workflow:
 
@@ -179,11 +180,11 @@ Each stage must succeed before the next can begin.
 
 ### Routing and groups
 
-Each flavor must match exactly one publishing target. Cloud publishing targets and Container select by the manifest's `platform`, which must agree with the flavor name. RBSC selects by whether the manifest's publishing group names one of its configured repositories.
+Each flavor must match at least one publishing destination. The publishing target determines which destinations match a flavor, using its manifest and the target configuration. A flavor's `destinations` list can select among those matches.
 
-A publishing group combines one or more flavors into a single published result. Each group uses one publishing target and destination. The target must support grouping and defines how the members' results are combined. Two groups in the same publishing target must use distinct destinations.
+A publishing group combines one or more flavors into a single published result. Each group uses one publishing target and one or more destinations. The target must support grouping and defines how the members' results are combined. Two groups in the same publishing target must use distinct destinations.
 
-Configured group names must agree with any already recorded in the manifests.
+If a build manifest names a publishing group, that group must also appear in the target configuration. Group names must be unique across targets.
 
 ### Dependencies and order
 
@@ -206,17 +207,17 @@ A publish run first recovers tracked work, reads and validates manifests, and pr
 
 ### Manifest reads and writes
 
-The build manifest supplies artifact keys, platform, architecture, and build metadata. GLCI records results in `published_image_metadata`. Group members also retain their individual results in `individual_published_image_metadata`. Writes stamp `glci_version` and include the resolved flavor and publishing group.
+The build manifest supplies artifact keys, platform, architecture, and build metadata. GLCI records results in `published_image_metadata`. Group members also retain their individual results in `individual_published_image_metadata`. Both fields are keyed by the destination ID. Writes stamp `glci_version` and include the resolved flavor.
 
-A group's manifest is stored under `meta/singles/<group>-<version>-<commit8>`. Its member list records that the group has been published. Unpublish clears published image metadata and empties that list. It retains the manifests themselves.
+A group's manifest is stored under `meta/singles/<group>-<version>-<commit8>`. Its member list records that the group has been published. When GLCI unpublishes a group, it clears that group's published image metadata and empties the list. It retains the manifests themselves.
 
 With a separate `manifest_target`, GLCI still requires the original source manifest. If a corresponding destination manifest exists, GLCI validates its release identity and uses that copy, including its published image metadata. Otherwise it uses the original. A separate destination therefore does not reset the publishing status recorded in the input manifests.
 
 ## Recovery
 
-After a failed or interrupted publish, rerun with the same version, commit, state storage, and identical configuration. GLCI first rolls back tracked work, then skips completed flavors and attempts the remaining work. There is no separate resume command. An unpublish run also begins by rolling back tracked work. Preserve the state between runs of the same release version and commit.
+After a failed or interrupted publish, rerun with the same version, commit, state storage, and identical configuration. GLCI first rolls back tracked work, then skips completed flavors and groups and attempts the remaining work. There is no separate resume command. An unpublish run also begins by rolling back tracked work. Preserve the state between runs of the same release version and commit.
 
-**Limitation.** State storage does not provide a lock between GLCI processes. Keep runs for the same release and destinations serialized in your workflow. **Multiple instances of GLCI operating on the same version and commit at the same time will result in undefined behavior, and almost certainly incorrect results.**
+**Limitation.** State storage does not provide a lock between GLCI processes. Keep runs for the same version and commit serialized in your workflow. **Multiple instances of GLCI operating on the same version and commit at the same time will result in undefined behavior, and almost certainly incorrect results.**
 
 Replication has its own mechanism for resuming transfers, independent of publishing state.
 
@@ -232,7 +233,7 @@ GLCI retries all requests with backoff and applies timeouts appropriate to every
 
 ### Credential lifetime
 
-GLCI manages leased credentials and renews Vault login tokens, subject to Vault's maximum TTL limits. It attempts to revoke all secrets on shutdown, except Vault login tokens supplied directly or through a file.
+GLCI manages leased credentials and renews Vault login tokens, subject to Vault's maximum TTL limits. It attempts to revoke each lease when it finishes using the credential. On shutdown it also attempts to revoke its Vault token.
 
 **Limitation.** Tokens supplied directly or through a file are not renewed, even if Vault allows renewal. If using that authentication method, supply a token whose remaining lifetime covers the job.
 
@@ -258,7 +259,7 @@ See [Create the configuration](#create-the-configuration) for environment overri
 | `publishing.sources` | List of mappings | Required, at least one | Artifact sources for manifests, image artifacts, or replicas. Each entry uses `source` to select the artifact source type. See [Artifact source reference](#artifact-source-reference). |
 | `publishing.manifest_source` | String | Required | ID of the artifact source containing the input manifests. |
 | `publishing.manifest_target` | String | `""`, uses `manifest_source` | ID of the artifact source receiving updated manifests. |
-| `publishing.targets` | List of mappings | Required, at least one | Publishing destinations. Each entry uses `target` to select the publishing target type. See [Publishing target reference](#publishing-target-reference). |
+| `publishing.targets` | List of mappings | Required, at least one | Publishing targets. Each entry uses `target` to select the publishing target type. See [Publishing target reference](#publishing-target-reference). |
 | `publishing.state` | Mapping | Required | Recovery state storage. `backend` selects the state storage type. See [State storage reference](#state-storage-reference). |
 | `publishing.ocm` | Mapping | Required | Component descriptor output. `target` selects the output type. See [Component descriptor reference](#component-descriptor-reference). |
 
@@ -269,8 +270,9 @@ Each entry in `flavors` has the following fields.
 | Key | Type | Requirement or default | Description |
 | --- | --- | --- | --- |
 | `flavor` | String | Required | Exact build flavor name used to locate its manifest. |
-| `publishing_group` | String | `""`, no group. Required by some publishing targets. | Name of the group in which to publish this flavor. It must agree with any group already recorded in the manifest. |
-| `in_component_descriptor` | Boolean | `false` | Include this flavor in the component descriptor. |
+| `destinations` | List of strings | Empty, all destinations matching this flavor | A target name selects all its matching destinations for this flavor. A full destination ID (`target/key`) selects one. |
+
+The first slash separates the target from its key. Keys must be lowercase and must not contain `.`. They may contain further slashes.
 
 #### Source references and credential names
 
@@ -298,7 +300,7 @@ The four operational commands are `publish`, `unpublish`, `replicate`, and `unre
 | All commands | `--glacial` | `false` | Serialize task dispatch. Useful for debugging, glacially slow. |
 | `publish` | `--replicate` | `false` | Replicate required artifacts first. |
 | `publish` | `--unreplicate` | `false` | Remove replicas after successful publishing. |
-| `publish` | `--omit-irreversible` | `false` | Omit irreversible flavors. Implies `--omit-component-descriptor`. |
+| `publish` | `--omit-irreversible` | `false` | Omit anything that cannot be unpublished. Implies `--omit-component-descriptor`. |
 | `publish` | `--omit-component-descriptor` | `false` | Omit the component descriptor. |
 | `unpublish`, `unreplicate` | `--steamroll` | `false` | Ignore missing resources when cleaning up. For `unreplicate`, also delete destination objects that do not match the source. |
 | Root command | `--version`, `-v` | `false` | Report the GLCI version. |
@@ -336,9 +338,13 @@ Grant access according to how the bucket is used.
 | Manifest destination | Read existing manifests and write updated manifests. |
 | Replication destination | Read object properties, upload and delete objects, and list, upload, complete, and abort multipart uploads. |
 
+Grant `s3:ListBucket` on manifest and replication destination buckets.
+
 Cloud importers that fetch artifacts by URL must be able to reach the signed URLs. The bucket need not be public.
 
 ### Publishing target reference
+
+AWS, Azure, GCP, Aliyun, and OpenStack publish flavors individually and support unpublishing them. Each selects flavors by the manifest's `platform` and uses the destination key `default`.
 
 #### AWS
 
@@ -350,7 +356,7 @@ Use `target: AWS`.
 | `config` | String | Required | Credential set for EC2 image operations. |
 | `region` | String | Required | Initial import and AMI registration region. |
 | `regions` | List of strings | Empty, all available regions | Regions in which to publish AMIs. An explicit list must include `region`. |
-| `image_tags` | Mapping | Empty | Tags applied to AMIs, configured by the fields below. |
+| `image_tags` | Mapping | Empty | Tags applied to the imported EBS snapshot, configured by the fields below. |
 | `source_china` | String | `""`, uses `source` | Artifact source ID for China publishing. |
 | `config_china` | String | `""`, China publishing disabled | Credential set for EC2 image operations in China. |
 | `region_china` | String | Required when `config_china` is set | Initial import and AMI registration region in China. |
@@ -464,7 +470,7 @@ Use `target: Container`.
 | Key | Type | Requirement or default | Description |
 | --- | --- | --- | --- |
 | `source` | String | Required | Artifact source ID for the image artifacts. |
-| `repositories` | Mapping | Required, at least one | Publishing destinations configured under [OCI repositories](#oci-repositories). |
+| `publishing_groups` | Mapping | Required, at least one | Publishing groups and their destinations, configured under [OCI repositories](#oci-repositories). |
 
 GLCI publishes container images to the configured repositories. It combines each publishing group's images into an OCI image index tagged with the release version, supporting images with multiple architectures.
 
@@ -475,19 +481,26 @@ Use `target: RBSC`.
 | Key | Type | Requirement or default | Description |
 | --- | --- | --- | --- |
 | `source` | String | Required | Artifact source ID for the image artifacts. |
-| `repositories` | Mapping | Required, at least one | Publishing destinations configured under [OCI repositories](#oci-repositories). |
+| `publishing_groups` | Mapping | Required, at least one | Publishing groups and their destinations, configured under [OCI repositories](#oci-repositories). |
 
-GLCI packages each flavor's build artifacts as an OCI artifact and publishes it to the configured repository. It combines each publishing group's artifacts into an OCI image index tagged with the release version.
+GLCI packages each flavor's build artifacts as an OCI artifact and publishes it to the configured repositories. It combines each publishing group's artifacts into an OCI image index tagged with the release version.
 
 #### OCI repositories
 
-OCI-based targets use a `repositories` mapping keyed by publishing group name. Every flavor published by such a target must belong to a group listed in that target's mapping. Each entry contains the following fields.
+OCI-based targets use a `publishing_groups` mapping keyed by publishing group name. Every flavor published by such a target must belong to a group listed in that target's mapping. Each entry contains the following fields.
 
 | Key | Type | Requirement or default | Description |
 | --- | --- | --- | --- |
-| `repository` | String | Required | Destination OCI registry repository. Must be unique within the publishing target. |
+| `flavors` | List of strings | Omit for Container. Required for RBSC, at least one member. | Container takes its membership from the `publishing_group` field in each flavor's manifest. RBSC lists members by their names in the top level `flavors` list. A flavor can belong to several RBSC groups. |
+| `destinations` | Mapping | Required, at least one | One repository per destination key. Each selected repository receives the group's index. Keys must be unique across all groups on the same target. |
+
+Each entry in `destinations` contains the following fields.
+
+| Key | Type | Requirement or default | Description |
+| --- | --- | --- | --- |
+| `repository` | String | Required | Destination OCI registry repository. Must be unique across all publishing destinations. |
 | `config` | String | Required | Credential set for repository access. |
-| `allows_delete` | Boolean | `false` | Declare that the repository supports deletion. False makes publishing to it irreversible. |
+| `allows_delete` | Boolean | `false` | Declare that the repository supports deletion. False makes publishing to it irreversible. Use the same value for all destinations of a group. |
 
 Grant push access to each repository. Unpublishing also requires deletion support and permissions, as described in [OCI deletion behavior](#oci-deletion-behavior).
 
@@ -515,17 +528,17 @@ Use `backend: AWS`.
 | `region` | String | Required | AWS region containing the bucket. |
 | `bucket` | String | Required | S3 bucket holding the state records. |
 
-State objects are named `state_<version>-<commit8>.json` and stored at the bucket's root. Grant read, write, and delete access.
+State objects are named `state_<version>-<commit8>.json` and stored at the bucket's root. Grant read, write, and delete access to the state objects and `s3:ListBucket` on the bucket.
 
 ### Component descriptor reference
 
 GLCI creates an OCM v2 descriptor containing image and root filesystem resources, build information, and package metadata. The descriptor is written after the images are published.
 
+Each selected combination of flavor and destination contributes a `gardenlinux` resource and a `rootfs` resource. Both carry the destination ID in `extraIdentity.location-id`. For Container and RBSC, the `gardenlinux` resource's `access` field points to the flavor's published OCI manifest by digest.
+
 **Limitation.** Component descriptor output must be configured even when an omission flag suppresses the output.
 
 **Limitation.** Package lists for component descriptors are read from `manifest_source`, using the object keys recorded in the flavor manifests, rather than from each publishing target's artifact source.
-
-**Limitation.** For Container, the descriptor's image resource points to the source `.oci` archive rather than the container image published to the registry.
 
 These settings apply to the descriptor regardless of the output type selected by `target`:
 
@@ -534,6 +547,14 @@ These settings apply to the descriptor regardless of the output type selected by
 | `project_repository` | String | Required | Repository of the released project, recorded as the component name and its git source. |
 | `provider` | String | Required | Component provider recorded in the descriptor, such as an organization name. |
 | `responsibles` | List of strings | `[]` | Email addresses of responsible parties on the root filesystem resource. |
+| `flavors` | List of mappings | `[]` | Flavors to include in the component descriptor. |
+
+Each entry in `publishing.ocm.flavors` has the following fields.
+
+| Key | Type | Requirement or default | Description |
+| --- | --- | --- | --- |
+| `flavor` | String | Required | A flavor also listed in the top level `flavors`. |
+| `destinations` | List of strings | Empty, all publishing destinations for this flavor | Select from the destinations used to publish this flavor, using the selectors described in [Flavors](#flavors). |
 
 #### File output
 
@@ -541,7 +562,7 @@ Use `target: File`.
 
 | Key | Type | Requirement or default | Description |
 | --- | --- | --- | --- |
-| `file` | String | Required for file output | Path of the YAML descriptor file. |
+| `file` | String | Required for file output | Path of the YAML descriptor file. The parent directory must exist. |
 | `repository` | String | `""` | OCI repository context recorded inside the descriptor. This setting does not publish to that repository. |
 
 #### OCI output
