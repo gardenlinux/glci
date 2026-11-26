@@ -57,6 +57,14 @@ func (*gcp) Type() string {
 	return "GCP"
 }
 
+func (*gcp) Resources() []string {
+	return []string{"gcp:world"}
+}
+
+func (*gcp) DestinationKeys() []string {
+	return []string{"default"}
+}
+
 type gcp struct {
 	nonFusableTarget
 	noReplicationsTarget
@@ -220,20 +228,32 @@ func (*gcp) architecture(arch gardenlinux.Architecture) (string, error) {
 	}
 }
 
-func (*gcp) CanPublish(manifest *gardenlinux.Manifest) bool {
-	return manifest.Platform == "gcp"
+func (p *gcp) Destinations(manifest *gardenlinux.Manifest) []Destination {
+	if manifest.Platform != "gcp" {
+		return nil
+	}
+
+	return []Destination{{
+		Target: p.Type(),
+		Key:    "default",
+	}}
 }
 
-func (*gcp) ValidateFlavors(_ []*gardenlinux.Manifest) error {
-	return nil
-}
-
-func (p *gcp) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
+func (p *gcp) IsPublished(manifest *gardenlinux.Manifest, key string) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
 
-	gcpOutput, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	var gcpOutput gcpPublishingOutput
+	gcpOutput, err = publishingOutputFromManifest[gcpPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return false, err
 	}
@@ -241,9 +261,14 @@ func (p *gcp) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return gcpOutput.Project != "" && gcpOutput.Image != "", nil
 }
 
-func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
 	}
 
 	pl := platform(flavor)
@@ -255,7 +280,8 @@ func (p *gcp) Publish(ctx context.Context, flavor string, manifest *gardenlinux.
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(".gcpimage.tar.gz")
+	var imagePath gardenlinux.S3ReleaseFile
+	imagePath, err = manifest.PathBySuffix(".gcpimage.tar.gz")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -607,28 +633,52 @@ func (p *gcp) makePublic(ctx context.Context, image string) error {
 	return nil
 }
 
-func (p *gcp) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *gcp) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".gcpimage.tar.gz")
 }
 
-func (p *gcp) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *gcp) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
-func (*gcp) CanReverse(_ *gardenlinux.Manifest) bool {
-	return true
+func (*gcp) Reversible(_ *gardenlinux.Manifest, key string) (bool, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
-func (p *gcp) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *gcp) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, key string, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return err
 	}
 
 	if manifest.Platform != "gcp" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 
-	pubOut, err := publishingOutputFromManifest[gcpPublishingOutput](manifest)
+	var pubOut gcpPublishingOutput
+	pubOut, err = publishingOutputFromManifest[gcpPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}

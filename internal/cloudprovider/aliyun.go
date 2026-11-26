@@ -57,6 +57,14 @@ func (*aliyun) Type() string {
 	return "Aliyun"
 }
 
+func (*aliyun) Resources() []string {
+	return []string{"aliyun:world"}
+}
+
+func (*aliyun) DestinationKeys() []string {
+	return []string{"default"}
+}
+
 type aliyun struct {
 	nonFusableTarget
 	noReplicationsTarget
@@ -122,7 +130,7 @@ type aliyunCredentialsProvider struct {
 	credentials atomic.Pointer[aliyunCredentials]
 }
 
-func (p *aliyunCredentialsProvider) GetCredentials(_ context.Context) (osscredentials.Credentials, error) {
+func (p *aliyunCredentialsProvider) GetCredentials(context.Context) (osscredentials.Credentials, error) {
 	creds := p.credentials.Load()
 	if creds == nil {
 		return osscredentials.Credentials{}, errors.New("credentials not set")
@@ -205,7 +213,7 @@ func (p *aliyun) applyCredentials(ctx context.Context, rawCreds map[string]any) 
 		return errors.New("no available regions")
 	}
 	if !slices.Contains(regions, p.pubCfg.Region) {
-		return fmt.Errorf("region %s is not available", p.pubCfg.Region)
+		return fmt.Errorf("region %s not available", p.pubCfg.Region)
 	}
 
 	ecsClients := make(map[string]*client.Client, len(regions))
@@ -286,20 +294,32 @@ func (*aliyun) imageName(flavor, version, committish string) string {
 	return fmt.Sprintf("gardenlinux-%s-%s-%.8s", flavor, version, committish)
 }
 
-func (*aliyun) CanPublish(manifest *gardenlinux.Manifest) bool {
-	return manifest.Platform == "ali"
+func (p *aliyun) Destinations(manifest *gardenlinux.Manifest) []Destination {
+	if manifest.Platform != "ali" {
+		return nil
+	}
+
+	return []Destination{{
+		Target: p.Type(),
+		Key:    "default",
+	}}
 }
 
-func (*aliyun) ValidateFlavors(_ []*gardenlinux.Manifest) error {
-	return nil
-}
-
-func (p *aliyun) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
+func (p *aliyun) IsPublished(manifest *gardenlinux.Manifest, key string) (bool, error) {
 	if !p.isConfigured() {
 		return false, errors.New("config not set")
 	}
 
-	aliyunOutput, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	var aliyunOutput aliyunPublishingOutput
+	aliyunOutput, err = publishingOutputFromManifest[aliyunPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return false, err
 	}
@@ -307,9 +327,14 @@ func (p *aliyun) IsPublished(manifest *gardenlinux.Manifest) (bool, error) {
 	return len(aliyunOutput.Images) > 0, nil
 }
 
-func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest) (PublishingOutput, error) {
+func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlinux.Manifest, key string) (PublishingOutput, error) {
 	if !p.isConfigured() {
 		return nil, errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
 	}
 
 	pl := platform(flavor)
@@ -321,7 +346,8 @@ func (p *aliyun) Publish(ctx context.Context, flavor string, manifest *gardenlin
 	}
 
 	image := p.imageName(flavor, manifest.Version, manifest.BuildCommittish)
-	imagePath, err := manifest.PathBySuffix(".qcow2")
+	var imagePath gardenlinux.S3ReleaseFile
+	imagePath, err = manifest.PathBySuffix(".qcow2")
 	if err != nil {
 		return nil, fmt.Errorf("missing image: %w", err)
 	}
@@ -696,28 +722,52 @@ func (p *aliyun) makePublic(ctx context.Context, imageID, region string, public,
 	return nil
 }
 
-func (p *aliyun) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *aliyun) ImageAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".qcow2")
 }
 
-func (p *aliyun) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest) (access.Spec, error) {
+func (p *aliyun) RootfsAccess(ctx context.Context, manifest *gardenlinux.Manifest, key string) (access.Spec, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	return objectAccess(ctx, p.source, manifest, ".tar")
 }
 
-func (*aliyun) CanReverse(_ *gardenlinux.Manifest) bool {
-	return true
+func (*aliyun) Reversible(_ *gardenlinux.Manifest, key string) (bool, error) {
+	err := validateDefaultKey(key)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
-func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, steamroll bool) error {
+func (p *aliyun) Unpublish(ctx context.Context, manifest *gardenlinux.Manifest, key string, steamroll bool) error {
 	if !p.isConfigured() {
 		return errors.New("config not set")
+	}
+
+	err := validateDefaultKey(key)
+	if err != nil {
+		return err
 	}
 
 	if manifest.Platform != "ali" {
 		return fmt.Errorf("invalid manifest: invalid platform %s for target %s", manifest.Platform, p.Type())
 	}
 
-	pubOut, err := publishingOutputFromManifest[aliyunPublishingOutput](manifest)
+	var pubOut aliyunPublishingOutput
+	pubOut, err = publishingOutputFromManifest[aliyunPublishingOutput](manifest, Destination{
+		Target: p.Type(),
+		Key:    key,
+	})
 	if err != nil {
 		return fmt.Errorf("invalid manifest: %w", err)
 	}
@@ -789,7 +839,7 @@ func (p *aliyun) unpublishAndDeleteImage(ctx context.Context, imageID, region st
 			return fmt.Errorf("cannot make image not public: %w", err)
 		}
 	} else if !steamroll {
-		return errors.New("image is not public")
+		return errors.New("image not public")
 	}
 
 	err = p.deleteImage(ctx, imageID, region, steamroll)

@@ -9,7 +9,6 @@ import (
 	"github.com/gardenlinux/glci/internal/cloudprovider"
 	"github.com/gardenlinux/glci/internal/concurrency"
 	"github.com/gardenlinux/glci/internal/errorreport"
-	"github.com/gardenlinux/glci/internal/gardenlinux"
 	"github.com/gardenlinux/glci/internal/log"
 	"github.com/gardenlinux/glci/internal/resilience"
 )
@@ -52,16 +51,21 @@ func (p *Publisher) unpublish(ctx context.Context, version, commit string, steam
 		return err
 	}
 
-	var publications []publication
+	var flavors []*flavor
 	var groupPublications []groupPublication
-	publications, groupPublications, _, err = p.fetchAllManifests(ctx, version, commit, steamroll)
+	flavors, groupPublications, _, err = p.assembleFlavors(ctx, version, commit)
 	if err != nil {
-		return fmt.Errorf("cannot fetch manifests: %w", err)
+		return fmt.Errorf("cannot assemble flavors: %w", err)
 	}
 
-	err = p.validateFlavors(publications)
+	var publications []publication
+	for _, f := range flavors {
+		publications = append(publications, f.publications...)
+	}
+
+	err = p.validatePreconditions(flavors, groupPublications, steamroll)
 	if err != nil {
-		return fmt.Errorf("cannot validate flavors: %w", err)
+		return err
 	}
 
 	var tasks []publishingTask
@@ -85,20 +89,22 @@ func (p *Publisher) unpublish(ctx context.Context, version, commit string, steam
 		})
 	}
 
-	groups := make(map[string]*groupPublication)
+	groups := make(map[publication]*groupPublication)
 	for i := range groupPublications {
-		groups[groupPublications[i].Group] = &groupPublications[i]
+		for j := range groupPublications[i].publications {
+			groups[groupPublications[i].publications[j]] = &groupPublications[i]
+		}
 	}
 
 	dependencies := func(t publishingTask) ([]publishingTask, error) {
 		switch pub := t.(type) {
-		case *publication:
-			if pub.PublishingGroup == "" {
+		case publication:
+			if !pub.target.CanFuse() {
 				return nil, nil
 			}
 
 			return []publishingTask{fusion{
-				groups[pub.PublishingGroup],
+				groups[pub],
 			}}, nil
 
 		case *groupPublication:
@@ -119,8 +125,8 @@ func (p *Publisher) unpublish(ctx context.Context, version, commit string, steam
 
 	run := func(ctx context.Context, t publishingTask) error {
 		switch t := t.(type) {
-		case *publication:
-			return p.unpublishFlavor(ctx, *t, steamroll)
+		case publication:
+			return p.unpublishFlavor(ctx, t, steamroll)
 
 		case *groupPublication:
 			return p.unpublishGroup(ctx, t)
@@ -148,25 +154,25 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 ) {
 	var tasks []publishingTask
 
-	for i := range publications {
-		if publications[i].PublishingGroup != "" {
+	for _, pub := range publications {
+		if pub.target.CanFuse() {
 			continue
 		}
 
-		isPublished, err := publications[i].Target.IsPublished(publications[i].Manifest)
+		isPublished, err := pub.target.IsPublished(pub.flavor.manifest, pub.destinationKey)
 		if err != nil {
-			return nil, fmt.Errorf("cannot determine publishing status for %s: %w", publications[i].Manifest.Flavor, err)
+			return nil, fmt.Errorf("cannot determine publishing status for %s: %w", pub.flavor.manifest.Flavor, err)
 		}
 		if !isPublished {
 			continue
 		}
 
-		if !publications[i].Reversible {
-			log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", publications[i].Manifest.Flavor)
+		if !pub.reversible {
+			log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", pub.flavor.manifest.Flavor)
 			continue
 		}
 
-		tasks = append(tasks, &publications[i])
+		tasks = append(tasks, pub)
 	}
 
 	for i := range groupPublications {
@@ -174,9 +180,10 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 			continue
 		}
 
-		if !groupPublications[i].publications[0].Reversible {
+		if !groupPublications[i].publications[0].reversible {
 			for j := range groupPublications[i].publications {
-				log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor", groupPublications[i].publications[j].Manifest.Flavor)
+				log.Info(ctx, "Skipping flavor that cannot be unpublished", "flavor",
+					groupPublications[i].publications[j].flavor.manifest.Flavor)
 			}
 			continue
 		}
@@ -191,34 +198,59 @@ func (*Publisher) classifyUnpublishTasks(ctx context.Context, publications []pub
 }
 
 func (p *Publisher) unpublishFlavor(ctx context.Context, pub publication, steamroll bool) error {
-	ctx = log.WithValues(ctx, "flavor", pub.Manifest.Flavor, "targetType", pub.Target.Type())
-	if pub.PublishingGroup != "" {
-		ctx = log.WithValues(ctx, "group", pub.PublishingGroup)
+	ctx = log.WithValues(ctx, "flavor", pub.flavor.manifest.Flavor, "targetType", pub.target.Type())
+	group := pub.publishingGroup()
+	if group != "" {
+		ctx = log.WithValues(ctx, "publishingGroup", group)
 	}
 
-	if pub.PublishingGroup != "" {
-		if steamroll && pub.Manifest.IndividualPublishedImageMetadata == nil {
-			log.Debug(ctx, "Flavor not published but the steamroller keeps going")
+	dest := pub.destination().String()
 
+	if pub.target.CanFuse() {
+		var published bool
+		func() {
+			pub.flavor.manifestMtx.Lock()
+			defer pub.flavor.manifestMtx.Unlock()
+
+			published = pub.flavor.manifest.IndividualPublishedImageMetadata[dest] != nil
+			if steamroll && !published {
+				return
+			}
+
+			if pub.flavor.manifest.PublishedImageMetadata == nil {
+				pub.flavor.manifest.PublishedImageMetadata = make(map[string]any)
+			}
+			pub.flavor.manifest.PublishedImageMetadata[dest] = pub.flavor.manifest.IndividualPublishedImageMetadata[dest]
+		}()
+		if steamroll && !published {
+			log.Debug(ctx, "Flavor not published but the steamroller keeps going")
 			return nil
 		}
-
-		pub.Manifest.PublishedImageMetadata = pub.Manifest.IndividualPublishedImageMetadata
 	}
 
 	log.Info(ctx, "Unpublishing flavor")
-	err := pub.Target.Unpublish(ctx, pub.Manifest, steamroll)
+	err := pub.target.Unpublish(ctx, pub.flavor.manifest, pub.destinationKey, steamroll)
 	if err != nil {
-		return fmt.Errorf("cannot unpublish %s from %s: %w", pub.Manifest.Flavor, pub.Target.Type(), err)
+		return fmt.Errorf("cannot unpublish %s from %s: %w", pub.flavor.manifest.Flavor, pub.target.Type(), err)
 	}
 
-	if pub.PublishingGroup == "" {
-		pub.Manifest.PublishedImageMetadata = nil
+	if !pub.target.CanFuse() {
+		err = func() error {
+			pub.flavor.manifestMtx.Lock()
+			defer pub.flavor.manifestMtx.Unlock()
 
-		log.Info(ctx, "Updating manifest")
-		err = cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
+			delete(pub.flavor.manifest.PublishedImageMetadata, dest)
+
+			log.Info(ctx, "Updating manifest")
+			inErr := cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.flavor.manifest)
+			if inErr != nil {
+				return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.flavor.manifest.Flavor, inErr))
+			}
+
+			return nil
+		}()
 		if err != nil {
-			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err))
+			return err
 		}
 	}
 
@@ -226,51 +258,76 @@ func (p *Publisher) unpublishFlavor(ctx context.Context, pub publication, steamr
 }
 
 func (p *Publisher) unpublishGroup(ctx context.Context, groupPub *groupPublication) error {
-	ctx = log.WithValues(ctx, "group", groupPub.Group, "targetType", groupPub.Target.Type())
+	ctx = log.WithValues(ctx, "publishingGroup", groupPub.group, "targetType", groupPub.target.Type())
 
 	for _, pub := range groupPub.publications {
-		pub.Manifest.PublishedImageMetadata = nil
-		pub.Manifest.IndividualPublishedImageMetadata = nil
+		dest := pub.destination().String()
 
-		log.Info(log.WithValues(ctx, "flavor", pub.Manifest.Flavor), "Updating manifest")
-		err := cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
+		err := func() error {
+			pub.flavor.manifestMtx.Lock()
+			defer pub.flavor.manifestMtx.Unlock()
+
+			delete(pub.flavor.manifest.PublishedImageMetadata, dest)
+			delete(pub.flavor.manifest.IndividualPublishedImageMetadata, dest)
+
+			log.Info(log.WithValues(ctx, "flavor", pub.flavor.manifest.Flavor), "Updating manifest")
+			inErr := cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.flavor.manifest)
+			if inErr != nil {
+				return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.flavor.manifest.Flavor, inErr))
+			}
+
+			return nil
+		}()
 		if err != nil {
-			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err))
+			return err
 		}
 	}
 
-	groupPub.GroupManifest.Manifests = nil
-	groupPub.GroupManifest.GLCIVersion = cli.Version(ctx)
+	groupPub.groupManifest.Manifests = nil
+	groupPub.groupManifest.GLCIVersion = cli.Version(ctx)
 
 	log.Info(ctx, "Updating group manifest")
-	err := cloudprovider.PutGroupManifest(ctx, p.manifestTarget, groupPub.manifestKey(), groupPub.GroupManifest)
+	err := cloudprovider.PutGroupManifest(ctx, p.manifestTarget, groupPub.manifestKey(), groupPub.groupManifest)
 	if err != nil {
-		return errorreport.MarkCritical(fmt.Errorf("cannot put group manifest for %s: %w", groupPub.Group, err))
+		return errorreport.MarkCritical(fmt.Errorf("cannot put group manifest for %s: %w", groupPub.group, err))
 	}
 
 	return nil
 }
 
 func (*Publisher) unfuseGroup(ctx context.Context, groupPub *groupPublication, steamroll bool) error {
-	ctx = log.WithValues(ctx, "group", groupPub.Group, "targetType", groupPub.Target.Type())
+	ctx = log.WithValues(ctx, "publishingGroup", groupPub.group, "targetType", groupPub.target.Type())
 
-	for _, pub := range groupPub.publications {
-		if steamroll && pub.Manifest.PublishedImageMetadata == nil {
-			log.Debug(ctx, "Group not fused but the steamroller keeps going")
+	manifests := groupPub.manifests
+	seen := make(map[string]struct{}, len(groupPub.publications))
+	for i := range groupPub.publications {
+		pub := groupPub.publications[i]
 
-			return nil
+		_, ok := seen[pub.destinationKey]
+		if ok {
+			continue
 		}
-	}
+		seen[pub.destinationKey] = struct{}{}
 
-	manifests := make([]*gardenlinux.Manifest, len(groupPub.publications))
-	for i, pub := range groupPub.publications {
-		manifests[i] = pub.Manifest
-	}
+		dest := pub.destination().String()
 
-	log.Info(ctx, "Unfusing group")
-	err := groupPub.Target.Unfuse(ctx, manifests, steamroll)
-	if err != nil {
-		return fmt.Errorf("cannot unfuse group %s from %s: %w", groupPub.Group, groupPub.Target.Type(), err)
+		var fused bool
+		func() {
+			pub.flavor.manifestMtx.Lock()
+			defer pub.flavor.manifestMtx.Unlock()
+
+			fused = pub.flavor.manifest.PublishedImageMetadata[dest] != nil
+		}()
+		if steamroll && !fused {
+			log.Debug(ctx, "Group not fused but the steamroller keeps going")
+			continue
+		}
+
+		log.Info(ctx, "Unfusing group")
+		err := groupPub.target.Unfuse(ctx, manifests, pub.destinationKey, steamroll)
+		if err != nil {
+			return fmt.Errorf("cannot unfuse group %s from %s: %w", groupPub.group, groupPub.target.Type(), err)
+		}
 	}
 
 	return nil

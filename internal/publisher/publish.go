@@ -47,33 +47,27 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		return fmt.Errorf("cannot roll back: %w", err)
 	}
 
-	var publications []publication
+	var flavors []*flavor
 	var groupPublications []groupPublication
-	publications, groupPublications, commit, err = p.fetchAllManifests(ctx, version, commit, false)
+	flavors, groupPublications, commit, err = p.assembleFlavors(ctx, version, commit)
 	if err != nil {
-		return fmt.Errorf("cannot fetch manifests: %w", err)
+		return fmt.Errorf("cannot assemble flavors: %w", err)
 	}
 
-	err = p.validateFlavors(publications)
-	if err != nil {
-		return fmt.Errorf("invalid flavors: %w", err)
+	var publications []publication
+	for _, f := range flavors {
+		publications = append(publications, f.publications...)
 	}
 
-	err = p.validateGroupDestinations(groupPublications)
+	err = p.validatePreconditions(flavors, groupPublications, false)
 	if err != nil {
-		return fmt.Errorf("invalid group destinations: %w", err)
+		return err
 	}
 
-	manifestsInDescriptor := make([]ocm.ManifestTarget, 0, len(publications))
-	for _, pub := range publications {
-		if !pub.InComponentDescriptor {
-			continue
-		}
-
-		manifestsInDescriptor = append(manifestsInDescriptor, ocm.ManifestTarget{
-			Manifest: pub.Manifest,
-			Target:   pub.Target,
-		})
+	var manifestsInDescriptor []ocm.ManifestDestination
+	manifestsInDescriptor, err = p.manifestsInDescriptor(publications)
+	if err != nil {
+		return fmt.Errorf("cannot determine component descriptor flavors: %w", err)
 	}
 
 	var descriptor *ocm.ComponentDescriptor
@@ -91,7 +85,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	dependencies := func(t publishingTask) ([]publishingTask, error) {
 		switch pub := t.(type) {
-		case *publication:
+		case publication:
 			return nil, nil
 
 		case *groupPublication:
@@ -109,8 +103,8 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 
 	run := func(ctx context.Context, t publishingTask) error {
 		switch pub := t.(type) {
-		case *publication:
-			return p.publishFlavor(ctx, *pub)
+		case publication:
+			return p.publishFlavor(ctx, pub)
 
 		case *groupPublication:
 			return p.publishGroup(ctx, pub)
@@ -155,7 +149,7 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 		log.Debug(ctx, "Finalizing component descriptor")
 		err = ocm.AddPublicationOutput(ctx, descriptor, manifestsInDescriptor)
 		if err != nil {
-			return fmt.Errorf("cannot add publication output to component descriptor: %w", err)
+			return fmt.Errorf("cannot add publishing output to component descriptor: %w", err)
 		}
 
 		var descriptorYAML []byte
@@ -176,29 +170,70 @@ func (p *Publisher) publish(ctx context.Context, version, commit string, omitIrr
 	return nil
 }
 
+func (p *Publisher) manifestsInDescriptor(publications []publication) ([]ocm.ManifestDestination, error) {
+	flavorPublications := make(map[string][]publication)
+	for _, pub := range publications {
+		f := pub.flavor.manifest.Flavor
+		flavorPublications[f] = append(flavorPublications[f], pub)
+	}
+
+	var manifestDestinations []ocm.ManifestDestination
+	for _, flavorCfg := range p.cfg.OCM.Flavors {
+		pubs := flavorPublications[flavorCfg.Flavor]
+
+		var selectedPublications []publication
+		if len(flavorCfg.Destinations) > 0 {
+			for _, dest := range flavorCfg.Destinations {
+				var found bool
+				for _, pub := range pubs {
+					if p.destinationMatches(pub.destination(), dest) {
+						selectedPublications = append(selectedPublications, pub)
+						found = true
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("flavor %q not published to destination %q", flavorCfg.Flavor, dest)
+				}
+			}
+		} else {
+			selectedPublications = pubs
+		}
+
+		for _, pub := range selectedPublications {
+			manifestDestinations = append(manifestDestinations, ocm.ManifestDestination{
+				Manifest: pub.flavor.manifest,
+				Target:   pub.target,
+				Key:      pub.destinationKey,
+			})
+		}
+	}
+
+	return manifestDestinations, nil
+}
+
 func (*Publisher) classifyPublishTasks(publications []publication, groupPublications []groupPublication) ([]publishingTask,
 	[]publishingTask, error,
 ) {
 	var reversibleTasks, irreversibleTasks []publishingTask
 
-	for i := range publications {
-		if publications[i].PublishingGroup != "" {
+	for _, pub := range publications {
+		if pub.target.CanFuse() {
 			continue
 		}
 
-		isPublished, err := publications[i].Target.IsPublished(publications[i].Manifest)
+		isPublished, err := pub.target.IsPublished(pub.flavor.manifest, pub.destinationKey)
 		if err != nil {
-			return nil, nil, fmt.Errorf("cannot determine publishing status for %s: %w", publications[i].Manifest.Flavor, err)
+			return nil, nil, fmt.Errorf("cannot determine publishing status for %s: %w", pub.flavor.manifest.Flavor, err)
 		}
 		if isPublished {
 			continue
 		}
 
 		tasks := &reversibleTasks
-		if !publications[i].Reversible {
+		if !pub.reversible {
 			tasks = &irreversibleTasks
 		}
-		*tasks = append(*tasks, &publications[i])
+		*tasks = append(*tasks, pub)
 	}
 
 	for i := range groupPublications {
@@ -207,7 +242,7 @@ func (*Publisher) classifyPublishTasks(publications []publication, groupPublicat
 		}
 
 		tasks := &reversibleTasks
-		if !groupPublications[i].publications[0].Reversible {
+		if !groupPublications[i].publications[0].reversible {
 			tasks = &irreversibleTasks
 		}
 		for j := range groupPublications[i].publications {
@@ -220,9 +255,10 @@ func (*Publisher) classifyPublishTasks(publications []publication, groupPublicat
 }
 
 func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
-	ctx = log.WithValues(ctx, "flavor", pub.Manifest.Flavor, "targetType", pub.Target.Type())
-	if pub.PublishingGroup != "" {
-		ctx = log.WithValues(ctx, "group", pub.PublishingGroup)
+	ctx = log.WithValues(ctx, "flavor", pub.flavor.manifest.Flavor, "targetType", pub.target.Type())
+	group := pub.publishingGroup()
+	if group != "" {
+		ctx = log.WithValues(ctx, "publishingGroup", group)
 	}
 
 	uptime := cli.ExecTime(ctx)
@@ -230,75 +266,119 @@ func (p *Publisher) publishFlavor(ctx context.Context, pub publication) error {
 		return errors.New("publishing taking too long, restart to resume")
 	}
 
-	batch := pub.Manifest.Flavor
-	if pub.PublishingGroup != "" {
-		batch = pub.PublishingGroup
+	batch := pub.flavor.manifest.Flavor
+	if group != "" {
+		batch = group
 	}
-	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, batch), true), pub.Target.RollbackDomain())
+	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, batch), true), pub.target.RollbackDomain())
 
-	pub.Manifest.PublishedImageMetadata = nil
-	pub.Manifest.IndividualPublishedImageMetadata = nil
+	dest := pub.destination().String()
+
+	func() {
+		pub.flavor.manifestMtx.Lock()
+		defer pub.flavor.manifestMtx.Unlock()
+
+		delete(pub.flavor.manifest.PublishedImageMetadata, dest)
+		delete(pub.flavor.manifest.IndividualPublishedImageMetadata, dest)
+	}()
 
 	log.Info(ctx, "Publishing flavor")
-	output, err := pub.Target.Publish(ctx, pub.Manifest.Flavor, pub.Manifest)
+	output, err := pub.target.Publish(ctx, pub.flavor.manifest.Flavor, pub.flavor.manifest, pub.destinationKey)
 	if err != nil {
-		return fmt.Errorf("cannot publish %s to %s: %w", pub.Manifest.Flavor, pub.Target.Type(), err)
+		return fmt.Errorf("cannot publish %s to %s: %w", pub.flavor.manifest.Flavor, pub.target.Type(), err)
 	}
 
-	if pub.PublishingGroup != "" {
-		pub.Manifest.IndividualPublishedImageMetadata = output
-	} else {
-		pub.Manifest.PublishedImageMetadata = output
-	}
+	err = func() error {
+		pub.flavor.manifestMtx.Lock()
+		defer pub.flavor.manifestMtx.Unlock()
 
-	if pub.PublishingGroup == "" {
-		log.Info(ctx, "Updating manifest")
-		resilience.RemoveCompletedOperations(ctx, pub.Manifest.Flavor)
-		err = cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.Manifest)
-		if err != nil {
-			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err))
+		if pub.target.CanFuse() {
+			if pub.flavor.manifest.IndividualPublishedImageMetadata == nil {
+				pub.flavor.manifest.IndividualPublishedImageMetadata = make(map[string]any)
+			}
+			pub.flavor.manifest.IndividualPublishedImageMetadata[dest] = output
+
+			return nil
 		}
+
+		if pub.flavor.manifest.PublishedImageMetadata == nil {
+			pub.flavor.manifest.PublishedImageMetadata = make(map[string]any)
+		}
+		pub.flavor.manifest.PublishedImageMetadata[dest] = output
+
+		log.Info(ctx, "Updating manifest")
+		resilience.RemoveCompletedOperations(ctx, pub.flavor.manifest.Flavor)
+		inErr := cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.flavor.manifest)
+		if inErr != nil {
+			return errorreport.MarkCritical(fmt.Errorf("cannot put manifest for %s: %w", pub.flavor.manifest.Flavor, inErr))
+		}
+
+		return nil
+	}()
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
 func (p *Publisher) publishGroup(ctx context.Context, groupPub *groupPublication) error {
-	ctx = log.WithValues(ctx, "group", groupPub.Group, "targetType", groupPub.Target.Type())
-	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, groupPub.Group), true),
-		groupPub.Target.RollbackDomain())
+	ctx = log.WithValues(ctx, "publishingGroup", groupPub.group, "targetType", groupPub.target.Type())
+	ctx = resilience.WithDomain(resilience.WithUndeadMode(resilience.WithBatch(ctx, groupPub.group), true),
+		groupPub.target.RollbackDomain())
 
-	log.Info(ctx, "Fusing group", "count", len(groupPub.publications))
-	output, err := groupPub.Target.Fuse(ctx, groupPub.manifests())
-	if err != nil {
-		return fmt.Errorf("cannot fuse group %s to %s: %w", groupPub.Group, groupPub.Target.Type(), err)
-	}
+	log.Info(ctx, "Fusing group", "count", len(groupPub.manifests))
 
-	manifestKeys := make([]string, len(groupPub.publications))
-	for i, pub := range groupPub.publications {
-		manifestKeys[i] = pub.manifestKey()
+	outputs := make(map[string]any, len(groupPub.publications))
+	for i := range groupPub.publications {
+		pub := groupPub.publications[i]
 
-		pub.Manifest.PublishedImageMetadata = output
+		output, ok := outputs[pub.destinationKey]
+		if !ok {
+			var err error
+			output, err = groupPub.target.Fuse(ctx, groupPub.manifests, pub.destinationKey)
+			if err != nil {
+				return fmt.Errorf("cannot fuse group %s to %s: %w", groupPub.group, groupPub.target.Type(), err)
+			}
 
-		log.Info(log.WithValues(ctx, "flavor", pub.Manifest.Flavor), "Updating manifest")
-		err = cloudprovider.PutManifest(ctx, p.manifestTarget, manifestKeys[i], pub.Manifest)
+			outputs[pub.destinationKey] = output
+		}
+
+		dest := pub.destination().String()
+		err := func() error {
+			pub.flavor.manifestMtx.Lock()
+			defer pub.flavor.manifestMtx.Unlock()
+
+			if pub.flavor.manifest.PublishedImageMetadata == nil {
+				pub.flavor.manifest.PublishedImageMetadata = make(map[string]any)
+			}
+			pub.flavor.manifest.PublishedImageMetadata[dest] = output
+
+			log.Info(log.WithValues(ctx, "flavor", pub.flavor.manifest.Flavor), "Updating manifest")
+			inErr := cloudprovider.PutManifest(ctx, p.manifestTarget, pub.manifestKey(), pub.flavor.manifest)
+			if inErr != nil {
+				return fmt.Errorf("cannot put manifest for %s: %w", pub.flavor.manifest.Flavor, inErr)
+			}
+
+			return nil
+		}()
 		if err != nil {
-			return fmt.Errorf("cannot put manifest for %s: %w", pub.Manifest.Flavor, err)
+			return err
 		}
 	}
 
-	groupPub.GroupManifest = &gardenlinux.GroupManifest{
-		Version:         groupPub.publications[0].Manifest.Version,
-		BuildCommittish: groupPub.publications[0].Manifest.BuildCommittish,
+	groupPub.groupManifest = &gardenlinux.GroupManifest{
+		Version:         groupPub.publications[0].flavor.manifest.Version,
+		BuildCommittish: groupPub.publications[0].flavor.manifest.BuildCommittish,
 		GLCIVersion:     cli.Version(ctx),
-		Manifests:       manifestKeys,
+		Manifests:       groupPub.manifestKeys,
 	}
 
 	log.Info(ctx, "Updating group manifest")
-	resilience.RemoveCompletedOperations(ctx, groupPub.Group)
-	err = cloudprovider.PutGroupManifest(ctx, p.manifestTarget, groupPub.manifestKey(), groupPub.GroupManifest)
+	resilience.RemoveCompletedOperations(ctx, groupPub.group)
+	err := cloudprovider.PutGroupManifest(ctx, p.manifestTarget, groupPub.manifestKey(), groupPub.groupManifest)
 	if err != nil {
-		return errorreport.MarkCritical(fmt.Errorf("cannot put group manifest for %s: %w", groupPub.Group, err))
+		return errorreport.MarkCritical(fmt.Errorf("cannot put group manifest for %s: %w", groupPub.group, err))
 	}
 
 	return nil

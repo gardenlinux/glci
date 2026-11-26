@@ -16,28 +16,22 @@
 
 # Garden Linux build variants to publish.
 flavors:
-  # Each flavor must match exactly one publishing target.
-  # Cloud publishing targets and Container select by the manifest platform, which must match the flavor prefix.
-  # RBSC selects by publishing group membership in its repositories map.
+  # Each flavor is published by the targets that select it, either by platform or publishing group membership.
+  # Omit destinations to publish to every destination that selects the flavor.
   - flavor: ali-gardener_prod-amd64
-    # Include this flavor's published image in the component descriptor. Defaults to false.
-    in_component_descriptor: true
   - flavor: aws-gardener_prod-amd64
-    in_component_descriptor: true
+    # A bare target name selects the flavor's destinations at that target.
+    destinations:
+      - AWS
   - flavor: azure-gardener_prod-amd64
-    in_component_descriptor: true
   - flavor: container-amd64
-    # Flavors in the same group are published together and share published image metadata.
-    publishing_group: example_container
   - flavor: container-arm64
-    publishing_group: example_container
   - flavor: gcp-gardener_prod-amd64
-    in_component_descriptor: true
   - flavor: gdch-gardener_prod-amd64
-    publishing_group: example_oci_artifact
-    in_component_descriptor: true
+    # Target/key selects one destination when a target has several.
+    destinations:
+      - RBSC/example_destination
   - flavor: openstack-gardener_prod-amd64
-    in_component_descriptor: true
 
 publishing:
 
@@ -216,27 +210,35 @@ publishing:
     # Container pushes OCI container images.
     - target: Container
       source: gardenlinux_upstream
-      # Each group must have a distinct repository within this publishing target.
-      repositories:
-        # Key matching a configured publishing group.
-        example_container:
-          # Destination repository.
-          repository: registry.example.com/example-container/gardenlinux
-          config: example-container-account
-          # Enable only when the registry and credentials support GLCI's deletion mechanism.
-          # False makes the group irreversible. Defaults to false.
-          allows_delete: false
+      # Publishing groups for this target, each with one or more destinations. A destination is one repository.
+      publishing_groups:
+        # Builder-supplied publishing group whose key matches the build-stamped publishing_group, with no flavors listed.
+        container:
+          destinations:
+            # Destination name, used as the key in published image metadata.
+            example_destination:
+              # Destination repository.
+              repository: registry.example.com/example-container/gardenlinux
+              config: example-container-account
+              # Enable only when the registry and credentials support GLCI's deletion mechanism.
+              # False makes the destination irreversible. Defaults to false.
+              allows_delete: false
 
     # RBSC pushes Garden Linux images packaged as OCI artifacts.
     - target: RBSC
       source: gardenlinux_upstream
-      repositories:
+      # Config-defined publishing group that lists its member flavors.
+      publishing_groups:
         example_oci_artifact:
-          repository: registry.example.com/example-rbsc/gardenlinux
-          config: example-oci-account
-          # Enable only when the registry and credentials support GLCI's deletion mechanism.
-          # False makes the group irreversible. Defaults to false.
-          allows_delete: false
+          flavors:
+            - gdch-gardener_prod-amd64
+          destinations:
+            example_destination:
+              repository: registry.example.com/example-rbsc/gardenlinux
+              config: example-oci-account
+              # Enable only when the registry and credentials support GLCI's deletion mechanism.
+              # False makes the destination irreversible. Defaults to false.
+              allows_delete: false
 
   # Required recovery state. Preserve it between attempts for the same release.
   state:
@@ -256,10 +258,25 @@ publishing:
     # Required. Repository of the released project, recorded as the component name and its git source.
     project_repository: github.com/example-org/example-project
     # Component provider recorded in the descriptor, such as an organization name.
-    provider: Example Oraginzation
+    provider: Example Organization
     # Optional. Email addresses recorded as responsible parties. Omit for none.
     responsibles:
     - someone@example.com
+    # Flavors whose published images are recorded in the descriptor. Omit a flavor to exclude it.
+    # Omit destinations to record every destination the flavor is published to.
+    flavors:
+      - flavor: ali-gardener_prod-amd64
+      - flavor: aws-gardener_prod-amd64
+        # A bare target name selects the flavor's destinations at that target.
+        destinations:
+          - AWS
+      - flavor: azure-gardener_prod-amd64
+      - flavor: gcp-gardener_prod-amd64
+      - flavor: gdch-gardener_prod-amd64
+        # Target/key selects one destination when a target has several.
+        destinations:
+          - RBSC/example_destination
+      - flavor: openstack-gardener_prod-amd64
     # File writes a local descriptor. Parent directory must already exist.
     target: File
     file: example-component-descriptor.yaml

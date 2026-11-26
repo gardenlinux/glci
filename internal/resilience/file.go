@@ -78,7 +78,7 @@ func (p *file) Clear() error {
 	return nil
 }
 
-func (*file) Configure(_ map[string]any) error {
+func (*file) Configure(map[string]any) error {
 	return nil
 }
 
@@ -86,10 +86,10 @@ func (*file) Configurables() []module.Configurable {
 	return nil
 }
 
-func (*file) Start(_ context.Context) error {
+func (*file) Start(context.Context) error {
 	return nil
 }
 
-func (*file) Stop(_ context.Context) error {
+func (*file) Stop(context.Context) error {
 	return nil
 }
